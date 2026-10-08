@@ -16,10 +16,15 @@ namespace dingosdk::overlay::detail {
 // Window messages do not cover the game's independently polled input devices.
 // Only the overlay's own Win32 backend and binding reader may bypass these gates.
 thread_local unsigned overlay_input_access = 0;
+// XInput buttons kept from the game (dingosdk::overlay::hide_game_buttons); ReSkate's own reads still see them.
+std::atomic<std::uint16_t> hidden_game_buttons{};
+std::atomic<bool> game_input_paused{};
+std::atomic<int> paused_wheel{};
 thread_local HRAWINPUT noted_raw_input = nullptr;
 bool block_polled_input() {
     const auto error = GetLastError();
-    const bool capture = !overlay_input_access && owns_menu_cursor(state());
+    // The menu owning the pointer, or game modes pausing the game's input (free-camera placing).
+    const bool capture = !overlay_input_access && (game_input_paused.load(std::memory_order_relaxed) || owns_menu_cursor(state()));
     SetLastError(error);
     return capture;
 }
@@ -84,6 +89,20 @@ UINT WINAPI captured_raw_data(HRAWINPUT input, UINT command, LPVOID data, PUINT 
             raw->data.keyboard.Message = WM_KEYUP;
         } else if (raw->header.dwType == RIM_TYPEHID && result >= offsetof(RAWINPUT, data) + 8)
             raw->data.hid.dwCount = 0;
+        // A PlayStation pad's reports as raw input: the D-pad is released while ReSkate keeps it.
+        if (!block_polled_input() && !overlay_input_access && raw->header.dwType == RIM_TYPEHID &&
+            (hidden_game_buttons.load(std::memory_order_relaxed) & 0x000f) && result >= offsetof(RAWINPUT, data) + 8) {
+            RID_DEVICE_INFO info{};
+            info.cbSize = sizeof(info);
+            UINT info_size = sizeof(info);
+            if (GetRawInputDeviceInfoW(raw->header.hDevice, RIDI_DEVICEINFO, &info, &info_size) != UINT(-1) &&
+                info.dwType == RIM_TYPEHID) {
+                const auto kind = playstation_pad(static_cast<std::uint16_t>(info.hid.dwVendorId), static_cast<std::uint16_t>(info.hid.dwProductId));
+                const auto each = raw->data.hid.dwSizeHid, reports = raw->data.hid.dwCount;
+                if (kind != PlayStationPad::none && each && result >= offsetof(RAWINPUT, data) + 8 + each * reports)
+                    for (DWORD i = 0; i < reports; ++i) release_playstation_dpad(kind, raw->data.hid.bRawData + i * each, each);
+            }
+        }
     }
     return result;
 }
@@ -314,6 +333,10 @@ DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
         // The game must notice a neutral state even if the physical packet did
         // not change between opening the menu and its next controller poll.
         output->dwPacketNumber ^= 0x80000000u;
+    } else if (result == ERROR_SUCCESS && output && !overlay_input_access) {
+        // Buttons ReSkate is using for itself right now (game modes' placing): the game never sees them.
+        output->Gamepad.wButtons &= static_cast<WORD>(~hidden_game_buttons.load(std::memory_order_relaxed));
+        hide_sticks(output->Gamepad);
     }
     return result;
 }
@@ -322,6 +345,11 @@ DWORD WINAPI captured_keystroke(DWORD user, DWORD reserved, PXINPUT_KEYSTROKE ou
     const auto result = original<DWORD(WINAPI*)(DWORD, DWORD, PXINPUT_KEYSTROKE)>(
         input_hooks().xinput_keystroke[I])(user, reserved, output);
     if (result == ERROR_SUCCESS && output && block_polled_input()) { *output = {}; return ERROR_EMPTY; }
+    if (result == ERROR_SUCCESS && output && !overlay_input_access) {
+        const auto hidden = hidden_game_buttons.load(std::memory_order_relaxed);
+        const bool dpad = output->VirtualKey >= VK_PAD_DPAD_UP && output->VirtualKey <= VK_PAD_DPAD_RIGHT;
+        if (dpad && (hidden & (1u << (output->VirtualKey - VK_PAD_DPAD_UP)))) { *output = {}; return ERROR_EMPTY; }
+    }
     return result;
 }
 
@@ -344,6 +372,21 @@ template<std::size_t I>
 HRESULT STDMETHODCALLTYPE captured_device_state(void* device, DWORD size, LPVOID data) {
     const auto result = original<HRESULT(STDMETHODCALLTYPE*)(void*, DWORD, LPVOID)>(
         input_hooks().device_state[I])(device, size, data);
+    if (SUCCEEDED(result) && data && !block_polled_input() && !overlay_input_access &&
+        (hidden_game_buttons.load(std::memory_order_relaxed) & 0x000f)) {
+        // A pad read through DirectInput: its D-pad is a POV hat, centred while ReSkate keeps it.
+        std::lock_guard lock(input_hooks().formats_mutex);
+        const auto found = input_hooks().formats.find(device);
+        if (found != input_hooks().formats.end() && found->second.size == size) {
+            const DWORD centred = 0xffffffffu;
+            for (const auto& object : found->second.objects)
+                if ((object.dwType & DIDFT_POV) && object.dwOfs <= size && size - object.dwOfs >= 4)
+                    std::memcpy(static_cast<std::byte*>(data) + object.dwOfs, &centred, 4);
+        } else if (size == sizeof(DIJOYSTATE) || size == sizeof(DIJOYSTATE2)) {
+            auto* joystick = static_cast<DIJOYSTATE*>(data); // DIJOYSTATE2 starts the same way
+            for (auto& pov : joystick->rgdwPOV) pov = 0xffffffffu;
+        }
+    }
     if (SUCCEEDED(result) && data && block_polled_input()) {
         std::memset(data, 0, size);
         std::lock_guard lock(input_hooks().formats_mutex);
@@ -373,6 +416,27 @@ HRESULT STDMETHODCALLTYPE captured_device_data(void* device, DWORD size, LPDIDEV
     const auto result = original<HRESULT(STDMETHODCALLTYPE*)(void*, DWORD, LPDIDEVICEOBJECTDATA, LPDWORD, DWORD)>(
         input_hooks().device_data[I])(device, size, data, count, capture ? flags & ~DIGDD_PEEK : flags);
     if (SUCCEEDED(result) && capture && count) *count = 0;
+    if (SUCCEEDED(result) && !capture && !overlay_input_access && count && data && *count &&
+        (hidden_game_buttons.load(std::memory_order_relaxed) & 0x000f) && size >= sizeof(DIDEVICEOBJECTDATA_DX3)) {
+        // Buffered DirectInput: POV hat changes are dropped while ReSkate keeps the D-pad.
+        std::vector<DWORD> povs;
+        {
+            std::lock_guard lock(input_hooks().formats_mutex);
+            if (const auto found = input_hooks().formats.find(device); found != input_hooks().formats.end())
+                for (const auto& object : found->second.objects)
+                    if (object.dwType & DIDFT_POV) povs.push_back(object.dwOfs);
+        }
+        if (povs.empty()) for (DWORD i = 0; i < 4; ++i) povs.push_back(DIJOFS_POV(i));
+        auto* bytes = reinterpret_cast<std::byte*>(data);
+        DWORD kept = 0;
+        for (DWORD i = 0; i < *count; ++i) {
+            const auto* item = reinterpret_cast<const DIDEVICEOBJECTDATA*>(bytes + i * size);
+            if (std::find(povs.begin(), povs.end(), item->dwOfs) != povs.end()) continue;
+            if (kept != i) std::memmove(bytes + kept * size, bytes + i * size, size);
+            ++kept;
+        }
+        *count = kept;
+    }
     return result;
 }
 bool install_device_capture(void* device) {
@@ -576,7 +640,18 @@ bool install_input_capture() {
             reinterpret_cast<void*>(captured_direct_create))) return false;
     }
     dingosdk::logging::write(dingosdk::logging::Level::info, dingosdk::logging::Channel::input, "Menu input capture installed: keyboard, raw input, XInput, DirectInput and cursor ownership.");
+    (void)install_playstation_filter(); // optional: only game modes' placing relies on it
     return true;
 }
 
 }
+
+namespace dingosdk::overlay {
+void hide_game_buttons(std::uint16_t buttons) noexcept { detail::hidden_game_buttons.store(buttons, std::memory_order_relaxed); }
+void pause_game_input(bool paused) noexcept { detail::game_input_paused.store(paused, std::memory_order_relaxed); }
+int take_mouse_wheel() noexcept { return detail::paused_wheel.exchange(0, std::memory_order_relaxed); }
+bool key_down(int virtual_key) noexcept {
+    detail::OverlayInputAccess access;
+    return (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
+}
+} // namespace dingosdk::overlay

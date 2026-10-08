@@ -269,6 +269,16 @@ void draw_game_text();
 // ReSkate's S.K.A.T.E. throwdown HUD (skate_hud_overlay.cpp): polled every presented frame.
 bool skate_hud_pending();
 void draw_skate_hud();
+// ReSkate's game modes HUD (modes_hud_overlay.cpp): polled every presented frame.
+bool modes_hud_pending();
+void draw_modes_hud();
+// The Bone Cam (bone_cam_overlay.cpp): its bone sprites go into the ImGui atlas like the chat
+// emotes (decode early, reserve before the atlas is built, fill after); polled every frame.
+void start_bone_sprites();
+std::size_t reserve_bone_sprites(ImFontAtlas &, std::chrono::milliseconds wait) noexcept;
+void fill_bone_sprites(ImFontAtlas &) noexcept;
+bool bone_cam_pending();
+void draw_bone_cam();
 // ReSkate's nametags (nametag_overlay.cpp): polled every presented frame.
 bool nametags_pending();
 void draw_nametags();

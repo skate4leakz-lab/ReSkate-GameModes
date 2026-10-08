@@ -9,6 +9,7 @@
 #include "Extension/Multiplayer/Hud/follow_camera.h"
 #include "Extension/Throwdowns/native_throwdowns.h"
 #include "Extension/Throwdowns/throwdown_relay.h"
+#include "Extension/Modes/game_modes.h"
 #include "Extension/Progression/script_natives.h"
 #include "Extension/Multiplayer/Steam/steam_social.h"
 #include "Extension/Profile/local_profile_runtime.h"
@@ -352,10 +353,21 @@ void relay_throwdowns(Session &s, bool in_world) {
     }
     if (names)
         input.local_name = in_session ? s.transport.name(local) : std::string(steam_social_snapshot()->local.name);
-    for (const auto &[sender, message] : s.throwdown_inbox) receive_throwdown_relay(sender, message);
+    // Game modes (Extension/Modes) share the channel, told apart by their first byte.
+    for (const auto &[sender, message] : s.throwdown_inbox)
+        if (!modes::receive(sender, message)) receive_throwdown_relay(sender, message);
     s.throwdown_inbox.clear();
     for (auto &message : tick_throwdown_relay(s.base, input)) send_throwdown(s, std::move(message));
     for (auto &text : take_throwdown_relay_notices()) add_chat(s, 0, "ReSkate", std::move(text));
+    modes::SessionInput game;
+    game.local = input.local;
+    game.local_name = input.local_name;
+    game.in_world = in_world;
+    game.world = input.world;
+    game.barred = input.barred;
+    for (const auto &peer : input.peers) game.peers.push_back({peer.id, peer.name});
+    for (auto &message : modes::tick(game)) send_throwdown(s, std::move(message));
+    for (auto &text : modes::take_notices()) add_chat(s, 0, "ReSkate", std::move(text));
 }
 // A player in the local coop celebration stands at their spot there: the whole pose moves,
 // the board's rig anchor with it (offset_pose), or their board stays in the local player's hands.

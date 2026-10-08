@@ -1,4 +1,5 @@
 #include "playstation_input.h"
+#include "input_capture.h"
 #include "Engine/Core/Log/logging.h"
 #include <Windows.h>
 #include <cfgmgr32.h>
@@ -68,8 +69,12 @@ std::vector<std::wstring> sony_hid_paths() {
 std::unique_ptr<Pad> open_pad(const std::wstring& path) {
     auto pad = std::make_unique<Pad>();
     pad->path = path;
-    pad->file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-        OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+    {
+        // ReSkate's own handle: the report filter for the game's reads leaves it alone.
+        OverlayInputAccess access;
+        pad->file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+    }
     if (pad->file == INVALID_HANDLE_VALUE) return {}; // hidden, or held exclusively by DS4Windows and similar
     HIDD_ATTRIBUTES attributes{sizeof(attributes)};
     if (!HidD_GetAttributes(pad->file, &attributes)) return {};
@@ -96,6 +101,7 @@ std::unique_ptr<Pad> open_pad(const std::wstring& path) {
 // Drains every queued report so the newest one wins. Returns false once the
 // device is gone.
 bool drain(Pad& pad) {
+    OverlayInputAccess access; // ReSkate's own reads: the game's report filter leaves them alone
     for (int reports = 0; reports < 256; ++reports) {
         if (!pad.pending) {
             ResetEvent(pad.event);

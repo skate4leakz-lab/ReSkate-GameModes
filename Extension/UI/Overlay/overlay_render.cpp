@@ -287,8 +287,13 @@ bool setup_graphics() {
     // normally long finished by the time the first frame gets here.
     // Emotes reserve their room before the park previews build the atlas, and fill it after.
     const auto emote_count = reserve_chat_emotes(*ImGui::GetIO().Fonts, std::chrono::seconds(5));
+    const auto bone_count = reserve_bone_sprites(*ImGui::GetIO().Fonts, std::chrono::seconds(5));
     const auto preview_count = load_park_previews(*ImGui::GetIO().Fonts, std::chrono::seconds(5));
     fill_chat_emotes(*ImGui::GetIO().Fonts);
+    fill_bone_sprites(*ImGui::GetIO().Fonts);
+    if (!bone_count)
+        dingosdk::logging::write(dingosdk::logging::Level::warning, dingosdk::logging::Channel::graphics,
+            "Bone Cam sprites unavailable; the Bone Cam shows its injuries without the skeleton.");
     if (emote_count)
         dingosdk::logging::printf(dingosdk::logging::Level::info, dingosdk::logging::Channel::graphics,
             "Chat emotes: %zu ready.", emote_count);
@@ -452,6 +457,7 @@ void render(IDXGISwapChain* presented, UINT flags) {
     const bool chat_frame = chat_pending();
     const bool game_text_frame = game_text_pending();
     const bool skate_hud_frame = skate_hud_pending();
+    const bool modes_hud_frame = modes_hud_pending() | bone_cam_pending();
     const bool nametag_frame = nametags_pending();
     const bool perf_frame = perf_hud_pending() || trainer_hud_pending();
     if (trainer_open_requested()) s.visible.store(true);
@@ -471,7 +477,7 @@ void render(IDXGISwapChain* presented, UINT flags) {
         }
         // Hidden, the overlay still draws while a notice or chat line is on screen.
         if (s.loaded_notice_posted && !notices_pending() && !chat_frame && !game_text_frame && !skate_hud_frame &&
-            !nametag_frame && !perf_frame) return;
+            !modes_hud_frame && !nametag_frame && !perf_frame) return;
     } else if (!s.ui_was_interactive) {
         s.ui_was_interactive = true;
         s.last_model = {}; // Reopening immediately reads fresh state.
@@ -520,6 +526,8 @@ void render(IDXGISwapChain* presented, UINT flags) {
     draw_nametags();
     draw_game_text();
     draw_skate_hud();
+    draw_bone_cam();
+    draw_modes_hud();
     draw_perf_hud();
     draw_trainer_hud();
     draw_notices();

@@ -25,6 +25,19 @@ JumpScaleResult take_jump_scale_result() noexcept;
 // rolling skater that is not braking gains speed up to it (m/s). Publish every client tick: it
 // expires after 500 ms.
 void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, float stock, float cruise) noexcept;
+// Hall of Meat bounce, Skate 3 style: while the local skater is in a ragdoll wipeout (physics
+// states 300-399), each time the body hits something and stops falling it is sent back up with
+// `restitution` of the speed it hit with (a little less each bounce in the same bail). 0 is off.
+// Publish every tick (game modes): it expires after 500 ms.
+void set_bail_bounce(float restitution) noexcept;
+// The skater the bounce acts on, from the trainer's client tick (as set_push_speed).
+void set_bail_bounce_skater(std::uintptr_t client, std::uintptr_t entity) noexcept;
+// Bounces given since the last call, and the hardest hit they answered (m/s), for the log.
+struct BailBounces {
+    int count{};
+    float hardest{};
+};
+BailBounces take_bail_bounces() noexcept;
 // Engine-thread-only interactive controls. Presentation callbacks only queue requests.
 overlay::DebugModel on_client_debug_tick(std::uintptr_t base, std::uintptr_t client,
     bool can_control, bool camera_phase_observed, const overlay::DebugRequest* request = nullptr,

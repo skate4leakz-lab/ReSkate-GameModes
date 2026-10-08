@@ -56,6 +56,12 @@ namespace dingosdk::mods {
 ScoringState simulated_scoring{true, 0, {}};
 ScoringState scoring_state() noexcept { return simulated_scoring; }
 }
+namespace dingosdk::modes {
+// Game modes need the game; their messages are opaque throwdown traffic to the session.
+std::vector<std::vector<std::uint8_t>> tick(const SessionInput &) { return {}; }
+bool receive(std::uint64_t, std::span<const std::uint8_t>) { return false; }
+std::vector<std::string> take_notices() { return {}; }
+}
 namespace dingosdk::physics_tuning {
 void prepare() noexcept {}
 std::optional<Encoded> local_differences(std::uintptr_t, std::size_t) { return {}; }

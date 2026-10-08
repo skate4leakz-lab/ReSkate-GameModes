@@ -303,12 +303,81 @@ void trainer_push_speed(std::uintptr_t core) noexcept {
         }
     } catch (...) {}
 }
+// Hall of Meat bounce (set_bail_bounce). During a ragdoll wipeout the 26 skeleton bodies fall
+// and tumble on their own. Each physics step their average vertical speed is compared with the
+// last: falling at 3 m/s or more and then losing most of it in one step is a hit, and every
+// skeleton body is sent back up with `restitution` of the hit's speed (capped at 11 m/s, each
+// further bounce in the same wipeout weaker, at most five, 120 ms apart). The board is left alone.
+struct BailBounce {
+    std::atomic<float> restitution{};
+    std::atomic<ULONGLONG> expires{};
+    std::atomic<std::uintptr_t> client{}, entity{};
+    std::atomic<int> given{};
+    std::atomic<float> hardest{};
+    // Physics thread only.
+    float falling{};
+    int bounces{};
+    ULONGLONG last{};
+};
+BailBounce& bail_bounce() { static auto* value = new BailBounce; return *value; }
+void apply_bail_bounce(std::uintptr_t core) noexcept {
+    auto& b = bail_bounce();
+    const float restitution = b.restitution.load(std::memory_order_relaxed);
+    const auto now = GetTickCount64();
+    const auto watch = watched_physics_state();
+    const bool ragdoll = watch.valid && watch.state >= 300 && watch.state < 400;
+    if (!ragdoll || restitution <= 0 || now >= b.expires.load(std::memory_order_acquire)) {
+        b.falling = 0;
+        b.bounces = 0;
+        return;
+    }
+    SourceLastError error;
+    auto& state = source_state();
+    if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) return;
+    SourceBusyScope scope{state.busy};
+    try {
+        const auto bodies = debug_noclip_bodies(state.trial.base, b.client.load(), b.entity.load());
+        if (bodies.core != core || bodies.seconds == 0) return;
+        SourceReader reader;
+        constexpr std::size_t first = 9; // after the board's nine bodies: the skeleton's velocity parts
+        std::array<std::array<float, 3>, 32> velocities{};
+        std::array<std::uint32_t, 32> flags{};
+        const auto count = std::min<std::size_t>(bodies.parts.size(), velocities.size());
+        float sum = 0;
+        for (std::size_t i = first; i < count; ++i) {
+            velocities[i] = reader.value<std::array<float, 3>>(bodies.parts[i], 0x70);
+            flags[i] = reader.value<std::uint32_t>(bodies.parts[i], 0x60);
+            sum += velocities[i][1];
+        }
+        reader.verify();
+        const float vertical = sum / static_cast<float>(count - first), previous = b.falling;
+        b.falling = vertical;
+        // A hit: falling fast last step, most of it gone now.
+        if (!(previous <= -3.0f) || vertical < previous * 0.4f || b.bounces >= 5 || now - b.last < 120) return;
+        const float up = std::min(11.0f, -previous * restitution * std::pow(0.7f, static_cast<float>(b.bounces)));
+        if (up < 1.0f) return;
+        ++b.bounces;
+        b.last = now;
+        b.falling = 0;
+        for (std::size_t i = first; i < count; ++i) {
+            velocities[i][1] = std::max(velocities[i][1], up);
+            // Some of the speed along the ground goes too, as a body skips off concrete.
+            velocities[i][0] *= 0.85f;
+            velocities[i][2] *= 0.85f;
+            body_write(bodies.parts[i] + 0x70, velocities[i]);
+            body_write(bodies.parts[i] + 0x60, flags[i] | 8u);
+        }
+        b.given.fetch_add(1, std::memory_order_relaxed);
+        if (-previous > b.hardest.load(std::memory_order_relaxed)) b.hardest.store(-previous, std::memory_order_relaxed);
+    } catch (...) {}
+}
 void noclip_physics_update(std::uintptr_t core) {
     const auto original = source_state().velocity_update_original.load(std::memory_order_acquire);
     if (original) original(core);
     noclip_apply_velocity(core);
     trainer_apply_jump_scale(core);
     trainer_push_speed(core);
+    apply_bail_bounce(core);
 }
 bool noclip_motion_target(std::uintptr_t rig, std::uintptr_t context,
     const std::array<float,16>* supplied, std::array<float,16>& target) noexcept {
@@ -388,6 +457,20 @@ bool queue_jump_scale(std::uintptr_t client, std::uintptr_t entity, float factor
         j.pending.store(true, std::memory_order_release);
         return true;
     } catch (...) { return false; }
+}
+void set_bail_bounce(float restitution) noexcept {
+    auto& b = bail_bounce();
+    b.restitution.store(std::isfinite(restitution) ? std::clamp(restitution, 0.0f, 1.5f) : 0.0f, std::memory_order_relaxed);
+    b.expires.store(GetTickCount64() + 500, std::memory_order_release);
+}
+void set_bail_bounce_skater(std::uintptr_t client, std::uintptr_t entity) noexcept {
+    auto& b = bail_bounce();
+    b.client.store(client);
+    b.entity.store(entity);
+}
+BailBounces take_bail_bounces() noexcept {
+    auto& b = bail_bounce();
+    return {b.given.exchange(0), b.hardest.exchange(0)};
 }
 void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, float stock, float cruise) noexcept {
     auto& p = push_speed();

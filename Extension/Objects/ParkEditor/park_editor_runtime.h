@@ -25,6 +25,16 @@ bool queue_local_park_preview(const EditorPreviewRequest &);
 bool queue_local_park_selection(const EditorSelectionRequest &);
 bool queue_local_park_paste(const EditorPasteRequest &);
 void tick_local_park_editor() noexcept;
+// Rays into the game's collision for code outside the editor (game modes' placing). Queued from
+// any thread under an id (a newer ray replaces an id's older one), cast on the next client update
+// with the editor's own surface query; the answer stays under that id until replaced.
+struct WorldRayHit {
+    bool cast{}, hit{};
+    std::array<float, 3> at{};
+    std::uint64_t when{}; // GetTickCount64 of the cast
+};
+void queue_world_ray(std::uint32_t id, const std::array<float, 3> &origin, const std::array<float, 3> &direction, float length);
+WorldRayHit world_ray(std::uint32_t id);
 // Invoked through the console's verified game-thread dispatcher. `texts`
 // carries a park mod's name, author, version and description (mod-create:
 // all four; mod-details: the same after the folder in `argument`).

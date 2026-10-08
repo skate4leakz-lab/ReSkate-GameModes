@@ -1438,6 +1438,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
         // pushing speed, which only gates whether a push may start).
         const auto *top_speed = find_entry("physicspush.maxpushablespeed");
         set_push_speed(client, s.entity, 1.0f, top_speed ? static_cast<float>(top_speed->stock) : 0.0f, s.boosts.cruise);
+        set_bail_bounce_skater(client, s.entity); // game modes' Hall of Meat bounce acts on the same skater
         for (TrickLaunch launch; take_trick_launch(launch);)
             if (launch.factor != 1.0f)
                 say(logging::Level::info, std::format("Trainer trick: {} launched at {:.2f} m/s up, x{:.2f}.",

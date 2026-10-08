@@ -5,6 +5,8 @@
 #include "Engine/Core/Profiling/profiler.h"
 #include "Extension/Settings/engine_tweaks.h"
 #include "Extension/UI/ui_pointer_skip.h"
+#include "Extension/Modes/game_modes.h"
+#include "Extension/Modes/bone_cam.h"
 #include "Engine/Game/Build/addresses.h"
 #include "Engine/Game/Build/20260929/profiler_labels.h"
 #include "Engine/Game/Build/supported_build.h"
@@ -189,6 +191,9 @@ extern "C" __declspec(dllexport) BOOL WINAPI DingoSDKDebugInitialize() {
         dingosdk::overlay::set_chat_feed(dingosdk::multiplayer::chat);
         dingosdk::overlay::set_game_text_feed(dingosdk::multiplayer::skate_debug_text);
         dingosdk::overlay::set_skate_hud_feed(dingosdk::multiplayer::skate_hud);
+        dingosdk::overlay::set_modes_hud_feed(dingosdk::modes::hud);
+        dingosdk::overlay::set_modes_menu_feed(dingosdk::modes::menu_view);
+        dingosdk::overlay::set_bone_cam_feed(dingosdk::modes::bone_cam);
         dingosdk::overlay::set_nametag_feed(dingosdk::multiplayer::custom_nametags);
         // Engine functions the profiler's stack sampler names in its reports.
         static constexpr dingosdk::profiler::Label engine_labels[]{

@@ -48,6 +48,10 @@ add_library(dingosdk_runtime SHARED
     Extension/Throwdowns/skate_trick_rule.cpp
     Extension/Throwdowns/graph_throttle.cpp
     Extension/Throwdowns/throwdown_wire.cpp
+    Extension/Modes/mode_rules.cpp
+    Extension/Modes/game_modes.cpp
+    Extension/Modes/console_commands.cpp
+    Extension/Modes/bone_cam.cpp
     Extension/Multiplayer/Hud/native_indicators.cpp
     Extension/Multiplayer/Steam/steam_transport.cpp
     Extension/Multiplayer/Steam/steam_social.cpp
@@ -197,6 +201,14 @@ file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/menu_fonts.rc"
     "FONT_BODY RCDATA \"${dingosdk_menu_fonts}/Montserrat-SemiBold.ttf\"\n"
     "FONT_BRUSH RCDATA \"${dingosdk_menu_fonts}/PermanentMarker-Regular.ttf\"\n")
 target_sources(dingosdk_runtime PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/menu_fonts.rc")
+
+# The Bone Cam's X-ray bone sprites (Extension/Modes/bone_sprites.h describes them; the skeleton is
+# a public-domain illustration by Mikael Häggström and LadyofHats, Wikimedia Commons).
+file(TO_NATIVE_PATH "${PROJECT_SOURCE_DIR}/Extension/Modes/Assets/bones.png" dingosdk_bone_atlas_native)
+string(REPLACE "\\" "\\\\" dingosdk_bone_atlas_native "${dingosdk_bone_atlas_native}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/bone_cam.rc" "BONE_ATLAS RCDATA \"${dingosdk_bone_atlas_native}\"\n")
+target_sources(dingosdk_runtime PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/bone_cam.rc")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/Extension/Modes/Assets/bones.png")
 
 # The startup window's picture (PNG or JPEG), built into ReSkate.dll when the
 # repository has one. ReSkate.Splash.png/.jpg beside the DLL still takes

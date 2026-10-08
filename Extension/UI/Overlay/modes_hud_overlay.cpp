@@ -1,0 +1,741 @@
+#include "overlay_internal.h"
+#include "Extension/UI/skate_theme.h"
+#include <cmath>
+#include <format>
+#include <optional>
+#include <span>
+
+// ReSkate's game modes HUD (Extension/Modes/game_modes.h). Over the world: the area the
+// leader marked out as a fence, checkpoints and spots as rings (the next checkpoint with a
+// beam, spots in their holder's colour) and Graffiti's zones painted in their taggers'
+// colours. On screen: the scoreboard on the right, the clock, the latest callout at the top,
+// the countdown in the middle and the local player's line at the bottom.
+// Background draw list, under ReSkate's own menus and chat; it takes no input.
+
+namespace dingosdk::overlay {
+namespace {
+std::atomic<ModesHudFeed> modes_hud_feed{};
+}
+void set_modes_hud_feed(ModesHudFeed feed) noexcept { modes_hud_feed.store(feed); }
+} // namespace dingosdk::overlay
+
+using namespace dingosdk::overlay::detail;
+namespace dingosdk::overlay::detail {
+namespace {
+namespace theme = dingosdk::skate_theme;
+using Clock = std::chrono::steady_clock;
+using Vec3 = std::array<float, 3>;
+
+struct HudState {
+    ModesHud hud;
+    std::uint64_t banner_serial{};
+    Clock::time_point banner_at{};
+};
+HudState &hud_state() {
+    static HudState value;
+    return value;
+}
+ImU32 with_alpha(ImU32 colour, float alpha) {
+    const auto a = static_cast<unsigned>(((colour >> IM_COL32_A_SHIFT) & 0xff) * std::clamp(alpha, 0.0f, 1.0f));
+    return (colour & ~IM_COL32_A_MASK) | (a << IM_COL32_A_SHIFT);
+}
+float seconds_since(Clock::time_point at) { return std::chrono::duration<float>(Clock::now() - at).count(); }
+void shadowed(ImDrawList *draw, ImFont *font, float size, ImVec2 at, ImU32 colour, const std::string &text) {
+    const float offset = std::max(1.0f, size / 16.0f);
+    const auto alpha = static_cast<float>((colour >> IM_COL32_A_SHIFT) & 0xff) / 255.0f;
+    draw->AddText(font, size, ImVec2(at.x + offset, at.y + offset), with_alpha(IM_COL32(0, 0, 0, 255), alpha * 0.7f),
+                  text.c_str());
+    draw->AddText(font, size, at, colour, text.c_str());
+}
+void centred(ImDrawList *draw, ImFont *font, float size, float x, float y, ImU32 colour, const std::string &text) {
+    const auto extent = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str());
+    shadowed(draw, font, size, ImVec2(x - extent.x * 0.5f, y), colour, text);
+}
+
+// The camera, as the nametags place things: points in its space, then on screen.
+struct Camera {
+    Vec3 right{}, up{}, back{}, origin{};
+    float focal{};
+    ImVec2 centre{};
+    struct Point {
+        float side{}, height{}, depth{};
+    };
+    Point view(const Vec3 &p) const {
+        const Vec3 d{p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]};
+        const auto dot = [&](const Vec3 &a) { return d[0] * a[0] + d[1] * a[1] + d[2] * a[2]; };
+        return {dot(right), dot(up), -dot(back)};
+    }
+    ImVec2 screen(const Point &p) const {
+        return ImVec2(centre.x + p.side * focal / p.depth, centre.y - p.height * focal / p.depth);
+    }
+    std::optional<ImVec2> project(const Vec3 &p) const {
+        const auto v = view(p);
+        if (v.depth <= near_plane) return std::nullopt;
+        return screen(v);
+    }
+    // A segment cut at the near_plane plane: nothing when it is wholly behind the camera.
+    bool segment(const Vec3 &a, const Vec3 &b, ImVec2 &sa, ImVec2 &sb) const {
+        auto va = view(a), vb = view(b);
+        if (va.depth <= near_plane && vb.depth <= near_plane) return false;
+        const auto cut = [&](Point &behind, const Point &front) {
+            const float t = (near_plane - behind.depth) / (front.depth - behind.depth);
+            behind = {behind.side + (front.side - behind.side) * t, behind.height + (front.height - behind.height) * t, near_plane};
+        };
+        if (va.depth <= near_plane) cut(va, vb);
+        else if (vb.depth <= near_plane) cut(vb, va);
+        sa = screen(va);
+        sb = screen(vb);
+        return true;
+    }
+    float distance(const Vec3 &p) const {
+        const float dx = p[0] - origin[0], dy = p[1] - origin[1], dz = p[2] - origin[2];
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    static constexpr float near_plane = 0.2f;
+};
+
+void line3(ImDrawList *draw, const Camera &cam, const Vec3 &a, const Vec3 &b, ImU32 colour, float thickness) {
+    ImVec2 sa, sb;
+    if (cam.segment(a, b, sa, sb)) draw->AddLine(sa, sb, colour, thickness);
+}
+void ring(ImDrawList *draw, const Camera &cam, const Vec3 &centre, float radius, ImU32 colour, float thickness) {
+    constexpr int steps = 28;
+    for (int i = 0; i < steps; ++i) {
+        const float a0 = 6.2831853f * i / steps, a1 = 6.2831853f * (i + 1) / steps;
+        line3(draw, cam, {centre[0] + std::cos(a0) * radius, centre[1] + 0.15f, centre[2] + std::sin(a0) * radius},
+              {centre[0] + std::cos(a1) * radius, centre[1] + 0.15f, centre[2] + std::sin(a1) * radius}, colour, thickness);
+    }
+}
+void filled_ring(ImDrawList *draw, const Camera &cam, const Vec3 &centre, float radius, ImU32 colour) {
+    constexpr int steps = 28;
+    const auto middle = cam.project({centre[0], centre[1] + 0.12f, centre[2]});
+    if (!middle) return;
+    for (int i = 0; i < steps; ++i) {
+        const float a0 = 6.2831853f * i / steps, a1 = 6.2831853f * (i + 1) / steps;
+        const auto p0 = cam.project({centre[0] + std::cos(a0) * radius, centre[1] + 0.12f, centre[2] + std::sin(a0) * radius});
+        const auto p1 = cam.project({centre[0] + std::cos(a1) * radius, centre[1] + 0.12f, centre[2] + std::sin(a1) * radius});
+        if (p0 && p1) draw->AddTriangleFilled(*middle, *p0, *p1, colour);
+    }
+}
+
+constexpr ImU32 placing_colour = IM_COL32(64, 170, 255, 255);
+
+// A flat polygon in the world with a colour at each corner, cut where it passes behind the camera.
+void fill_world(ImDrawList *draw, const Camera &cam, std::span<const Vec3> points, std::span<const ImU32> colours) {
+    struct Corner {
+        Camera::Point at;
+        ImVec4 colour;
+    };
+    std::vector<Corner> in, out;
+    for (std::size_t i = 0; i < points.size(); ++i) in.push_back({cam.view(points[i]), ImGui::ColorConvertU32ToFloat4(colours[i])});
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        const auto &a = in[i], &b = in[(i + 1) % in.size()];
+        const bool a_in = a.at.depth > Camera::near_plane, b_in = b.at.depth > Camera::near_plane;
+        if (a_in) out.push_back(a);
+        if (a_in != b_in) {
+            const float t = (Camera::near_plane - a.at.depth) / (b.at.depth - a.at.depth);
+            const auto mix = [t](float x, float y) { return x + (y - x) * t; };
+            out.push_back({{mix(a.at.side, b.at.side), mix(a.at.height, b.at.height), Camera::near_plane},
+                           ImVec4(mix(a.colour.x, b.colour.x), mix(a.colour.y, b.colour.y), mix(a.colour.z, b.colour.z),
+                                  mix(a.colour.w, b.colour.w))});
+        }
+    }
+    if (out.size() < 3) return;
+    const auto uv = ImGui::GetFontTexUvWhitePixel();
+    const auto first = static_cast<ImDrawIdx>(draw->_VtxCurrentIdx);
+    draw->PrimReserve(static_cast<int>((out.size() - 2) * 3), static_cast<int>(out.size()));
+    for (const auto &c : out) draw->PrimWriteVtx(cam.screen(c.at), uv, ImGui::ColorConvertFloat4ToU32(c.colour));
+    for (std::size_t k = 1; k + 1 < out.size(); ++k) {
+        draw->PrimWriteIdx(first);
+        draw->PrimWriteIdx(static_cast<ImDrawIdx>(first + k));
+        draw->PrimWriteIdx(static_cast<ImDrawIdx>(first + k + 1));
+    }
+}
+float horizontal_to_segment(const Vec3 &p, const Vec3 &a, const Vec3 &b) {
+    const float dx = b[0] - a[0], dz = b[2] - a[2], length = dx * dx + dz * dz;
+    const float t = length > 0 ? std::clamp(((p[0] - a[0]) * dx + (p[2] - a[2]) * dz) / length, 0.0f, 1.0f) : 0.0f;
+    const float x = a[0] + dx * t - p[0], z = a[2] + dz * t - p[2];
+    return std::sqrt(x * x + z * z);
+}
+
+// The play area's edge, the way skate. marks a jam: a glowing see-through wall fading upward, with
+// stripes drifting along it and a bright line on the ground. Away from the edge it stays faint and
+// comes up as the skater nears it. While being placed it is blue.
+void draw_boundary(ImDrawList *draw, const Camera &cam, const ModesHud &h, float scale) {
+    std::vector<std::pair<Vec3, Vec3>> edges;
+    if (h.area_radius > 0 && !h.corners.empty()) {
+        const auto &c = h.corners.front();
+        const int segments = std::clamp(static_cast<int>(h.area_radius * 2.0f), 32, 128);
+        for (int i = 0; i < segments; ++i) {
+            const float a0 = 6.2831853f * i / segments, a1 = 6.2831853f * (i + 1) / segments;
+            edges.push_back({{c[0] + std::cos(a0) * h.area_radius, c[1], c[2] + std::sin(a0) * h.area_radius},
+                             {c[0] + std::cos(a1) * h.area_radius, c[1], c[2] + std::sin(a1) * h.area_radius}});
+        }
+    } else if (h.corners.size() >= 2) {
+        const bool closed = h.corners.size() >= 3;
+        for (std::size_t i = 0; i + (closed ? 0 : 1) < h.corners.size(); ++i)
+            edges.push_back({h.corners[i], h.corners[(i + 1) % h.corners.size()]});
+    }
+    if (edges.empty()) return;
+    const ImU32 base = h.placing ? placing_colour : theme::bar;
+    const float height = 2.4f, time = static_cast<float>(ImGui::GetTime());
+    for (const auto &[a, b] : edges) {
+        if (cam.distance(a) > 400.0f && cam.distance(b) > 400.0f) continue;
+        const float gap = h.have_me ? horizontal_to_segment(h.me, a, b) : 30.0f;
+        const float show = h.placing ? 0.9f : std::clamp(1.25f - gap / 18.0f, 0.18f, 1.0f);
+        const Vec3 a0{a[0], a[1] + 0.02f, a[2]}, b0{b[0], b[1] + 0.02f, b[2]}, a1{a[0], a[1] + height, a[2]}, b1{b[0], b[1] + height, b[2]};
+        const ImU32 bottom = with_alpha(base, 0.42f * show), top = with_alpha(base, 0.0f);
+        const Vec3 wall[]{a0, b0, b1, a1};
+        const ImU32 shade[]{bottom, bottom, top, top};
+        fill_world(draw, cam, wall, shade);
+        // The area reaches all the way up: a skater on a roof sees the wall at their own height
+        // too, a glowing band fading above and below them.
+        if (h.have_me && h.me[1] - a[1] > 3.0f) {
+            const float y = h.me[1] - a[1], low = y - 1.2f, mid = y + 0.4f, high = y + 2.0f;
+            const auto at = [](const Vec3 &p, float up) { return Vec3{p[0], p[1] + up, p[2]}; };
+            const ImU32 glow = with_alpha(base, 0.34f * show), none = with_alpha(base, 0.0f);
+            const Vec3 lower[]{at(a, low), at(b, low), at(b, mid), at(a, mid)}, upper[]{at(a, mid), at(b, mid), at(b, high), at(a, high)};
+            const ImU32 rise[]{none, none, glow, glow}, fall[]{glow, glow, none, none};
+            fill_world(draw, cam, lower, rise);
+            fill_world(draw, cam, upper, fall);
+            line3(draw, cam, at(a, mid), at(b, mid), with_alpha(theme::white, 0.5f * std::max(show, 0.4f)), std::max(1.0f, 1.6f * scale));
+        }
+        // Slanted stripes drifting along the wall.
+        const float dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], length = std::sqrt(dx * dx + dz * dz);
+        if (length > 0.05f) {
+            constexpr float spacing = 1.6f, width = 0.35f, lean = 0.6f, rise = 1.5f;
+            const auto along = [&](float s, float up) {
+                const float t = std::clamp(s / length, 0.0f, 1.0f);
+                return Vec3{a[0] + dx * t, a[1] + dy * t + up, a[2] + dz * t};
+            };
+            const ImU32 stripe = with_alpha(base, 0.32f * show), fade = with_alpha(base, 0.0f);
+            for (float s = -std::fmod(time * 0.9f, spacing) - lean; s < length; s += spacing) {
+                if (s + width + lean < 0) continue;
+                const Vec3 quad[]{along(s, 0.04f), along(s + width, 0.04f), along(s + width + lean, rise), along(s + lean, rise)};
+                const ImU32 shades[]{stripe, stripe, fade, fade};
+                fill_world(draw, cam, quad, shades);
+            }
+        }
+        line3(draw, cam, a0, b0, with_alpha(base, 0.25f * show), std::max(3.0f, 8.0f * scale));
+        line3(draw, cam, a0, b0, with_alpha(theme::white, 0.85f * std::max(show, 0.45f)), std::max(1.5f, 2.2f * scale));
+    }
+    // Posts at a shape's corners, and pillars around a circle, up to the skater when they are high.
+    const auto reach = [&](const Vec3 &c) { return h.have_me ? std::max(height, h.me[1] - c[1] + 2.0f) : height; };
+    if (h.area_radius <= 0) {
+        for (const auto &c : h.corners)
+            line3(draw, cam, c, {c[0], c[1] + reach(c), c[2]}, with_alpha(base, 0.85f), std::max(2.0f, 3.5f * scale));
+    } else if (h.have_me && h.me[1] - h.corners.front()[1] > 3.0f) {
+        const auto &c = h.corners.front();
+        constexpr int pillars = 12;
+        for (int i = 0; i < pillars; ++i) {
+            const float angle = 6.2831853f * i / pillars;
+            const Vec3 foot{c[0] + std::cos(angle) * h.area_radius, c[1], c[2] + std::sin(angle) * h.area_radius};
+            line3(draw, cam, foot, {foot[0], foot[1] + reach(foot), foot[2]}, with_alpha(base, 0.35f), std::max(1.5f, 2.0f * scale));
+        }
+    }
+}
+
+// A neon glow along a path in the world: a wide soft halo, a coloured body and a hot white core,
+// each sized in metres so it hugs a rail up close and stays a thin line far away.
+void glow_path(ImDrawList *draw, const Camera &cam, const std::vector<Vec3> &path, ImU32 colour, float metres, float strength) {
+    if (path.size() < 2) return;
+    std::vector<ImVec2> points;
+    float depth = 0;
+    for (const auto &p : path) {
+        const auto v = cam.view(p);
+        if (v.depth <= Camera::near_plane) return; // partly behind the camera: skipped this frame
+        points.push_back(cam.screen(v));
+        depth += v.depth;
+    }
+    depth /= static_cast<float>(path.size());
+    const float width = std::clamp(metres * cam.focal / std::max(depth, 0.5f), 1.5f, 70.0f);
+    const auto light = [&](float t) {
+        const auto c = ImGui::ColorConvertU32ToFloat4(colour);
+        return ImGui::ColorConvertFloat4ToU32(ImVec4(c.x + (1 - c.x) * t, c.y + (1 - c.y) * t, c.z + (1 - c.z) * t, 1));
+    };
+    struct Layer {
+        float width, alpha, white;
+    };
+    constexpr Layer layers[]{{3.4f, 0.08f, 0.0f}, {2.2f, 0.16f, 0.0f}, {1.3f, 0.45f, 0.1f}, {0.6f, 0.9f, 0.45f}, {0.2f, 0.85f, 0.9f}};
+    for (const auto &layer : layers)
+        draw->AddPolyline(points.data(), static_cast<int>(points.size()), with_alpha(light(layer.white), layer.alpha * strength),
+                          ImDrawFlags_RoundCornersAll, std::max(1.0f, width * layer.width));
+}
+
+// A Graffiti tag, the way THPS lights up what you skated. A grind glows along the exact path the
+// board slid on the curb, ledge or rail; a gap glows where it landed, its arc traced from the takeoff.
+void draw_tag(ImDrawList *draw, const Camera &cam, const ModesHudTag &tag) {
+    if (tag.path.size() < 2 || cam.distance(tag.path.front()) > 250.0f) return;
+    const float pulse = 0.85f + 0.15f * std::sin(static_cast<float>(ImGui::GetTime()) * 3.0f);
+    if (!tag.gap) {
+        std::vector<Vec3> lifted;
+        for (const auto &p : tag.path) lifted.push_back({p[0], p[1] + 0.03f, p[2]});
+        glow_path(draw, cam, lifted, tag.color, 0.12f, pulse);
+        return;
+    }
+    const auto &from = tag.path.front(), &to = tag.path.back();
+    std::vector<Vec3> arc, landing;
+    constexpr int steps = 20;
+    for (int i = 0; i <= steps; ++i) {
+        const float t = static_cast<float>(i) / steps;
+        arc.push_back({from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t + 3.2f * t * (1 - t) + 0.3f,
+                       from[2] + (to[2] - from[2]) * t});
+    }
+    constexpr int around = 28;
+    for (int i = 0; i <= around; ++i) {
+        const float a = 6.2831853f * i / around;
+        landing.push_back({to[0] + std::cos(a) * 1.2f, to[1] + 0.05f, to[2] + std::sin(a) * 1.2f});
+    }
+    glow_path(draw, cam, arc, tag.color, 0.07f, pulse * 0.8f);
+    glow_path(draw, cam, landing, tag.color, 0.12f, pulse);
+}
+
+// ---- skate.'s look -----------------------------------------------------------------------
+// The game's own HUD has no boxes: white text with a soft shadow straight on the picture, on
+// dark bands that fade out (the location plate, the toasts), orange diamond markers and an orange
+// accent. Everything below draws in that style.
+constexpr ImU32 accent = IM_COL32(255, 168, 0, 255), start_blue = IM_COL32(1, 131, 255, 255);
+
+void soft_text(ImDrawList *draw, ImFont *font, float size, ImVec2 at, ImU32 colour, const std::string &text) {
+    const auto alpha = static_cast<float>((colour >> IM_COL32_A_SHIFT) & 0xff) / 255.0f;
+    const float blur = std::max(1.0f, size / 14.0f);
+    for (const auto &[dx, dy] : {std::pair{-blur, 0.0f}, {blur, 0.0f}, {0.0f, -blur}, {0.0f, blur}})
+        draw->AddText(font, size, ImVec2(at.x + dx, at.y + dy + blur * 0.6f), with_alpha(IM_COL32(0, 0, 0, 255), alpha * 0.22f), text.c_str());
+    draw->AddText(font, size, ImVec2(at.x, at.y + blur * 0.8f), with_alpha(IM_COL32(0, 0, 0, 255), alpha * 0.55f), text.c_str());
+    draw->AddText(font, size, at, colour, text.c_str());
+}
+float text_width(ImFont *font, float size, const std::string &text) { return font->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str()).x; }
+// A dark band fading out to one side, or both (the game's location plate and toasts).
+void band(ImDrawList *draw, ImVec2 a, ImVec2 b, float alpha, int fade) { // fade: -1 to the left, 1 to the right, 0 both ways
+    const ImU32 dark = IM_COL32(8, 10, 14, static_cast<int>(255 * alpha)), clear = IM_COL32(8, 10, 14, 0);
+    if (fade == 0) {
+        const float mid = (a.x + b.x) * 0.5f;
+        draw->AddRectFilledMultiColor(a, ImVec2(mid, b.y), clear, dark, dark, clear);
+        draw->AddRectFilledMultiColor(ImVec2(mid, a.y), b, dark, clear, clear, dark);
+    } else if (fade < 0) {
+        draw->AddRectFilledMultiColor(a, b, clear, dark, dark, clear);
+    } else {
+        draw->AddRectFilledMultiColor(a, b, dark, clear, clear, dark);
+    }
+}
+// The orange diamond skate. marks its spots and events with.
+void diamond(ImDrawList *draw, ImVec2 c, float r, ImU32 colour) {
+    draw->AddQuadFilled(ImVec2(c.x, c.y - r), ImVec2(c.x + r, c.y), ImVec2(c.x, c.y + r), ImVec2(c.x - r, c.y), colour);
+    draw->AddQuad(ImVec2(c.x, c.y - r), ImVec2(c.x + r, c.y), ImVec2(c.x, c.y + r), ImVec2(c.x - r, c.y), IM_COL32(255, 255, 255, 200), std::max(1.0f, r * 0.14f));
+}
+// A D-pad as the game draws its prompts, the direction to press lit.
+void dpad_glyph(ImDrawList *draw, ImVec2 c, float size, char lit) {
+    const float arm = size * 0.5f, thick = size * 0.34f;
+    const ImU32 base = IM_COL32(255, 255, 255, 90), on = IM_COL32(255, 255, 255, 255);
+    draw->AddRectFilled(ImVec2(c.x - thick * 0.5f, c.y - arm), ImVec2(c.x + thick * 0.5f, c.y + arm), base, thick * 0.25f);
+    draw->AddRectFilled(ImVec2(c.x - arm, c.y - thick * 0.5f), ImVec2(c.x + arm, c.y + thick * 0.5f), base, thick * 0.25f);
+    const auto light = [&](ImVec2 a, ImVec2 b) { draw->AddRectFilled(a, b, on, thick * 0.25f); };
+    switch (lit) {
+    case 'U': light(ImVec2(c.x - thick * 0.5f, c.y - arm), ImVec2(c.x + thick * 0.5f, c.y - thick * 0.4f)); break;
+    case 'D': light(ImVec2(c.x - thick * 0.5f, c.y + thick * 0.4f), ImVec2(c.x + thick * 0.5f, c.y + arm)); break;
+    case 'L': light(ImVec2(c.x - arm, c.y - thick * 0.5f), ImVec2(c.x - thick * 0.4f, c.y + thick * 0.5f)); break;
+    case 'R': light(ImVec2(c.x + thick * 0.4f, c.y - thick * 0.5f), ImVec2(c.x + arm, c.y + thick * 0.5f)); break;
+    default: break;
+    }
+}
+
+// The scoreboard on the right: the mode and clock over a thin accent line, what to do, then the
+// standings, each on a band fading in from the screen's edge.
+void draw_panel(ImDrawList *draw, HudState &st, float scale) {
+    auto &s = state();
+    const auto &h = st.hud;
+    auto *heading = s.menu.heading ? s.menu.heading : ImGui::GetFont();
+    auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
+    auto *body = s.menu.body ? s.menu.body : ImGui::GetFont();
+    const auto display = ImGui::GetIO().DisplaySize;
+    const float right = display.x - 36.0f * scale, width = 360.0f * scale, left = right - width;
+    float y = 112.0f * scale;
+    // Mode name and clock.
+    std::string mode = h.title;
+    for (auto &c : mode) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    band(draw, ImVec2(left - 40.0f * scale, y - 6.0f * scale), ImVec2(display.x, y + 58.0f * scale), 0.55f, -1);
+    soft_text(draw, heading, 22.0f * scale, ImVec2(left, y + 4.0f * scale), IM_COL32(255, 255, 255, 255), mode);
+    if (h.clock.size() > 1) {
+        const bool low = h.clock.size() >= 4 && h.clock.rfind("0:", 0) == 0 && h.clock[2] == '0';
+        const float pulse = low ? 0.6f + 0.4f * std::sin(static_cast<float>(ImGui::GetTime()) * 8.0f) : 1.0f;
+        const ImU32 colour = low ? with_alpha(theme::danger, pulse) : IM_COL32(255, 255, 255, 255);
+        soft_text(draw, heading, 38.0f * scale, ImVec2(right - text_width(heading, 38.0f * scale, h.clock), y - 2.0f * scale), colour, h.clock);
+    }
+    draw->AddRectFilledMultiColor(ImVec2(left, y + 40.0f * scale), ImVec2(right, y + 43.0f * scale), with_alpha(accent, 0.0f), accent, accent,
+                                  with_alpha(accent, 0.0f));
+    y += 54.0f * scale;
+    if (!h.status.empty()) {
+        const float wrap = width;
+        const auto extent = body->CalcTextSizeA(15.0f * scale, FLT_MAX, wrap, h.status.c_str());
+        band(draw, ImVec2(left - 40.0f * scale, y - 4.0f * scale), ImVec2(display.x, y + extent.y + 6.0f * scale), 0.4f, -1);
+        draw->AddText(body, 15.0f * scale, ImVec2(left + 1, y + 1), IM_COL32(0, 0, 0, 160), h.status.c_str(), nullptr, wrap);
+        draw->AddText(body, 15.0f * scale, ImVec2(left, y), IM_COL32(230, 232, 236, 255), h.status.c_str(), nullptr, wrap);
+        y += extent.y + 14.0f * scale;
+    }
+    const float row = 36.0f * scale;
+    for (std::size_t i = 0; i < h.rows.size(); ++i, y += row + 3.0f * scale) {
+        const auto &r = h.rows[i];
+        const float alpha = r.out ? 0.45f : 1.0f;
+        band(draw, ImVec2(left - 30.0f * scale, y), ImVec2(display.x, y + row), r.self ? 0.7f : 0.5f, -1);
+        draw->AddRectFilled(ImVec2(right + 8.0f * scale, y + 4.0f * scale), ImVec2(right + 12.0f * scale, y + row - 4.0f * scale), with_alpha(r.color, alpha));
+        if (r.self) draw->AddRectFilledMultiColor(ImVec2(left - 30.0f * scale, y + row - 2.0f * scale), ImVec2(right, y + row),
+                                                  with_alpha(accent, 0.0f), with_alpha(accent, 0.9f), with_alpha(accent, 0.9f), with_alpha(accent, 0.0f));
+        const float text_y = y + (row - 18.0f * scale) * 0.5f;
+        const auto place = std::to_string(i + 1);
+        soft_text(draw, heading, 18.0f * scale, ImVec2(left, text_y - 1.0f * scale), with_alpha(r.up ? accent : IM_COL32(170, 175, 185, 255), alpha), place);
+        if (r.up) diamond(draw, ImVec2(left + 30.0f * scale, y + row * 0.5f), 6.0f * scale, accent);
+        soft_text(draw, bold, 18.0f * scale, ImVec2(left + 42.0f * scale, text_y), with_alpha(IM_COL32(255, 255, 255, 255), alpha), r.name);
+        soft_text(draw, bold, 18.0f * scale, ImVec2(right - text_width(bold, 18.0f * scale, r.value), text_y), with_alpha(IM_COL32(255, 255, 255, 255), alpha),
+                  r.value);
+        if (r.out) draw->AddLine(ImVec2(left + 40.0f * scale, y + row * 0.5f), ImVec2(left + 44.0f * scale + text_width(bold, 18.0f * scale, r.name), y + row * 0.5f),
+                                 with_alpha(theme::danger, 0.9f), std::max(1.0f, 2.0f * scale));
+    }
+}
+
+// The middle of the screen: the countdown, the latest callout as a toast, the line being skated,
+// the placing controls as button prompts and the out-of-area warning.
+void draw_centre(ImDrawList *draw, HudState &st, float scale) {
+    auto &s = state();
+    const auto &h = st.hud;
+    auto *title = s.menu.title ? s.menu.title : ImGui::GetFont();
+    auto *heading = s.menu.heading ? s.menu.heading : ImGui::GetFont();
+    auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
+    const auto display = ImGui::GetIO().DisplaySize;
+    const float mid = display.x * 0.5f;
+    // Countdown: each number pops in.
+    if (h.clock.size() == 1) {
+        const float t = static_cast<float>(std::fmod(ImGui::GetTime(), 1.0));
+        const float grow = 1.0f + 0.35f * std::max(0.0f, 1.0f - t * 4.0f), size = 150.0f * scale * grow;
+        soft_text(draw, title, size, ImVec2(mid - text_width(title, size, h.clock) * 0.5f, display.y * 0.30f - (grow - 1.0f) * 60.0f * scale),
+                  accent, h.clock);
+    }
+    // The latest callout: a toast under the location plate, sliding in and fading out.
+    if (h.banner_serial != st.banner_serial) {
+        st.banner_serial = h.banner_serial;
+        st.banner_at = Clock::now();
+    }
+    const float age = seconds_since(st.banner_at);
+    if (!h.banner.empty() && age < 3.6f) {
+        const float in = std::min(1.0f, age / 0.18f), out = age < 3.0f ? 1.0f : (3.6f - age) / 0.6f, alpha = in * out;
+        const bool go = h.banner == "GO!";
+        const float size = (go ? 72.0f : 26.0f) * scale, w = text_width(go ? title : heading, size, h.banner);
+        const float y = 178.0f * scale - (1.0f - in) * 14.0f * scale;
+        band(draw, ImVec2(mid - w * 0.5f - 160.0f * scale, y - 8.0f * scale), ImVec2(mid + w * 0.5f + 160.0f * scale, y + size + 10.0f * scale), 0.6f * alpha, 0);
+        if (!go) diamond(draw, ImVec2(mid - w * 0.5f - 22.0f * scale, y + size * 0.55f), 9.0f * scale, with_alpha(accent, alpha));
+        soft_text(draw, go ? title : heading, size, ImVec2(mid - w * 0.5f, y), with_alpha(go ? accent : IM_COL32(255, 255, 255, 255), alpha), h.banner);
+    }
+    float bottom = display.y - 175.0f * scale;
+    // The placing controls, the game's way: a D-pad glyph lit in its direction, then the action.
+    if (!h.prompts.empty() || !h.hint.empty()) {
+        const float glyph = 30.0f * scale, gap = 26.0f * scale, label_size = 18.0f * scale, key_size = 13.0f * scale;
+        float total = 0;
+        for (const auto &p : h.prompts) total += glyph + 10.0f * scale + std::max(text_width(bold, label_size, p.label), text_width(bold, key_size, p.key)) + gap;
+        total -= gap;
+        const float y = display.y - 92.0f * scale;
+        band(draw, ImVec2(mid - total * 0.5f - 200.0f * scale, y - 44.0f * scale), ImVec2(mid + total * 0.5f + 200.0f * scale, y + 46.0f * scale), 0.62f, 0);
+        if (!h.hint.empty())
+            soft_text(draw, heading, 20.0f * scale, ImVec2(mid - text_width(heading, 20.0f * scale, h.hint) * 0.5f, y - 38.0f * scale), IM_COL32(255, 255, 255, 255), h.hint);
+        float x = mid - total * 0.5f;
+        for (const auto &p : h.prompts) {
+            dpad_glyph(draw, ImVec2(x + glyph * 0.5f, y + 14.0f * scale), glyph, p.dpad);
+            const float tx = x + glyph + 10.0f * scale;
+            soft_text(draw, bold, label_size, ImVec2(tx, y + 1.0f * scale), IM_COL32(255, 255, 255, 255), p.label);
+            soft_text(draw, bold, key_size, ImVec2(tx, y + 21.0f * scale), IM_COL32(170, 175, 185, 255), p.key);
+            x = tx + std::max(text_width(bold, label_size, p.label), text_width(bold, key_size, p.key)) + gap;
+        }
+        bottom = y - 70.0f * scale;
+    }
+    if (!h.line.empty()) {
+        const float size = 30.0f * scale, w = text_width(heading, size, h.line);
+        band(draw, ImVec2(mid - w * 0.5f - 120.0f * scale, bottom - 6.0f * scale), ImVec2(mid + w * 0.5f + 120.0f * scale, bottom + size + 8.0f * scale), 0.45f, 0);
+        soft_text(draw, heading, size, ImVec2(mid - w * 0.5f, bottom), accent, h.line);
+        bottom -= 50.0f * scale;
+    }
+    if (!h.warning.empty()) {
+        const float pulse = 0.65f + 0.35f * std::sin(static_cast<float>(ImGui::GetTime()) * 6.0f), size = 22.0f * scale;
+        const float w = text_width(heading, size, h.warning);
+        draw->AddRectFilledMultiColor(ImVec2(mid - w * 0.5f - 140.0f * scale, bottom - 6.0f * scale), ImVec2(mid, bottom + size + 8.0f * scale),
+                                      IM_COL32(180, 20, 20, 0), IM_COL32(180, 20, 20, static_cast<int>(170 * pulse)),
+                                      IM_COL32(180, 20, 20, static_cast<int>(170 * pulse)), IM_COL32(180, 20, 20, 0));
+        draw->AddRectFilledMultiColor(ImVec2(mid, bottom - 6.0f * scale), ImVec2(mid + w * 0.5f + 140.0f * scale, bottom + size + 8.0f * scale),
+                                      IM_COL32(180, 20, 20, static_cast<int>(170 * pulse)), IM_COL32(180, 20, 20, 0), IM_COL32(180, 20, 20, 0),
+                                      IM_COL32(180, 20, 20, static_cast<int>(170 * pulse)));
+        soft_text(draw, heading, size, ImVec2(mid - w * 0.5f, bottom), IM_COL32(255, 255, 255, 255), h.warning);
+    }
+}
+
+// A Deathrace route, built like an event the game itself put up: at each gate two round pillars
+// (a billboard shaded light in the middle, dark at its edges) hold a banner reading START,
+// CP 2 or a chequered FINISH, with arrows on the ground pointing the way through. The start is
+// blue, checkpoints orange, the finish white. The next gate stands in a soft column of light and
+// its arrows run; gates already passed fade back. Each gate faces the way it was placed.
+void draw_route(ImDrawList *draw, const Camera &cam, const ModesHud &h, float scale, ImFont *font) {
+    const auto count = h.points.size();
+    const float half = std::clamp(h.radius, 3.0f, 8.0f), pillar_r = 0.28f, top = 4.4f, banner_low = 3.4f;
+    const float time = static_cast<float>(ImGui::GetTime());
+    const auto up = [](const Vec3 &v, float y) { return Vec3{v[0], v[1] + y, v[2]}; };
+    // Which way gate i faces: its own facing when it has one, else along the route.
+    const auto facing = [&](std::size_t i) {
+        if (i < h.point_yaws.size()) {
+            const float yaw = h.point_yaws[i] * 3.14159265f / 180.0f;
+            return std::array<float, 2>{std::sin(yaw), std::cos(yaw)};
+        }
+        const auto from = i + 1 < count ? i : (i > 0 ? i - 1 : i), to = i + 1 < count ? i + 1 : i;
+        const float dx = h.points[to][0] - h.points[from][0], dz = h.points[to][2] - h.points[from][2], length = std::hypot(dx, dz);
+        return length > 0.01f ? std::array<float, 2>{dx / length, dz / length} : std::array<float, 2>{0, 1};
+    };
+    // A round pillar: a camera-facing strip, light down the middle and dark at its edges.
+    const auto pillar = [&](const Vec3 &foot, ImU32 colour, float alpha) {
+        const Vec3 side{cam.right[0] * pillar_r, 0, cam.right[2] * pillar_r};
+        const auto c = ImGui::ColorConvertU32ToFloat4(colour);
+        const auto shade = [&](float k, float a) {
+            return ImGui::ColorConvertFloat4ToU32(ImVec4(std::min(1.0f, c.x * k), std::min(1.0f, c.y * k), std::min(1.0f, c.z * k), a * alpha));
+        };
+        const Vec3 l{foot[0] - side[0], foot[1], foot[2] - side[2]}, r{foot[0] + side[0], foot[1], foot[2] + side[2]};
+        const Vec3 left_half[]{l, foot, up(foot, top), up(l, top)}, right_half[]{foot, r, up(r, top), up(foot, top)};
+        const ImU32 edge = shade(0.45f, 0.95f), centre = shade(1.15f, 0.98f);
+        const ImU32 lh[]{edge, centre, centre, edge}, rh[]{centre, edge, edge, centre};
+        fill_world(draw, cam, left_half, lh);
+        fill_world(draw, cam, right_half, rh);
+        // A white cap and a dark foot ring make it read as solid.
+        glow_path(draw, cam, {up(l, top), up(r, top)}, IM_COL32(255, 255, 255, 255), 0.05f, alpha);
+    };
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto &p = h.points[i];
+        const float distance = cam.distance(p);
+        if (distance > 600.0f) continue;
+        const bool next = static_cast<int>(i) == h.next_point, done = h.next_point >= 0 && static_cast<int>(i) < h.next_point;
+        const bool preview = h.placing && i + 1 == count;
+        const bool start = i == 0, finish = i + 1 == count && count >= 2 && !h.placing;
+        const ImU32 colour = preview ? placing_colour : finish ? IM_COL32(245, 245, 245, 255) : start ? start_blue : accent;
+        const float alpha = done ? 0.3f : 1.0f;
+        const auto d = facing(i);
+        const float sx = -d[1] * half, sz = d[0] * half;
+        const Vec3 left{p[0] + sx, p[1], p[2] + sz}, right{p[0] - sx, p[1], p[2] - sz};
+        if (next) {
+            // A soft column of light rising from the gate.
+            const Vec3 column[]{left, right, up(right, 30.0f), up(left, 30.0f)};
+            const ImU32 glow = with_alpha(colour, 0.22f), none = with_alpha(colour, 0.0f), shades[]{glow, glow, none, none};
+            fill_world(draw, cam, column, shades);
+        }
+        pillar(left, colour, alpha);
+        pillar(right, colour, alpha);
+        // The banner across the top: a lit face with white trim.
+        const Vec3 banner[]{up(left, banner_low), up(right, banner_low), up(right, top), up(left, top)};
+        const auto c = ImGui::ColorConvertU32ToFloat4(colour);
+        const ImU32 lower = ImGui::ColorConvertFloat4ToU32(ImVec4(c.x * 0.7f, c.y * 0.7f, c.z * 0.7f, 0.95f * alpha));
+        const ImU32 upper = ImGui::ColorConvertFloat4ToU32(ImVec4(std::min(1.0f, c.x * 1.1f), std::min(1.0f, c.y * 1.1f), std::min(1.0f, c.z * 1.1f), 0.95f * alpha));
+        const ImU32 banner_shade[]{lower, lower, upper, upper};
+        fill_world(draw, cam, banner, banner_shade);
+        if (finish) {
+            const auto at = [&](float t, float y) {
+                return Vec3{left[0] + (right[0] - left[0]) * t, left[1] + y, left[2] + (right[2] - left[2]) * t};
+            };
+            const int columns = 12;
+            for (int k = 0; k < columns; ++k)
+                for (int rowi = 0; rowi < 2; ++rowi) {
+                    if ((k + rowi) % 2) continue;
+                    const float t0 = static_cast<float>(k) / columns, t1 = static_cast<float>(k + 1) / columns;
+                    const float y0 = banner_low + rowi * (top - banner_low) * 0.5f, y1 = y0 + (top - banner_low) * 0.5f;
+                    const Vec3 square[]{at(t0, y0), at(t1, y0), at(t1, y1), at(t0, y1)};
+                    const ImU32 dark = IM_COL32(18, 18, 20, static_cast<int>(235 * alpha)), darks[]{dark, dark, dark, dark};
+                    fill_world(draw, cam, square, darks);
+                }
+        }
+        glow_path(draw, cam, {up(left, banner_low), up(right, banner_low)}, IM_COL32(255, 255, 255, 255), 0.035f, alpha);
+        glow_path(draw, cam, {up(left, top), up(right, top)}, IM_COL32(255, 255, 255, 255), 0.035f, alpha);
+        // The line to cross, and arrows on the ground pointing the way through.
+        glow_path(draw, cam, {up(left, 0.04f), up(right, 0.04f)}, colour, 0.07f, alpha);
+        if (!done) {
+            const float run = next ? std::fmod(time * 1.2f, 1.0f) : 0.0f;
+            for (int k = 0; k < 3; ++k) {
+                const float along = -3.0f + (k + run) * 2.0f, w = 1.1f;
+                const Vec3 tip{p[0] + d[0] * (along + 0.9f), p[1] + 0.05f, p[2] + d[1] * (along + 0.9f)};
+                const Vec3 l2{p[0] + d[0] * along - d[1] * w, p[1] + 0.05f, p[2] + d[1] * along + d[0] * w};
+                const Vec3 r2{p[0] + d[0] * along + d[1] * w, p[1] + 0.05f, p[2] + d[1] * along - d[0] * w};
+                const float fade = next ? 1.0f - std::abs(along) / 4.0f : 0.6f;
+                glow_path(draw, cam, {l2, tip, r2}, colour, 0.1f, std::clamp(fade, 0.2f, 1.0f));
+            }
+        }
+        // The banner's lettering, sized as if printed on it.
+        if (const auto mid = cam.project(up(p, (banner_low + top) * 0.5f))) {
+            const std::string name = start ? "START" : finish ? "FINISH" : std::format("CP {}", i);
+            const float size = std::clamp(0.62f * cam.focal / std::max(distance, 1.0f), 9.0f * scale, 72.0f * scale);
+            const ImU32 ink = finish || preview ? IM_COL32(255, 255, 255, 255) : IM_COL32(255, 255, 255, 255);
+            if (!finish) {
+                const float w = text_width(font, size, name);
+                soft_text(draw, font, size, ImVec2(mid->x - w * 0.5f, mid->y - size * 0.55f), with_alpha(ink, alpha), name);
+            }
+            if (next || (start && h.next_point < 0)) {
+                const auto text = std::format("{:.0f} m", distance);
+                const float label_size_px = std::max(12.0f * scale, size * 0.45f), w = text_width(font, label_size_px, text);
+                if (const auto over = cam.project(up(p, top + 0.9f)))
+                    soft_text(draw, font, label_size_px, ImVec2(over->x - w * 0.5f, over->y - label_size_px), IM_COL32(255, 255, 255, 230), text);
+            }
+        }
+    }
+    // The way on: chevrons along the ground from the skater toward the next gate, drifting forward.
+    if (h.next_point >= 0 && static_cast<std::size_t>(h.next_point) < count && h.have_me) {
+        const auto &to = h.points[static_cast<std::size_t>(h.next_point)];
+        const auto &from = h.me;
+        const float dx = to[0] - from[0], dy = to[1] - from[1], dz = to[2] - from[2], length = std::hypot(dx, dz);
+        if (length > 6.0f) {
+            const float ux = dx / length, uz = dz / length, run = std::fmod(time * 1.5f, 1.0f);
+            for (int k = 0; k < 6; ++k) {
+                const float along = 3.0f + (k + run) * 3.0f;
+                if (along > length - 3.0f) break;
+                const float t = along / length, y = from[1] + dy * t + 0.06f, w = 0.6f;
+                const Vec3 tip{from[0] + ux * (along + 0.6f), y, from[2] + uz * (along + 0.6f)};
+                const Vec3 l{from[0] + ux * along - uz * w, y, from[2] + uz * along + ux * w};
+                const Vec3 r{from[0] + ux * along + uz * w, y, from[2] + uz * along - ux * w};
+                glow_path(draw, cam, {l, tip, r}, accent, 0.07f, 0.55f * (1.0f - k / 6.0f));
+            }
+        }
+    }
+    (void)scale;
+}
+
+void draw_world(ImDrawList *draw, const ModesHud &h, float scale) {
+    if (!(h.vertical_fov > 1 && h.vertical_fov < 175)) return;
+    const auto display = ImGui::GetIO().DisplaySize;
+    const auto &m = h.camera;
+    Camera cam{{m[0], m[1], m[2]}, {m[4], m[5], m[6]}, {m[8], m[9], m[10]}, {m[12], m[13], m[14]},
+               display.y / (2.0f * std::tan(h.vertical_fov * 3.14159265f / 360.0f)), ImVec2(display.x * 0.5f, display.y * 0.5f)};
+    const float thick = std::max(1.5f, 2.5f * scale);
+    draw_boundary(draw, cam, h, scale);
+    if (h.placing && (h.aim_ok || !h.aiming)) {
+        // Where the next corner, checkpoint or centre goes: a beam over the spot on the ground.
+        const auto &p = h.cursor;
+        line3(draw, cam, p, {p[0], p[1] + 6.0f, p[2]}, with_alpha(placing_colour, 0.8f), thick * 2.0f);
+        ring(draw, cam, p, 0.7f, with_alpha(theme::white, 0.9f), thick);
+    }
+    // Graffiti: every tag painted where it was skated, in its holder's colour.
+    for (const auto &tag : h.tags) draw_tag(draw, cam, tag);
+    // Checkpoints and spots.
+    auto *bold = state().menu.bold ? state().menu.bold : ImGui::GetFont();
+    if (h.route) {
+        draw_route(draw, cam, h, scale, bold);
+        return;
+    }
+    for (std::size_t i = 0; i < h.points.size(); ++i) {
+        const auto &p = h.points[i];
+        const bool next = static_cast<int>(i) == h.next_point;
+        const bool done = h.next_point >= 0 && static_cast<int>(i) < h.next_point;
+        const ImU32 owner = i < h.point_colors.size() ? h.point_colors[i] : 0;
+        const ImU32 colour = next ? theme::bar : done ? with_alpha(theme::good, 0.5f) : owner ? owner : with_alpha(theme::white, 0.7f);
+        if (owner) filled_ring(draw, cam, p, h.radius, with_alpha(owner, 0.25f));
+        ring(draw, cam, p, h.radius, colour, next ? thick * 1.6f : thick);
+        if (next) line3(draw, cam, p, {p[0], p[1] + 12.0f, p[2]}, with_alpha(theme::bar, 0.7f), thick * 2.0f);
+        if (const auto label = cam.project({p[0], p[1] + (next ? 12.5f : 3.0f), p[2]})) {
+            const float d = cam.distance(p);
+            centred(draw, bold, 18.0f * scale, label->x, label->y - 20.0f * scale, colour,
+                    std::format("{}  {:.0f} m", i + 1, d));
+        }
+    }
+}
+
+// A gold crown: a band with three points, a jewel on each point.
+void crown(ImDrawList *draw, ImVec2 centre, float size, ImU32 gold) {
+    const float w = size, h = size * 0.62f, x = centre.x - w * 0.5f, y = centre.y - h * 0.5f;
+    const ImVec2 outline[]{{x, y + h},
+                           {x, y + h * 0.25f},
+                           {x + w * 0.25f, y + h * 0.6f},
+                           {x + w * 0.5f, y},
+                           {x + w * 0.75f, y + h * 0.6f},
+                           {x + w, y + h * 0.25f},
+                           {x + w, y + h}};
+    draw->AddConcavePolyFilled(outline, 7, gold);
+    draw->AddPolyline(outline, 7, IM_COL32(120, 80, 0, 255), ImDrawFlags_Closed, std::max(1.0f, size * 0.04f));
+    draw->AddRectFilled(ImVec2(x, y + h * 0.82f), ImVec2(x + w, y + h), IM_COL32(200, 140, 20, 255));
+    for (const auto &tip : {outline[1], outline[3], outline[5]}) draw->AddCircleFilled(tip, size * 0.08f, IM_COL32(255, 70, 90, 255), 12);
+}
+
+// The end of a game: a podium with the winner crowned in the middle, second and third beside,
+// everyone else listed under it.
+void draw_results(ImDrawList *draw, const ModesHud &h, float scale) {
+    auto &s = state();
+    auto *title = s.menu.title ? s.menu.title : ImGui::GetFont();
+    auto *heading = s.menu.heading ? s.menu.heading : ImGui::GetFont();
+    auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
+    const auto display = ImGui::GetIO().DisplaySize;
+    draw->AddRectFilled(ImVec2(0, 0), display, IM_COL32(0, 0, 0, 110));
+    const float mid = display.x * 0.5f, width = 720.0f * scale, left = mid - width * 0.5f;
+    const std::size_t others = h.rows.size() > 3 ? std::min<std::size_t>(h.rows.size() - 3, 5) : 0;
+    const float card_h = (470.0f + others * 36.0f) * scale, top = display.y * 0.5f - card_h * 0.5f;
+    theme::rough_rect(draw, ImVec2(left, top), ImVec2(left + width, top + card_h), with_alpha(theme::tile, 0.94f), 113u, scale);
+    draw->AddRectFilled(ImVec2(left, top), ImVec2(left + width, top + 5.0f * scale), theme::bar);
+    centred(draw, title, 46.0f * scale, mid, top + 16.0f * scale, theme::white, "RESULTS");
+    centred(draw, bold, 18.0f * scale, mid, top + 70.0f * scale, theme::grey_text, h.title);
+    // The podium: 2nd on the left, 1st in the middle (tallest), 3rd on the right.
+    constexpr ImU32 metal[]{IM_COL32(255, 196, 40, 255), IM_COL32(200, 205, 215, 255), IM_COL32(205, 127, 60, 255)};
+    const float base = top + 400.0f * scale, step_w = 190.0f * scale;
+    const float heights[]{150.0f * scale, 105.0f * scale, 75.0f * scale};
+    const float centres[]{mid, mid - step_w - 14.0f * scale, mid + step_w + 14.0f * scale};
+    for (std::size_t place = 0; place < 3 && place < h.rows.size(); ++place) {
+        const auto &row = h.rows[place];
+        const float cx = centres[place], step_top = base - heights[place];
+        const ImVec2 a(cx - step_w * 0.5f, step_top), b(cx + step_w * 0.5f, base);
+        draw->AddRectFilled(a, b, with_alpha(metal[place], 0.9f), 4.0f * scale);
+        draw->AddRectFilled(a, ImVec2(b.x, a.y + 6.0f * scale), with_alpha(theme::white, 0.5f), 4.0f * scale);
+        centred(draw, title, (place == 0 ? 64.0f : 48.0f) * scale, cx, step_top + 12.0f * scale, IM_COL32(30, 30, 30, 230),
+                std::to_string(place + 1));
+        // Name and score above the step, in the player's colour; the winner wears the crown.
+        const float name_size = (place == 0 ? 30.0f : 22.0f) * scale;
+        const float name_y = step_top - (place == 0 ? 74.0f : 62.0f) * scale;
+        centred(draw, heading, name_size, cx, name_y, row.color, row.name);
+        centred(draw, bold, (place == 0 ? 20.0f : 16.0f) * scale, cx, name_y + name_size + 4.0f * scale, theme::white, row.value);
+        if (place == 0) crown(draw, ImVec2(cx, name_y - 34.0f * scale), 62.0f * scale, metal[0]);
+        if (row.self) draw->AddRect(a, b, theme::white, 4.0f * scale, 0, std::max(1.5f, 2.5f * scale));
+    }
+    // Everyone else.
+    float y = base + 18.0f * scale;
+    for (std::size_t place = 3; place < h.rows.size() && place < 8; ++place, y += 36.0f * scale) {
+        const auto &row = h.rows[place];
+        const ImVec2 a(left + 60.0f * scale, y), b(left + width - 60.0f * scale, y + 30.0f * scale);
+        draw->AddRectFilled(a, b, with_alpha(row.self ? theme::tile_light : theme::tile_grey, 0.9f), 3.0f * scale);
+        draw->AddRectFilled(a, ImVec2(a.x + 6.0f * scale, b.y), row.color);
+        shadowed(draw, bold, 17.0f * scale, ImVec2(a.x + 18.0f * scale, a.y + 5.0f * scale), theme::white, std::format("{}. {}", place + 1, row.name));
+        const auto extent = bold->CalcTextSizeA(17.0f * scale, FLT_MAX, 0.0f, row.value.c_str());
+        shadowed(draw, bold, 17.0f * scale, ImVec2(b.x - 12.0f * scale - extent.x, a.y + 5.0f * scale), theme::white, row.value);
+    }
+    centred(draw, bold, 16.0f * scale, mid, top + card_h - 30.0f * scale, theme::grey_text,
+            std::format("Closing in {} s", (h.closing_ms + 999) / 1000));
+}
+} // namespace
+
+bool modes_hud_pending() {
+    auto &h = hud_state();
+    h.hud = {};
+    if (const auto feed = modes_hud_feed.load()) {
+        try { h.hud = feed(); } catch (...) { h.hud = {}; }
+    }
+    return h.hud.active;
+}
+
+void draw_modes_hud() {
+    auto &h = hud_state();
+    if (!h.hud.active) return;
+    const auto display = ImGui::GetIO().DisplaySize;
+    if (display.x <= 0 || display.y <= 0) return;
+    const float scale = std::clamp(display.y / 1080.0f, 0.8f, 2.0f);
+    auto *draw = ImGui::GetBackgroundDrawList();
+    draw_world(draw, h.hud, scale);
+    if (h.hud.results) {
+        draw_results(draw, h.hud, scale);
+        return;
+    }
+    draw_panel(draw, h, scale);
+    draw_centre(draw, h, scale);
+    if (h.hud.placing && h.hud.aiming) {
+        // The quick-drop reticle: white with a dot when it finds the ground, red when it does not.
+        const ImVec2 c(display.x * 0.5f, display.y * 0.5f);
+        const float r = 14.0f * scale, t = std::max(1.5f, 2.0f * scale);
+        const ImU32 ink = h.hud.aim_ok ? IM_COL32(255, 255, 255, 235) : IM_COL32(255, 80, 70, 235), shade = IM_COL32(0, 0, 0, 120);
+        draw->AddCircle(c, r + t, shade, 32, t * 2.0f);
+        draw->AddCircle(c, r, ink, 32, t);
+        for (const auto &d : {ImVec2(1, 0), ImVec2(-1, 0), ImVec2(0, 1), ImVec2(0, -1)})
+            draw->AddLine(ImVec2(c.x + d.x * r * 0.45f, c.y + d.y * r * 0.45f), ImVec2(c.x + d.x * r * 1.6f, c.y + d.y * r * 1.6f), ink, t);
+        if (h.hud.aim_ok) draw->AddCircleFilled(c, 2.5f * scale, ink, 12);
+    }
+}
+} // namespace dingosdk::overlay::detail

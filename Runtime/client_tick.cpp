@@ -1,4 +1,5 @@
 #include "runtime_internal.h"
+#include "Extension/Modes/bone_cam.h"
 #include "Extension/Customization/developer_hoodie.h"
 #include "Extension/Customization/developer_board.h"
 #include "Extension/Assets/live_mods.h"
@@ -223,8 +224,9 @@ void apply_throwdown_modes() {
         // EnableAdvancedParameters adds the host's Customize button and the
         // parameter panel (players, timer, privacy, scored actions) to the
         // throwdown details page; it also ships off.
+        // EnableRace: the race throwdown retail never shipped (game modes' Deathrace research).
         for (const auto* name : {"DingoThrowdowns.EnableSpotBattle", "DingoThrowdowns.EnableSKATE",
-                                 "DingoThrowdowns.EnableAdvancedParameters"}) {
+                                 "DingoThrowdowns.EnableAdvancedParameters", "DingoThrowdowns.EnableRace"}) {
             const auto result = dingosdk::change_named_setting(name, "1", false);
             pending = pending || result.starts_with("error: ");
             results += (results.empty() ? "" : " | ") + result;
@@ -1026,6 +1028,11 @@ void tick(std::uintptr_t client, std::uintptr_t update) {
             DINGO_PROFILE_ZONE("tick/trainer");
             // A custom map is a sublevel of the root level: that is the map the player means.
             dingosdk::trainer::tick(r.base, client, multiplayer_ready, r.catalog_level.empty() ? r.last_level : r.catalog_level);
+        }
+        {
+            DINGO_PROFILE_ZONE("tick/bone cam");
+            // After the trainer: it publishes the bail count the Bone Cam starts on.
+            dingosdk::modes::tick_bone_cam(r.base, client, multiplayer_ready);
         }
         {
             DINGO_PROFILE_ZONE("tick/Steam friend join");

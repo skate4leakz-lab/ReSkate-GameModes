@@ -45,6 +45,11 @@ bool is_input(UINT message) {
 bool interactive_visible(const State& s) {
     return s.visible.load() || s.console_visible.load() || s.editor_visible.load() || s.chat_visible.load();
 }
+} // namespace dingosdk::overlay::detail
+namespace dingosdk::overlay {
+bool interface_open() noexcept { return interactive_visible(state()); }
+}
+namespace dingosdk::overlay::detail {
 
 void restore_input(bool hide_menu) {
     auto& s = state();
@@ -302,6 +307,7 @@ bool start_overlay(const dingosdk::overlay::CallbacksV3* callbacks) {
             dingosdk::overlay::start_park_previews(std::filesystem::path(std::wstring(game, length)).parent_path());
             dingosdk::overlay::start_chat_emotes();
         }
+        dingosdk::overlay::detail::start_bone_sprites();
     }
     HMODULE pinned = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,

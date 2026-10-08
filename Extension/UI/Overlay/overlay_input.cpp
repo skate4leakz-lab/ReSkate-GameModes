@@ -240,6 +240,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
                 s.input.push_back({window, message, wp, lp});
             }
         }
+        // Game modes pausing the game's input (free-camera placing) keeps its keys and mouse too,
+        // all but the system keys (Alt+Tab, Alt+F4).
+        const bool paused = game_input_paused.load(std::memory_order_relaxed) && is_input(message) &&
+                            message != WM_SYSKEYDOWN && message != WM_SYSKEYUP && message != WM_SYSCHAR;
+        if (paused) {
+            // The wheel turns a gate or sizes a circle while placing (take_mouse_wheel).
+            if (message == WM_MOUSEWHEEL) paused_wheel.fetch_add(GET_WHEEL_DELTA_WPARAM(wp), std::memory_order_relaxed);
+            return message == WM_INPUT ? DefWindowProcW(window, message, wp, lp) : 0;
+        }
         const bool capture = owns_pointer();
         if (capture && is_input(message)) {
             // Foreground raw-input packets still need DefWindowProc cleanup.
@@ -458,14 +467,39 @@ extern "C" void DingoSDKOverlayReadFlightInput(dingosdk::overlay::FlightInput* o
         looking = false;
         return; // Native camera owns look input; do not sample or recenter the cursor.
     }
+    // A controller flies the free camera too (outside the park editor, which owns the mouse look):
+    // left stick moves, the triggers lower and raise, the left stick's click boosts, the right
+    // stick looks. Look is scaled by time so it turns at the same speed at any tick rate.
+    thread_local ULONGLONG last_pad = 0;
+    const auto pad_now = GetTickCount64();
+    const float pad_seconds = last_pad ? std::min(0.1f, static_cast<float>(pad_now - last_pad) / 1000.0f) : 0.0f;
+    last_pad = pad_now;
+    if (!s.editor_visible.load()) {
+        const auto sample = read_controller_sample();
+        if (sample.device) {
+            const auto controller = read_player_flight_controller();
+            output->right = std::clamp(output->right + controller.right, -1.0f, 1.0f);
+            output->forward = std::clamp(output->forward + controller.forward, -1.0f, 1.0f);
+            output->up = std::clamp(output->up + controller.up, -1.0f, 1.0f);
+            output->boost = output->boost || controller.boost;
+            const float rx = sample.pad.sThumbRX, ry = sample.pad.sThumbRY, size = std::sqrt(rx * rx + ry * ry);
+            constexpr float deadzone = 8689.0f, turn = 2.3f / 0.0025f; // 2.3 rad/s at full tilt, in look units
+            if (size > deadzone) {
+                const float k = std::clamp((size - deadzone) / (32767.0f - deadzone), 0.0f, 1.0f) / size;
+                const float curve = std::sqrt(rx * rx + ry * ry) * k; // 0..1
+                output->look_x += rx * k * curve * turn * pad_seconds;
+                output->look_y -= ry * k * curve * turn * pad_seconds;
+            }
+        }
+    }
     POINT current{};
     const long raw_x = state().raw_mouse_x.exchange(0), raw_y = state().raw_mouse_y.exchange(0);
     if (look_button && GetCursorPos(&current)) {
         if (looking) {
             // Raw deltas when the game window receives raw input: they keep
             // working whatever Skate does with the Windows cursor.
-            output->look_x = static_cast<float>(raw ? raw_x : current.x - previous.x);
-            output->look_y = static_cast<float>(raw ? raw_y : current.y - previous.y);
+            output->look_x += static_cast<float>(raw ? raw_x : current.x - previous.x);
+            output->look_y += static_cast<float>(raw ? raw_y : current.y - previous.y);
         }
         previous = current;
         looking = true;

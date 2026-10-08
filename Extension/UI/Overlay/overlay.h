@@ -298,6 +298,132 @@ struct SkateHud {
 };
 using SkateHudFeed = SkateHud (*)();
 void set_skate_hud_feed(SkateHudFeed) noexcept;
+// ReSkate's game modes (Extension/Modes): the scoreboard, clock and callouts, and what the
+// game's leader marked out drawn over the world (the area, checkpoints or spots, Graffiti's
+// zones in their taggers' colours). Read every presented frame; inactive = nothing to draw.
+struct ModesHudRow {
+    std::string name, value;
+    std::uint32_t color{0xffffffffU}; // IM_COL32
+    bool self{}, up{}, out{};
+};
+// A Graffiti tag: the path a board slid along (a grind) or a gap's takeoff and landing, in the
+// colour of whoever holds it.
+struct ModesHudTag {
+    std::vector<std::array<float, 3>> path;
+    bool gap{};
+    std::uint32_t color{};
+};
+struct ModesHud {
+    bool active{};
+    std::string title;    // "Graffiti"
+    std::string clock;    // "2:31", the countdown's "3", or empty
+    std::string status;   // what to do now
+    std::string line;     // the local player's line in progress
+    std::string banner;   // the latest callout (big, for a moment)
+    std::uint64_t banner_serial{};
+    std::string warning;  // out of the area
+    // The results at the end: the winner, their score and colour, and how long until it closes.
+    bool results{};
+    std::string winner, winner_value;
+    std::uint32_t winner_color{0xffffffffU};
+    std::uint32_t closing_ms{};
+    std::vector<ModesHudRow> rows;
+    std::vector<std::array<float, 3>> corners; // the area, in order around it (a circle's centre when area_radius > 0)
+    float area_radius{};
+    bool placing{};                            // the area or points are being placed: drawn as a preview
+    bool aiming{}, aim_ok{};                   // placing from the free camera: a reticle; aim_ok when it finds ground
+    std::array<float, 3> cursor{};             // placing: where the next thing goes
+    std::string hint;                          // what to do while placing ("Skate to the centre.")
+    // The controls while placing, as button prompts: a D-pad direction ('U', 'D', 'L', 'R', or 0
+    // for none), the keyboard key and what it does.
+    struct Prompt {
+        char dpad{};
+        std::string key, label;
+    };
+    std::vector<Prompt> prompts;
+    std::array<float, 3> me{};                 // the local skater, for the walls fading in near them
+    bool have_me{};
+    std::vector<std::array<float, 3>> points;  // checkpoints or spots
+    std::vector<std::uint32_t> point_colors;   // one per point (0: plain)
+    int next_point{-1};                        // Deathrace: the local player's next checkpoint
+    bool route{};                              // the points are a Deathrace route: start, checkpoints, finish
+    std::vector<float> point_yaws;             // each gate's facing, degrees (the trainer's heading); empty: along the route
+    float radius{};
+    std::vector<ModesHudTag> tags;
+    std::array<float, 16> camera{}; // world matrix: right, up, back, position rows
+    float vertical_fov{};
+};
+using ModesHudFeed = ModesHud (*)();
+void set_modes_hud_feed(ModesHudFeed) noexcept;
+// The Bone Cam (Extension/Modes/bone_cam.h): during a big bail the screen goes X-ray and every
+// bone of the local skater is drawn between its real joints, the ones that took a hard hit in red,
+// with a Skate 2 style injury list. Inactive = nothing to draw.
+struct BoneCamBone {
+    std::uint8_t sprite{};         // modes::BoneSprite
+    std::array<float, 3> a{}, b{}; // world: the bone's first joint, and a point along it
+    std::uint8_t hurt{};           // 0 sound, 1 cracked, 2 broken
+};
+struct BoneCamInjury {
+    std::string bone, what; // "LEFT FEMUR", "FRACTURED"
+    bool severe{};
+};
+// What a slam leaves behind: marks on the ground where the body slid (a skid for the torso, thin
+// scrapes for hands, knees and head), and the hit itself.
+struct BoneCamMark {
+    std::vector<std::array<float, 3>> path; // world, along the ground
+    float alpha{};                          // 0..1, fading with age
+    bool skid{};
+};
+struct BoneCam {
+    bool active{};         // the X-ray itself
+    bool effects{};        // marks or a hit to draw (with or without the X-ray)
+    float fade{};          // 0..1: fades in when the bail starts, out at the end
+    std::vector<BoneCamMark> marks;
+    float hit{};                    // 0..1: the flash of an impact, fading fast
+    std::array<float, 3> hit_at{};  // world: where it landed
+    bool preview{};        // the menu's preview: the injuries are examples
+    std::uint64_t serial{}; // one per bail
+    std::vector<BoneCamBone> bones;
+    std::vector<BoneCamInjury> injuries;
+    std::array<float, 3> left{}; // world: from the skater's right shoulder toward the left one (which way the art faces)
+    std::array<float, 16> camera{}; // world matrix: right, up, back, position rows
+    float vertical_fov{};
+};
+using BoneCamFeed = BoneCam (*)();
+void set_bone_cam_feed(BoneCamFeed) noexcept;
+// ModesHud's menu needs (the Game Modes page of the ReSkate menu): what the local player can do.
+struct ModesMenu {
+    bool in_game{}, leading{};
+    int phase{};                  // modes::Phase, 0 when no game
+    std::string mode;             // "graffiti"
+    std::size_t corners{}, points{}, players{};
+    std::uint32_t duration{}, turn{};
+    int strikes{};
+    float radius{};
+    std::string missing;          // what `mode start` still needs
+    std::string bone_cam;         // "meat", "on" or "off"
+    float area_radius{};          // > 0: the area is a circle
+    std::string placing;          // "circle", "corners", "points" while placing on the skater; else empty
+};
+using ModesMenuFeed = ModesMenu (*)();
+void set_modes_menu_feed(ModesMenuFeed) noexcept;
+ModesMenu modes_menu() noexcept;
+// True while ReSkate's menu, console, chat or park editor takes the player's input (any thread).
+bool interface_open() noexcept;
+// XInput buttons (XINPUT_GAMEPAD_* bits) the game stops seeing while ReSkate uses them itself, as
+// game modes do with the D-pad while placing; 0 gives them all back (any thread).
+void hide_game_buttons(std::uint16_t buttons) noexcept;
+// All of the player's input kept from the game (keyboard, mouse and pad, Steam Input included),
+// as ReSkate's menu does, without opening anything: game modes' free-camera placing flies on it.
+// ReSkate's own reads still see it (key_down, the free camera, the controller reads).
+void pause_game_input(bool paused) noexcept;
+// A key as the player holds it, past the gates above (GetAsyncKeyState's high bit).
+bool key_down(int virtual_key) noexcept;
+// Mouse wheel movement since the last call while the game's input was paused (WHEEL_DELTA units).
+int take_mouse_wheel() noexcept;
+// The pad buttons physically held right now, while some are hidden: with Steam Input the game hears
+// actions, not buttons, so its actions wait while a hidden button is held (steam_input_block.cpp).
+void hold_game_buttons(std::uint16_t held) noexcept;
 // ReSkate's own nametags: one per other player, placed over the world with the camera the
 // client last used. Close ones show a name and distance, far ones a dot, and players off
 // screen a dot at the screen's edge. Empty = nothing to draw (off, or the game hides its UI).
