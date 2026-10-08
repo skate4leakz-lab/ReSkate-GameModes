@@ -11,7 +11,7 @@ add_library(dingosdk_overlay STATIC
     Extension/UI/Overlay/skate_hud_overlay.cpp
     Extension/UI/Overlay/modes_hud_overlay.cpp
     Extension/UI/Overlay/modes_page.cpp
-    Extension/UI/Overlay/bone_cam_overlay.cpp
+    Extension/UI/Overlay/bone_cam_overlay.cpp Extension/UI/Overlay/bone_cam_3d.cpp
     Extension/UI/Overlay/playstation_filter.cpp
     Extension/UI/Overlay/steam_input_block.cpp
     Extension/UI/Overlay/nametag_overlay.cpp

@@ -8,6 +8,9 @@
 #include "Engine/Core/Log/logging.h"
 #include "Engine/Game/UI/game_view.h"
 #include <Windows.h>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
+#include <cstring>
 #include <algorithm>
 #include <cmath>
 #include <atomic>
@@ -66,27 +69,39 @@ constexpr Span spans[]{
     {BoneSprite::hand_r, joint::right_hand, joint::right_middle}, {BoneSprite::hand_l, joint::left_hand, joint::left_middle},
     {BoneSprite::skull, joint::head, head_up},
 };
-// A joint that stops dead hurts the bone beside it: cracked at one speed, broken at a higher one.
+// A joint that stops dead hurts the bone beside it: cracked (or sprained, torn...) past `crack`
+// m/s of speed lost into what it hit, broken past `snap`. Each bone has its own limits, roughly as
+// bodies go: ankles, wrists and collarbones give first; the femur and pelvis take the most.
 struct Watch {
     std::uint16_t joint;
     BoneSprite sprite;
     const char *cracked_bone, *cracked, *broken_bone, *broken;
+    float crack, snap;
 };
 constexpr Watch watches[]{
-    {joint::head, BoneSprite::skull, "SKULL", "CONCUSSION", "SKULL", "FRACTURED"},
-    {joint::right_hand, BoneSprite::forearm_r, "RIGHT WRIST", "SPRAINED", "RIGHT RADIUS", "SNAPPED"},
-    {joint::left_hand, BoneSprite::forearm_l, "LEFT WRIST", "SPRAINED", "LEFT RADIUS", "SNAPPED"},
-    {joint::right_fore_arm, BoneSprite::humerus_r, "RIGHT ELBOW", "DISLOCATED", "RIGHT HUMERUS", "FRACTURED"},
-    {joint::left_fore_arm, BoneSprite::humerus_l, "LEFT ELBOW", "DISLOCATED", "LEFT HUMERUS", "FRACTURED"},
-    {joint::right_arm, BoneSprite::torso, "RIGHT COLLARBONE", "CRACKED", "RIGHT COLLARBONE", "BROKEN"},
-    {joint::left_arm, BoneSprite::torso, "LEFT COLLARBONE", "CRACKED", "LEFT COLLARBONE", "BROKEN"},
-    {joint::spine2, BoneSprite::torso, "RIBS", "CRACKED", "RIBS", "BROKEN"},
-    {joint::hips, BoneSprite::torso, "PELVIS", "BRUISED", "PELVIS", "FRACTURED"},
-    {joint::right_leg, BoneSprite::femur_r, "RIGHT KNEE", "TORN", "RIGHT FEMUR", "FRACTURED"},
-    {joint::left_leg, BoneSprite::femur_l, "LEFT KNEE", "TORN", "LEFT FEMUR", "FRACTURED"},
-    {joint::right_foot, BoneSprite::shin_r, "RIGHT ANKLE", "SPRAINED", "RIGHT TIBIA", "SNAPPED"},
-    {joint::left_foot, BoneSprite::shin_l, "LEFT ANKLE", "SPRAINED", "LEFT TIBIA", "SNAPPED"},
+    {joint::head, BoneSprite::skull, "SKULL", "CONCUSSION", "SKULL", "FRACTURED", 4.0f, 7.5f},
+    {joint::right_hand, BoneSprite::forearm_r, "RIGHT WRIST", "SPRAINED", "RIGHT RADIUS", "SNAPPED", 4.5f, 7.5f},
+    {joint::left_hand, BoneSprite::forearm_l, "LEFT WRIST", "SPRAINED", "LEFT RADIUS", "SNAPPED", 4.5f, 7.5f},
+    {joint::right_fore_arm, BoneSprite::humerus_r, "RIGHT ELBOW", "DISLOCATED", "RIGHT HUMERUS", "FRACTURED", 5.5f, 9.0f},
+    {joint::left_fore_arm, BoneSprite::humerus_l, "LEFT ELBOW", "DISLOCATED", "LEFT HUMERUS", "FRACTURED", 5.5f, 9.0f},
+    {joint::right_arm, BoneSprite::torso, "RIGHT COLLARBONE", "CRACKED", "RIGHT COLLARBONE", "BROKEN", 5.0f, 8.0f},
+    {joint::left_arm, BoneSprite::torso, "LEFT COLLARBONE", "CRACKED", "LEFT COLLARBONE", "BROKEN", 5.0f, 8.0f},
+    {joint::spine2, BoneSprite::torso, "RIBS", "CRACKED", "RIBS", "BROKEN", 6.0f, 9.5f},
+    {joint::hips, BoneSprite::torso, "PELVIS", "BRUISED", "PELVIS", "FRACTURED", 7.0f, 11.0f},
+    {joint::right_leg, BoneSprite::femur_r, "RIGHT KNEE", "TORN", "RIGHT FEMUR", "FRACTURED", 6.5f, 10.5f},
+    {joint::left_leg, BoneSprite::femur_l, "LEFT KNEE", "TORN", "LEFT FEMUR", "FRACTURED", 6.5f, 10.5f},
+    {joint::right_foot, BoneSprite::shin_r, "RIGHT ANKLE", "SPRAINED", "RIGHT TIBIA", "SNAPPED", 5.0f, 8.0f},
+    {joint::left_foot, BoneSprite::shin_l, "LEFT ANKLE", "SPRAINED", "LEFT TIBIA", "SNAPPED", 5.0f, 8.0f},
 };
+// A concussion's grade from the hardest hit the head took (m/s lost), and how long its after-
+// effects last. Below the first, no concussion.
+struct Concussion {
+    float from;
+    const char *what;
+    std::uint64_t lasts_ms;
+};
+constexpr Concussion concussions[]{
+    {4.0f, "MILD CONCUSSION", 4000}, {5.5f, "CONCUSSION", 7000}, {7.0f, "SEVERE CONCUSSION", 10000}, {8.5f, "KNOCKED OUT", 12000}};
 constexpr std::size_t watch_count = std::size(watches);
 
 enum class Setting { meat, on, off };
@@ -104,6 +119,8 @@ struct State {
     float hit{};
     std::uint64_t hit_time{};
     Vec3 hit_at{};
+    float head_hit{}; // the hardest hit the head took this bail (m/s lost): its concussion
+    bool rang{};      // the concussion's ringing played this bail
     bool active{}, preview{}, wipeouts_known{}, have_position{}, have_velocity{}, pose_reported{}, posed{};
     std::uint64_t started{}, serial{}, wipeouts{}, last_tick{}, unready_since{};
     std::array<Vec3, watch_count> position{}, velocity{};
@@ -128,6 +145,43 @@ State &state() {
     static auto *value = new State;
     return *value;
 }
+const Concussion *concussion_of(float head_hit) {
+    const Concussion *found{};
+    for (const auto &c : concussions)
+        if (head_hit >= c.from) found = &c;
+    return found;
+}
+// A concussion's ears ringing: one high tone, very quiet, fading over a few seconds.
+void ring(float strength) {
+    static std::vector<std::uint8_t> wav;
+    constexpr std::uint32_t rate = 22050;
+    const float seconds = 1.5f + 2.0f * strength, volume = 0.02f + 0.025f * strength;
+    const auto count = static_cast<std::uint32_t>(seconds * rate), bytes = count * 2;
+    PlaySoundW(nullptr, nullptr, 0); // the buffer below may be playing: stop it before it changes
+    wav.assign(44 + bytes, 0);
+    const auto put = [&](std::size_t at, std::uint32_t value, int size) {
+        for (int i = 0; i < size; ++i) wav[at + i] = static_cast<std::uint8_t>(value >> (8 * i));
+    };
+    std::memcpy(wav.data(), "RIFF", 4);
+    put(4, 36 + bytes, 4);
+    std::memcpy(wav.data() + 8, "WAVEfmt ", 8);
+    put(16, 16, 4);       // format block size
+    put(20, 1, 2);        // PCM
+    put(22, 1, 2);        // mono
+    put(24, rate, 4);
+    put(28, rate * 2, 4); // bytes per second
+    put(32, 2, 2);
+    put(34, 16, 2);
+    std::memcpy(wav.data() + 36, "data", 4);
+    put(40, bytes, 4);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const float t = static_cast<float>(i) / rate;
+        const float envelope = std::min(1.0f, t / 0.4f) * std::max(0.0f, 1.0f - t / seconds);
+        const float tone = std::sin(6.2831853f * 3800.0f * t) * (0.85f + 0.15f * std::sin(6.2831853f * 3.0f * t));
+        put(44 + i * 2, static_cast<std::uint16_t>(static_cast<std::int16_t>(tone * envelope * volume * 32767)), 2);
+    }
+    PlaySoundW(reinterpret_cast<LPCWSTR>(wav.data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+}
 std::uint64_t now_ms() { return GetTickCount64(); }
 
 
@@ -142,6 +196,8 @@ void start(State &s, std::uint64_t now) {
     }
     s.started = now;
     ++s.serial;
+    s.head_hit = 0;
+    s.rang = false;
     s.level.fill(0);
     s.hurt.fill(0);
     s.preview = false;
@@ -256,10 +312,9 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
                 const float into = std::max(0.0f, s.carry_down[w] - down);
                 const float sideways = std::max(0.0f, s.carry_side[w] - side);
                 const float impact = into + 0.35f * sideways;
-                const bool skull = watches[w].joint == joint::head;
-                const float crack = skull ? 4.0f : 6.0f, snap = skull ? 7.5f : 9.5f;
-                if (impact >= snap && broken < 3) injure(s, w, 2);
-                else if (impact >= crack) injure(s, w, 1);
+                if (impact >= watches[w].snap && broken < 3) injure(s, w, 2);
+                else if (impact >= watches[w].crack) injure(s, w, 1);
+                if (!s.preview && watches[w].joint == joint::head) s.head_hit = std::max(s.head_hit, impact);
                 // Spent: the same hit is not counted again next tick.
                 if (impact >= 3.0f) {
                     s.carry_down[w] = down;
@@ -288,6 +343,51 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
     if (usable) s.have_velocity = s.have_position;
     s.have_position = true;
 }
+// The joints the 3D X-ray builds its bones on. The spine between the hips and the head, and the
+// collarbones (the arms' parents), are found once from the skeleton's parent table.
+struct PoseJoints {
+    std::vector<std::uint16_t> spine; // hips .. head
+    std::array<std::uint16_t, 2> clavicle{};
+};
+const PoseJoints &pose_joints() {
+    static const PoseJoints value = [] {
+        PoseJoints p;
+        for (int j = joint::head; j >= 0 && j != joint::hips; j = skater_joint_parent[static_cast<std::size_t>(j)])
+            p.spine.insert(p.spine.begin(), static_cast<std::uint16_t>(j));
+        p.spine.insert(p.spine.begin(), joint::hips);
+        for (std::size_t side = 0; side < 2; ++side) {
+            const auto arm = side ? joint::left_arm : joint::right_arm;
+            const auto parent = skater_joint_parent[arm];
+            p.clavicle[side] = static_cast<std::uint16_t>(parent >= 0 ? parent : arm);
+        }
+        return p;
+    }();
+    return value;
+}
+overlay::BoneCamPose pose_of(const State &s) {
+    overlay::BoneCamPose pose;
+    const auto &p = pose_joints();
+    const auto at = [&](std::uint16_t j) { return s.joints[j].position; };
+    for (const auto j : p.spine) pose.spine.push_back(at(j));
+    pose.head = at(joint::head);
+    pose.head_up = rotate(s.joints[joint::head].rotation, {1, 0, 0}); // the head joint's local +X is up
+    for (std::size_t side = 0; side < 2; ++side) {
+        const bool l = side == 1;
+        pose.clavicle[side] = at(p.clavicle[side]);
+        pose.shoulder[side] = at(l ? joint::left_arm : joint::right_arm);
+        pose.elbow[side] = at(l ? joint::left_fore_arm : joint::right_fore_arm);
+        pose.wrist[side] = at(l ? joint::left_hand : joint::right_hand);
+        pose.fingers[side] = at(l ? joint::left_middle : joint::right_middle);
+        pose.hip[side] = at(l ? joint::left_up_leg : joint::right_up_leg);
+        pose.knee[side] = at(l ? joint::left_leg : joint::right_leg);
+        pose.ankle[side] = at(l ? joint::left_foot : joint::right_foot);
+        pose.toe[side] = at(l ? joint::left_toe : joint::right_toe);
+    }
+    pose.hurt.assign(s.hurt.begin(), s.hurt.end());
+    pose.valid = true;
+    return pose;
+}
+
 // The marks and hit as they look now: marks fade over their last 8 s.
 void publish_effects(State &s, std::uint64_t now, overlay::BoneCam &cam) {
     if (!s.effects || s.preview) return;
@@ -302,7 +402,20 @@ void publish_effects(State &s, std::uint64_t now, overlay::BoneCam &cam) {
         cam.hit = s.hit * (1 - since) * (1 - since);
         cam.hit_at = s.hit_at;
     }
-    cam.effects = !cam.marks.empty() || cam.hit > 0;
+    // A concussion's after-effects, once the X-ray is over: kept faint (a soft dimming at the
+    // edges, a slow sway of it), strongest at once and easing off over the concussion's time.
+    if (const auto *c = concussion_of(s.head_hit); c && now >= s.started + duration_ms) {
+        const auto into = now - (s.started + duration_ms);
+        if (into < c->lasts_ms) {
+            const float grade = std::clamp((s.head_hit - 4.0f) / 5.0f, 0.0f, 1.0f);
+            cam.daze = (0.35f + 0.65f * grade) * (1.0f - static_cast<float>(into) / c->lasts_ms);
+            if (!s.rang) {
+                s.rang = true;
+                ring(grade);
+            }
+        }
+    }
+    cam.effects = !cam.marks.empty() || cam.hit > 0 || cam.daze > 0;
 }
 void publish(State &s, std::uint64_t now, bool bones = true) {
     overlay::BoneCam cam;
@@ -319,6 +432,7 @@ void publish(State &s, std::uint64_t now, bool bones = true) {
     cam.fade = std::clamp(std::min(elapsed / static_cast<float>(fade_in_ms), left / static_cast<float>(fade_out_ms)), 0.0f, 1.0f);
     const auto &l = s.joints[joint::left_arm].position, &r = s.joints[joint::right_arm].position;
     cam.left = {l[0] - r[0], l[1] - r[1], l[2] - r[2]};
+    if (bones) cam.pose = pose_of(s);
     for (const auto &span : bones ? std::span<const Span>(spans) : std::span<const Span>()) {
         overlay::BoneCamBone bone;
         bone.sprite = static_cast<std::uint8_t>(span.sprite);
@@ -333,10 +447,15 @@ void publish(State &s, std::uint64_t now, bool bones = true) {
         bone.hurt = s.hurt[static_cast<std::size_t>(span.sprite)];
         cam.bones.push_back(bone);
     }
-    for (std::size_t w = 0; w < watch_count; ++w)
+    for (std::size_t w = 0; w < watch_count; ++w) {
+        if (watches[w].joint == joint::head) continue; // the head is listed by its concussion below
         if (s.level[w])
             cam.injuries.push_back({s.level[w] == 2 ? watches[w].broken_bone : watches[w].cracked_bone,
                                     s.level[w] == 2 ? watches[w].broken : watches[w].cracked, s.level[w] == 2});
+    }
+    // The head: a fractured skull, and the concussion graded by how hard it hit.
+    if (s.level[0] == 2) cam.injuries.push_back({"SKULL", "FRACTURED", true});
+    if (const auto *c = concussion_of(s.head_hit)) cam.injuries.push_back({"HEAD", c->what, c->from >= 7.0f});
     std::stable_sort(cam.injuries.begin(), cam.injuries.end(), [](const auto &a, const auto &b) { return a.severe > b.severe; });
     std::lock_guard lock(s.mutex);
     s.shown = std::move(cam);

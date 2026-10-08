@@ -374,12 +374,25 @@ struct BoneCamMark {
     float alpha{};                          // 0..1, fading with age
     bool skid{};
 };
+// The skater's pose for the 3D X-ray (bone_cam_3d.cpp), in world space. Sides are [0] right,
+// [1] left. `valid` once a pose has been read this bail.
+struct BoneCamPose {
+    using Point = std::array<float, 3>;
+    bool valid{};
+    std::vector<Point> spine; // the joints from the hips up to the head, in order
+    Point head{}, head_up{}; // the head joint and its up axis (unit)
+    std::array<Point, 2> clavicle{}, shoulder{}, elbow{}, wrist{}, fingers{}, hip{}, knee{}, ankle{}, toe{};
+    // Injuries by region (modes::BoneSprite order): 0 sound, 1 cracked, 2 broken.
+    std::vector<std::uint8_t> hurt;
+};
 struct BoneCam {
     bool active{};         // the X-ray itself
+    BoneCamPose pose;
     bool effects{};        // marks or a hit to draw (with or without the X-ray)
     float fade{};          // 0..1: fades in when the bail starts, out at the end
     std::vector<BoneCamMark> marks;
     float hit{};                    // 0..1: the flash of an impact, fading fast
+    float daze{};                   // 0..1: a concussion's after-effects (kept faint), fading
     std::array<float, 3> hit_at{};  // world: where it landed
     bool preview{};        // the menu's preview: the injuries are examples
     std::uint64_t serial{}; // one per bail

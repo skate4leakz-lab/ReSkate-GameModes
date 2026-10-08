@@ -140,7 +140,8 @@ bool SteamTransport::host(unsigned capacity) {
     impl_->state.hosting = true;
     return true;
 }
-bool SteamTransport::join(std::uint64_t id) {
+std::vector<std::string> SteamTransport::take_direct_notes() { return {}; } // no direct connections here
+bool SteamTransport::join(std::uint64_t id, std::uint32_t, std::uint16_t) { // the simulated bus has no direct connections
     if (SimulatedNetwork::slow_join) Sleep(2);
     stop();
     open();

@@ -1,6 +1,7 @@
 #include "overlay_internal.h"
 #include "Extension/Modes/bone_sprites.h"
 #include "Extension/UI/skate_theme.h"
+#include "bone_cam_3d.h"
 #include <wincodec.h>
 #include <future>
 
@@ -207,7 +208,7 @@ void draw_bone_cam() {
             }
         }
 
-    // The hit: the screen's edges flash red and a white burst goes off where the body struck.
+    // The hit: the screen's edges flash red.
     const auto draw_hit = [&] {
         if (cam.hit <= 0.01f) return;
         const float h = cam.hit, edge = 220 * k * (0.6f + 0.4f * h);
@@ -217,18 +218,20 @@ void draw_bone_cam() {
         draw->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(edge, display.y), red, none, none, red);
         draw->AddRectFilledMultiColor(ImVec2(display.x - edge, 0), display, none, red, red, none);
         draw->AddRectFilled(ImVec2(0, 0), display, faded(IM_COL32(255, 255, 255, 255), .12f * h * h));
-        if (const auto at = project(cam.hit_at); viewable && at.depth > .3f) {
-            const float r = (0.25f + 0.6f * (1 - h)) * focal / at.depth;
-            draw->AddCircleFilled(at.at, r * .5f, faded(IM_COL32(255, 245, 220, 255), .5f * h), 24);
-            draw->AddCircle(at.at, r, faded(IM_COL32(255, 255, 255, 255), .8f * h), 32, std::max(1.5f, 4 * k * h));
-            for (int i = 0; i < 12; ++i) {
-                const float t = i / 12.0f * 6.2831853f + 0.3f;
-                draw->AddLine(ImVec2(at.at.x + std::cos(t) * r * 1.1f, at.at.y + std::sin(t) * r * 1.1f),
-                              ImVec2(at.at.x + std::cos(t) * r * 1.6f, at.at.y + std::sin(t) * r * 1.6f),
-                              faded(IM_COL32(255, 230, 190, 255), .7f * h), std::max(1.5f, 3 * k));
-            }
-        }
     };
+    // A concussion, after the X-ray: the edges of the view dim a little and drift slowly, with a
+    // faint haze over everything. Deliberately light.
+    if (cam.daze > 0.01f && !cam.active) {
+        const float d = std::min(cam.daze, 1.0f), t = static_cast<float>(ImGui::GetTime());
+        const float sway = std::sin(t * 1.1f) * 28.0f * k * d, lift = std::sin(t * 0.8f + 1.3f) * 14.0f * k * d;
+        const float edge = (180.0f + 80.0f * d) * k;
+        const ImU32 dim = IM_COL32(8, 10, 20, static_cast<int>(70 * d)), none = IM_COL32(8, 10, 20, 0);
+        draw->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(display.x, edge + lift), dim, dim, none, none);
+        draw->AddRectFilledMultiColor(ImVec2(0, display.y - edge + lift), display, none, none, dim, dim);
+        draw->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(edge + sway, display.y), dim, none, none, dim);
+        draw->AddRectFilledMultiColor(ImVec2(display.x - edge + sway, 0), display, none, dim, dim, none);
+        draw->AddRectFilled(ImVec2(0, 0), display, IM_COL32(235, 240, 255, static_cast<int>(12 * d)));
+    }
     if (!cam.active || fade <= 0) {
         draw_hit();
         return;
@@ -239,7 +242,10 @@ void draw_bone_cam() {
 
     auto &s = sprites();
     const bool textures = s.filled && s.atlas && ImGui::GetIO().Fonts == s.atlas && s.atlas->TexID;
-    if (textures && viewable) {
+    if (viewable && cam.pose.valid) {
+        // The 3D skeleton inside the skater (bone_cam_3d.cpp); breaks show on the bones themselves.
+        draw_xray_skeleton(draw, cam.pose, XrayView{right, up, back, origin, focal, centre}, fade);
+    } else if (textures && viewable) {
         for (const auto &bone : cam.bones) {
             if (bone.sprite >= bone_sprites.size()) continue;
             const auto &sprite = bone_sprites[bone.sprite];
