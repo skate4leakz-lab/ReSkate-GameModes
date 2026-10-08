@@ -26,7 +26,7 @@ namespace dingosdk::modes {
 namespace {
 constexpr std::uint32_t wipeout_state = 300, offboard_states_first = 500;
 constexpr std::uint64_t line_grace_ms = 2500, bail_settle_ms = 3500, leader_timeout_ms = 10000, setup_every_ms = 3000,
-                        state_every_ms = 500, join_every_ms = 2000, out_of_area_ms = 6000, popup_ms = 2500;
+                        state_every_ms = 500, join_every_ms = 2000, out_of_area_ms = 3000, popup_ms = 2500;
 
 // The line the local skater is riding: tricks landed one after another, none bailed.
 struct Line {
@@ -72,10 +72,34 @@ struct Game {
     int heard_score{}, missed_warned{-1};
     float along{};
     bool have_along{};
+    // The next gate was crossed between its posts (at `crossed_at`, on its line): reported until
+    // the referee counts it, since a message can be lost.
+    bool gate_crossed{};
+    Vec3 crossed_at{};
+};
+// Another player's game, heard from its leader's setup messages: offered like a throwdown drop
+// (a banner over its spot, an announcement) and joined only when the player chooses to.
+struct Offer {
+    std::uint64_t leader{};
+    std::uint32_t game{};
+    Settings settings;
+    std::uint64_t heard{};
+    Phase phase = Phase::setup;
+    std::size_t players = 1;
+    // A leader's state message has told its phase: until then a game heard mid-way (setup
+    // messages keep coming while it is played) is not offered as open.
+    bool confirmed{};
 };
 struct State {
     std::optional<Game> game;
-    std::set<std::pair<std::uint64_t, std::uint32_t>> sat_out; // games the local player left
+    std::vector<Offer> offers;
+    // The latest announcement ("X is starting Hall of Meat"): shown for a while with the join button.
+    std::uint64_t invite_at{}, invite_leader{};
+    std::uint32_t invite_game{};
+    std::uint64_t join_hold_since{}; // A / X held (with something to join) since then
+    bool join_key_previous{};
+    std::optional<std::pair<std::uint64_t, std::uint32_t>> join_target; // what the join button would join now
+    std::set<std::pair<std::uint64_t, std::uint32_t>> sat_out; // games the local player left, or seen end: not offered again
     std::uint64_t local{}, world{};
     bool barred{}, session{};
     std::string local_name;
@@ -106,6 +130,7 @@ struct State {
     float draft_radius = 20.0f;
     float heading{};     // the skater's heading (degrees, the trainer's)
     float yaw_offset{};  // Deathrace: how far the gate being placed is turned from the heading
+    float draft_width = 6.0f; // Deathrace: the half width of the gate being placed (metres)
     // Where the next thing goes, like skate.'s quick drop: with `free_place` the free camera flies
     // and the spot is the ground it looks at; without, the ground under the skater.
     bool free_place = true, freecam_ours{}, dpad_release{};
@@ -213,7 +238,7 @@ void popup(State &s, std::string text) {
 
 // Deathrace cues, soft like Skate 3's: a rising two-note chime through a checkpoint, an arpeggio at
 // the finish, two low notes for a missed gate. Built once as small WAVs and played asynchronously.
-enum class Cue { checkpoint, finish, missed };
+enum class Cue { checkpoint, finish, missed, invite };
 std::vector<std::uint8_t> make_cue(std::initializer_list<std::pair<float, float>> notes, float volume, float overtone) {
     constexpr std::uint32_t rate = 44100;
     std::vector<std::int16_t> samples;
@@ -253,7 +278,8 @@ void play(Cue cue) {
     static const auto checkpoint = make_cue({{1318.5f, 0.07f}, {1760.0f, 0.18f}}, 0.16f, 0.15f);
     static const auto finish = make_cue({{1046.5f, 0.08f}, {1318.5f, 0.08f}, {1568.0f, 0.08f}, {2093.0f, 0.3f}}, 0.16f, 0.15f);
     static const auto missed = make_cue({{392.0f, 0.12f}, {293.7f, 0.25f}}, 0.2f, 0.35f);
-    const auto &wav = cue == Cue::checkpoint ? checkpoint : cue == Cue::finish ? finish : missed;
+    static const auto invite = make_cue({{880.0f, 0.09f}, {1174.7f, 0.09f}, {1318.5f, 0.22f}}, 0.12f, 0.1f);
+    const auto &wav = cue == Cue::checkpoint ? checkpoint : cue == Cue::finish ? finish : cue == Cue::invite ? invite : missed;
     PlaySoundW(reinterpret_cast<LPCWSTR>(wav.data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
 }
 // The leader's state before the start: who is in, nothing scored yet.
@@ -445,6 +471,24 @@ void track_skater(State &s, bool in_world, std::uint64_t now) {
 // in the same order on every machine (where the session allows teleporting; elsewhere they skate
 // there). Deathrace lines up across its start gate; a circle's players stand in a ring around its
 // centre; anything else rings the spot the leader started the game from.
+// Teleports the skater a little above `at`, facing `heading` (the trainer's degrees: facing
+// sin, cos on x and z).
+// False when the teleport was refused (a bail, a menu, a session that forbids it).
+bool teleport_to(const Vec3 &at, float heading) {
+    return !trainer::command("tp", {std::format("{:.2f}", at[0]), std::format("{:.2f}", at[1] + 0.3f), std::format("{:.2f}", at[2]),
+                                    std::format("{:.1f}", heading)})
+                .starts_with("error");
+}
+float heading_towards(const Vec3 &from, const Vec3 &to) {
+    return std::atan2(to[0] - from[0], to[2] - from[2]) * 180.0f / 3.14159265f;
+}
+// Which way Deathrace gate i faces: its own facing, else along the route (the start towards the
+// next gate, any other from the gate before it).
+float gate_heading(const Settings &st, std::size_t i) {
+    if (i < st.yaws.size()) return st.yaws[i];
+    if (st.points.size() < 2 || i >= st.points.size()) return 0.0f;
+    return i > 0 ? heading_towards(st.points[i - 1], st.points[i]) : heading_towards(st.points[0], st.points[1]);
+}
 void line_up(State &s) {
     if (!s.game || !s.skater) return;
     auto &g = *s.game;
@@ -458,17 +502,7 @@ void line_up(State &s) {
     Vec3 spot{};
     if (g.settings.mode == Mode::race && g.settings.points.size() >= 2) {
         const auto &start = g.settings.points[0];
-        float dx, dz;
-        if (!g.settings.yaws.empty()) {
-            const float yaw = g.settings.yaws[0] * 3.14159265f / 180.0f;
-            dx = std::sin(yaw);
-            dz = std::cos(yaw);
-        } else {
-            const auto &next = g.settings.points[1];
-            const float length = std::max(0.01f, std::hypot(next[0] - start[0], next[2] - start[2]));
-            dx = (next[0] - start[0]) / length;
-            dz = (next[2] - start[2]) / length;
-        }
+        const float yaw = gate_heading(g.settings, 0) * 3.14159265f / 180.0f, dx = std::sin(yaw), dz = std::cos(yaw);
         // Side by side across the gate, a step behind its line.
         const float across = (index - (count - 1.0f) * 0.5f) * 2.5f;
         spot = {start[0] - dz * across - dx * 1.5f, start[1], start[2] + dx * across - dz * 1.5f};
@@ -480,8 +514,109 @@ void line_up(State &s) {
         else return;
         const float ring = count <= 1 ? 0.0f : 2.0f + 0.6f * count, angle = 6.2831853f * index / std::max(1.0f, count);
         spot = {centre[0] + std::cos(angle) * ring, centre[1], centre[2] + std::sin(angle) * ring};
+        // Round the circle everyone faces its middle; alone, the way the leader set it up.
+        teleport_to(spot, ring > 0 ? heading_towards(spot, centre) : s.heading);
+        return;
     }
-    (void)trainer::command("tp", {std::format("{:.2f}", spot[0]), std::format("{:.2f}", spot[1] + 0.3f), std::format("{:.2f}", spot[2])});
+    teleport_to(spot, gate_heading(g.settings, 0)); // down the start gate
+}
+// Where a game's banner stands and its joiners are sent: Deathrace's start gate, the circle's or
+// area's centre, its first spot, or where its leader set it up.
+std::optional<Vec3> game_spot(const Settings &st) {
+    if (st.mode == Mode::race && !st.points.empty()) return st.points.front();
+    if (st.area_radius > 0 && !st.corners.empty()) return st.corners.front();
+    if (has_area(st)) return area_centre(st.corners);
+    if (!st.points.empty()) return st.points.front();
+    if (st.has_spawn) return st.spawn;
+    return std::nullopt;
+}
+bool offer_open(const Offer &o) { return o.confirmed && (o.phase == Phase::setup || o.phase == Phase::countdown); }
+// Joins an offered game: the leader is asked at once, and the player is put at its start, a few
+// steps from its spot (round the circle, or behind Deathrace's start gate), not on anyone's head.
+std::string join_offer(State &s, const Offer &offer, std::uint64_t now) {
+    if (s.barred) return "error: your mods change trick scoring, so you cannot play in this session.";
+    if (!offer_open(offer)) return "error: that game is already under way.";
+    if (s.game && s.game->leading) return "error: you lead a game: `mode stop` it first.";
+    // A game joined but not heard from yet counts too: replacing it silently would leave its leader
+    // counting this player in.
+    if (s.game && (!s.game->state || s.game->state->phase != Phase::results))
+        return "error: you are in " + name_of(s, s.game->leader) + "'s game: `mode leave` first.";
+    Game g;
+    g.leader = offer.leader;
+    g.id = offer.game;
+    g.settings = offer.settings;
+    g.heard = now;
+    g.join_sent = now;
+    s.game = std::move(g);
+    send(s, header(*s.game, Message::Kind::join));
+    const auto text = std::format("Joined {}'s {}!", name_of(s, offer.leader), mode_name(offer.settings.mode));
+    if (const auto spot = game_spot(offer.settings); spot && s.skater) {
+        const float angle = static_cast<float>(self_id(s) % 12) * 0.5236f; // twelve places round it
+        Vec3 at{(*spot)[0] + std::cos(angle) * 3.0f, (*spot)[1], (*spot)[2] + std::sin(angle) * 3.0f};
+        float facing = heading_towards(at, *spot);
+        if (offer.settings.mode == Mode::race) {
+            facing = gate_heading(offer.settings, 0);
+            const float yaw = facing * 3.14159265f / 180.0f, side = (static_cast<float>(self_id(s) % 5) - 2.0f) * 2.0f;
+            at = {(*spot)[0] - std::sin(yaw) * 3.0f - std::cos(yaw) * side, (*spot)[1], (*spot)[2] - std::cos(yaw) * 3.0f + std::sin(yaw) * side};
+        }
+        teleport_to(at, facing);
+    }
+    std::erase_if(s.offers, [&](const Offer &o) { return o.leader == offer.leader; });
+    s.invite_at = 0;
+    popup(s, text);
+    return text;
+}
+// Offers drop when their leader is gone or quiet, or their game ends. While not in a game, the
+// join button (A / X held on a pad, J tapped on the keyboard) joins the one just announced (for
+// 15 s), or else one whose banner the skater stands within 30 m of. A / X is skate.'s push, so a
+// tap never joins: it must be held.
+bool game_window_focused();
+constexpr std::uint64_t invite_ms = 15000, join_hold_ms = 800;
+constexpr std::uint32_t pad_a = 0x1000; // XINPUT_GAMEPAD_A: A on an Xbox pad, X (cross) on a PlayStation one
+void run_invites(State &s, std::uint64_t now) {
+    // A game seen reach its results is not offered again by the setup messages its leader keeps
+    // sending until it closes.
+    for (const auto &o : s.offers)
+        if (o.phase == Phase::results) s.sat_out.insert({o.leader, o.game});
+    std::erase_if(s.offers, [&](const Offer &o) {
+        return now - o.heard > leader_timeout_ms || (s.session && !s.present.contains(o.leader)) || o.phase == Phase::results ||
+               s.sat_out.contains({o.leader, o.game}) || (s.game && s.game->leader == o.leader && s.game->id == o.game);
+    });
+    s.join_target.reset();
+    const bool free = !s.game || (s.game->state && s.game->state->phase == Phase::results);
+    if (free && s.placing == State::Placing::none) {
+        const Offer *pick{};
+        if (now - s.invite_at < invite_ms)
+            for (const auto &o : s.offers)
+                if (o.leader == s.invite_leader && o.game == s.invite_game && offer_open(o)) pick = &o;
+        if (!pick && s.skater) {
+            float best = 30.0f;
+            for (const auto &o : s.offers)
+                if (const auto spot = game_spot(o.settings); spot && offer_open(o)) {
+                    const float d = std::hypot((*spot)[0] - s.position[0], (*spot)[2] - s.position[2]);
+                    if (d < best && std::abs((*spot)[1] - s.position[1]) < 15.0f) best = d, pick = &o;
+                }
+        }
+        if (pick) s.join_target = std::make_pair(pick->leader, pick->game);
+    }
+    ControllerInput pad;
+    DingoSDKOverlayReadControllerInput(&pad);
+    const bool a_held = pad.available && (pad.buttons & pad_a);
+    // The hold starts once there is something to join: pushing up to a banner does not count.
+    if (!a_held || !s.join_target) s.join_hold_since = 0;
+    else if (!s.join_hold_since) s.join_hold_since = now;
+    const bool a = s.join_hold_since && now - s.join_hold_since >= join_hold_ms;
+    const bool key = overlay::key_down('J');
+    const bool j = key && !s.join_key_previous;
+    s.join_key_previous = key;
+    if (!s.join_target || !(a || j) || overlay::interface_open() || !game_window_focused()) return;
+    if (a) s.join_hold_since = now; // one try per hold
+    for (const auto &o : s.offers)
+        if (o.leader == s.join_target->first && o.game == s.join_target->second) {
+            const auto offer = o; // join_offer drops it from the list
+            (void)join_offer(s, offer, now);
+            return;
+        }
 }
 std::string gate_name(std::size_t index, std::size_t count);
 // Deathrace: the next checkpoint reached. The area: a player outside it for a while is put back.
@@ -499,6 +634,7 @@ void track_game(State &s, std::uint64_t now) {
         if (me->score > g.heard_score) {
             g.heard_score = me->score;
             g.have_along = false;
+            g.gate_crossed = false;
             if (me->score > 0) {
                 const bool finished = static_cast<std::size_t>(me->score) >= count;
                 play(finished ? Cue::finish : Cue::checkpoint);
@@ -513,26 +649,37 @@ void track_game(State &s, std::uint64_t now) {
         const auto index = static_cast<std::size_t>(me->score);
         const auto &next = g.settings.points[index];
         const float dx = s.position[0] - next[0], dz = s.position[2] - next[2];
-        if (std::sqrt(dx * dx + dz * dz) <= g.settings.radius && std::abs(s.position[1] - next[1]) <= 10.0f &&
-            (g.checkpoint_sent != me->score || now - g.checkpoint_at > 1500)) {
+        const float half = gate_half_width(g.settings, index);
+        // A gate counts when the skater crosses its line, forwards, between its posts: not on
+        // getting near it. Its facing is its own (or along the route).
+        const float yaw = gate_heading(g.settings, index) * 3.14159265f / 180.0f;
+        const float fx = std::sin(yaw), fz = std::cos(yaw);
+        const float along = dx * fx + dz * fz, across = std::abs(dx * fz - dz * fx);
+        const bool level = std::abs(s.position[1] - next[1]) <= 10.0f;
+        // Crossing the line either way counts (as in Skate 3: a gate placed facing back the way the
+        // route comes is still a gate). The start also counts for a skater already just past its
+        // line when the race begins (rolled over it during the countdown).
+        const bool crossed = g.have_along ? (g.along < 0) != (along < 0) && std::abs(along) < 6.0f && std::abs(g.along) < 6.0f
+                                          : index == 0 && along >= 0 && along < 15.0f;
+        if (crossed && across <= half && level && !g.gate_crossed) {
+            g.gate_crossed = true;
+            g.crossed_at = {s.position[0] - fx * along, s.position[1], s.position[2] - fz * along}; // on the line
+        }
+        // Reported (again every 1.5 s) until the referee counts it: a lost message must not cost the gate.
+        if (g.gate_crossed && (g.checkpoint_sent != me->score || now - g.checkpoint_at > 1500)) {
             g.checkpoint_sent = me->score;
             g.checkpoint_at = now;
-            report(s, Event::checkpoint, me->score, 0, s.position);
+            report(s, Event::checkpoint, me->score, 0, g.crossed_at);
         }
-        // Missed: across the gate's line but outside its posts, or already at a later gate.
-        bool missed = false;
-        if (index < g.settings.yaws.size() && index > 0) {
-            const float yaw = g.settings.yaws[index] * 3.14159265f / 180.0f, fx = std::sin(yaw), fz = std::cos(yaw);
-            const float along = dx * fx + dz * fz, across = std::abs(dx * fz - dz * fx);
-            if (g.have_along && g.along < 0 && along >= 0 && across > g.settings.radius && across < g.settings.radius + 20.0f &&
-                std::abs(s.position[1] - next[1]) <= 10.0f)
-                missed = true;
-            g.along = along;
-            g.have_along = true;
-        }
-        for (std::size_t later = index + 1; later < g.settings.points.size() && !missed; ++later) {
+        // Missed: across the gate's line but outside its posts, or already through a later gate.
+        // (Not while a crossing waits for the referee: the skater rides on to the next gate meanwhile.)
+        bool missed = index > 0 && crossed && across > half && across < half + 20.0f && level;
+        g.along = along;
+        g.have_along = true;
+        for (std::size_t later = index + 1; later < g.settings.points.size() && !missed && !g.gate_crossed; ++later) {
             const auto &p = g.settings.points[later];
-            if (std::hypot(s.position[0] - p[0], s.position[2] - p[2]) <= g.settings.radius && std::abs(s.position[1] - p[1]) <= 10.0f)
+            if (std::hypot(s.position[0] - p[0], s.position[2] - p[2]) <= gate_half_width(g.settings, later) * 0.5f &&
+                std::abs(s.position[1] - p[1]) <= 10.0f)
                 missed = true;
         }
         if (missed && g.missed_warned != me->score) {
@@ -552,8 +699,10 @@ void track_game(State &s, std::uint64_t now) {
         s.outside_since = now; // try again later if the teleport is refused
         // The last spot inside only while it is inside this game's area (it may be from an earlier game's).
         const auto back = s.last_inside && inside(g.settings, *s.last_inside) ? *s.last_inside : area_centre(g.settings.corners);
-        (void)trainer::command("tp", {std::format("{:.2f}", back[0]), std::format("{:.2f}", back[1] + 0.3f),
-                                      std::format("{:.2f}", back[2])});
+        const auto middle = g.settings.area_radius > 0 ? g.settings.corners[0] : area_centre(g.settings.corners);
+        // Back inside, facing into the area.
+        if (teleport_to(back, std::hypot(middle[0] - back[0], middle[2] - back[2]) > 1.0f ? heading_towards(back, middle) : s.heading))
+            popup(s, "Back in the area");
     }
 }
 
@@ -564,13 +713,14 @@ void settings_changed(Game &g) {
     auto &s = g.settings;
     if (s.mode != Mode::race) {
         s.yaws.clear();
+        s.widths.clear();
         return;
     }
-    for (std::size_t i = s.yaws.size(); i < s.points.size(); ++i) {
-        const auto &a = s.points[i > 0 ? i - 1 : i], &b = s.points[i > 0 ? i : std::min(i + 1, s.points.size() - 1)];
-        s.yaws.push_back(std::atan2(b[0] - a[0], b[2] - a[2]) * 180.0f / 3.14159265f);
-    }
+    for (std::size_t i = s.yaws.size(); i < s.points.size(); ++i) s.yaws.push_back(gate_heading(s, i));
     s.yaws.resize(s.points.size());
+    // Every gate has a width too: one placed without keeps the game's checkpoint radius.
+    while (s.widths.size() < s.points.size()) s.widths.push_back(std::clamp(s.radius, min_gate_half_width, max_gate_half_width));
+    s.widths.resize(s.points.size());
 }
 bool game_window_focused() {
     DWORD process{};
@@ -717,13 +867,21 @@ void run_placing(State &s, std::uint64_t now) {
         // The gate faces the way the skater is going; holding D-pad Up (or PgUp/PgDn) turns it.
         const bool left = held(VK_PRIOR), right = (buttons & pad_up) || held(VK_NEXT);
         if (left != right) s.yaw_offset += (left ? -120.0f : 120.0f) * seconds;
-        s.yaw_offset += notches * 15.0f; // each wheel notch: 15 degrees
+        // The wheel turns the gate; with Ctrl held (or [ and ]) it widens or narrows it instead.
+        const bool ctrl = held(VK_CONTROL);
+        if (ctrl) s.draft_width *= std::pow(1.15f, notches);
+        else s.yaw_offset += notches * 15.0f; // each wheel notch: 15 degrees
+        const bool narrow = held(VK_OEM_4), widen = held(VK_OEM_6);
+        if (narrow != widen) s.draft_width *= std::pow(widen ? 1.8f : 1.0f / 1.8f, seconds);
+        s.draft_width = std::clamp(s.draft_width, min_gate_half_width, max_gate_half_width);
     }
     const bool finish_now = route && done;
     if (confirm && list.size() + (route ? 1 : 0) < limit) {
         if (route) {
             g.settings.yaws.resize(list.size());
             g.settings.yaws.push_back(s.cursor_heading + s.yaw_offset);
+            g.settings.widths.resize(list.size(), s.draft_width);
+            g.settings.widths.push_back(s.draft_width); // the next gate starts as wide as this one
             s.yaw_offset = 0;
         }
         list.push_back(s.cursor);
@@ -736,6 +894,7 @@ void run_placing(State &s, std::uint64_t now) {
         } else {
             list.pop_back();
             if (!corners && g.settings.yaws.size() > list.size()) g.settings.yaws.resize(list.size());
+            if (!corners && g.settings.widths.size() > list.size()) g.settings.widths.resize(list.size());
             settings_changed(g);
             popup(s, std::format("Removed the last one ({} left)", list.size()));
         }
@@ -743,6 +902,8 @@ void run_placing(State &s, std::uint64_t now) {
         // The finish goes where the skater stands.
         g.settings.yaws.resize(list.size());
         g.settings.yaws.push_back(s.cursor_heading + s.yaw_offset);
+        g.settings.widths.resize(list.size(), s.draft_width);
+        g.settings.widths.push_back(s.draft_width);
         s.yaw_offset = 0;
         list.push_back(s.cursor);
         settings_changed(g);
@@ -932,6 +1093,7 @@ void build_hud(State &s, std::uint64_t now) {
         if (mode == Mode::race && me && phase != Phase::results) h.next_point = me->score;
         h.route = mode == Mode::race;
         h.point_yaws = g.settings.yaws;
+        h.point_widths = g.settings.widths;
         h.area_radius = g.settings.area_radius;
         h.have_me = s.skater;
         h.me = s.position;
@@ -964,14 +1126,17 @@ void build_hud(State &s, std::uint64_t now) {
                 if (mode == Mode::race) {
                     h.point_yaws.resize(g.settings.points.size());
                     h.point_yaws.push_back(s.cursor_heading + s.yaw_offset);
+                    h.point_widths.resize(g.settings.points.size(), g.settings.radius);
+                    h.point_widths.push_back(s.draft_width);
                     h.hint = s.free_place ? (g.settings.points.empty() ? "Fly the camera and aim at the start line" : "Aim at the next gate along the course")
                                          : (g.settings.points.empty() ? "Skate to the start line" : "Skate the course");
                     h.prompts = g.settings.points.empty()
                         ? std::vector<overlay::ModesHud::Prompt>{{'R', m ? "Click / Enter" : "Enter", "Start gate"}, {'U', m ? "Mouse wheel" : "PgUp", "Turn"}, {'L', "Backspace", "Cancel"}}
                         : std::vector<overlay::ModesHud::Prompt>{{'R', m ? "Click / Enter" : "Enter", "Checkpoint"}, {'U', m ? "Mouse wheel" : "PgUp", "Turn"}, {'D', m ? "F / End" : "End", "Finish"}, {'L', "Backspace", "Undo"}};
-                    h.line = g.settings.points.empty() ? std::string("Route: nothing yet")
-                                                       : std::format("Route: start + {} checkpoint{}", g.settings.points.size() - 1,
-                                                                     g.settings.points.size() == 2 ? "" : "s");
+                    h.line = (g.settings.points.empty() ? std::string("Route: nothing yet")
+                                                        : std::format("Route: start + {} checkpoint{}", g.settings.points.size() - 1,
+                                                                      g.settings.points.size() == 2 ? "" : "s")) +
+                             std::format("  -  gate {:.0f} m wide ({})", s.draft_width * 2, m ? "Ctrl + wheel or [ ]" : "[ ]");
                     break;
                 }
                 h.hint = std::format("{} each {}", s.free_place ? "Aim at" : "Skate to", point_name(g));
@@ -1019,6 +1184,35 @@ void build_hud(State &s, std::uint64_t now) {
         m.placing = s.placing == State::Placing::circle ? "circle" : s.placing == State::Placing::corners ? "corners"
                   : s.placing == State::Placing::points ? "points" : "";
     }
+    // Other players' games: banners over the world, the announcement, and the menu's list.
+    for (const auto &o : s.offers) {
+        if (!o.confirmed) continue; // its phase is not known yet (a state message follows within half a second)
+        overlay::ModesHudOffer offer;
+        std::string mode(mode_name(o.settings.mode));
+        for (auto &c : mode) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        offer.mode = mode;
+        offer.host = name_of(s, o.leader) + (o.leader == s.invite_leader && now - s.invite_at < invite_ms ? "  -  NEW" : "");
+        offer.open = offer_open(o);
+        offer.detail = std::format("{} player{}  -  {}", o.players, o.players == 1 ? "" : "s",
+                                   o.phase == Phase::countdown ? "starting now!" : offer.open ? "join now" : "in progress");
+        if (const auto spot = game_spot(o.settings)) {
+            offer.at = *spot;
+            offer.has_at = true;
+        }
+        offer.target = s.join_target && s.join_target->first == o.leader && s.join_target->second == o.game;
+        offer.id = o.leader;
+        h.offers.push_back(offer);
+        m.offers.push_back(offer);
+    }
+    h.can_join = s.join_target.has_value();
+    if (s.invite_at && now - s.invite_at < invite_ms) {
+        for (const auto &o : s.offers)
+            if (o.leader == s.invite_leader && o.game == s.invite_game) {
+                h.invite = std::format("{} is starting {}", name_of(s, o.leader), mode_name(o.settings.mode));
+                const float age = static_cast<float>(now - s.invite_at);
+                h.invite_fade = std::clamp(std::min(age / 250.0f, (invite_ms - age) / 1000.0f), 0.0f, 1.0f);
+            }
+    }
     std::lock_guard lock(s.hud_mutex);
     s.hud = std::move(h);
     s.menu = std::move(m);
@@ -1063,6 +1257,7 @@ std::vector<std::vector<std::uint8_t>> tick(const SessionInput &input) {
     try {
         track_skater(s, input.in_world, now);
         run_placing(s, now);
+        run_invites(s, now);
         if (s.game) {
             if (s.game->leading) run_leader(s, *s.game, now);
             else run_player(s, *s.game, now);
@@ -1103,24 +1298,39 @@ bool receive(std::uint64_t sender, std::span<const std::uint8_t> bytes) {
             s.game->heard = now;
             break;
         }
-        // Already in a game: a new one is only taken up once ours is over or its leader is gone.
-        if (s.game && (s.game->leading || (s.game->state && s.game->state->phase != Phase::results &&
-                                           now - s.game->heard <= leader_timeout_ms)))
-            break;
-        Game g;
-        g.leader = m.leader;
-        g.id = m.game;
-        g.settings = m.settings;
-        g.heard = now;
-        s.game = std::move(g);
-        notice(s, std::format("{} started {}: you're in! (`mode leave` to sit it out)", name_of(s, m.leader),
-                              mode_name(m.settings.mode)));
+        // Someone else's game: offered, like a throwdown drop, never joined without asking.
+        auto found = std::find_if(s.offers.begin(), s.offers.end(), [&](const Offer &o) { return o.leader == m.leader && o.game == m.game; });
+        if (found == s.offers.end()) {
+            // A leader's new game replaces their old offer.
+            // Announced once its leader's state says it is still taking players.
+            std::erase_if(s.offers, [&](const Offer &o) { return o.leader == m.leader; });
+            s.offers.push_back({m.leader, m.game, m.settings, now});
+        } else {
+            found->settings = m.settings;
+            found->heard = now;
+        }
         break;
     }
     case Message::Kind::state:
         if (ours && !s.game->leading && sender == m.leader) {
             s.game->state = m;
             s.game->heard = now;
+        } else if (!ours && sender == m.leader) {
+            for (auto &o : s.offers)
+                if (o.leader == m.leader && o.game == m.game) {
+                    o.phase = m.phase;
+                    o.players = std::max<std::size_t>(1, m.standings.size());
+                    o.heard = now;
+                    // First word of its phase: a game still taking players is announced.
+                    if (!std::exchange(o.confirmed, true) && offer_open(o) && !s.game) {
+                        s.invite_at = now;
+                        s.invite_leader = o.leader;
+                        s.invite_game = o.game;
+                        play(Cue::invite);
+                        notice(s, std::format("{} is starting {}! Hold A / X (or press J) to join, or open GAME MODES.",
+                                              name_of(s, o.leader), mode_name(o.settings.mode)));
+                    }
+                }
         }
         break;
     case Message::Kind::event:
@@ -1154,6 +1364,10 @@ bool receive(std::uint64_t sender, std::span<const std::uint8_t> bytes) {
     case Message::Kind::end:
         if (ours && !s.game->leading && sender == m.leader)
             end_game(s, std::string(mode_name(s.game->settings.mode)) + " is over.");
+        else if (!ours && sender == m.leader) { // someone else's game was stopped: no longer offered
+            s.sat_out.insert({m.leader, m.game});
+            std::erase_if(s.offers, [&](const Offer &o) { return o.leader == m.leader && o.game == m.game; });
+        }
         break;
     }
     return true;
@@ -1167,6 +1381,37 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
     const std::string v(verb);
     if (v.empty() || v == "help" || v == "list") return help();
     if (v == "bonecam") return bone_cam_command(arguments);
+    if (v == "games") {
+        if (s.offers.empty()) return "No other games right now.";
+        std::string text = "Open games (mode join <n>):";
+        for (std::size_t i = 0; i < s.offers.size(); ++i) {
+            const auto &o = s.offers[i];
+            text += std::format("\n  {}. {}'s {} - {} player{}{}", i + 1, name_of(s, o.leader), mode_name(o.settings.mode), o.players,
+                                o.players == 1 ? "" : "s", offer_open(o) ? "" : " (in progress)");
+        }
+        return text;
+    }
+    if (v == "join") {
+        // `mode join` takes the announced or nearest game; `mode join <n>` the list's nth; a menu row
+        // passes its host's id.
+        const Offer *pick{};
+        if (arguments.empty()) {
+            for (const auto &o : s.offers)
+                if (s.join_target && o.leader == s.join_target->first && o.game == s.join_target->second) pick = &o;
+            if (!pick && s.offers.size() == 1) pick = &s.offers.front();
+        } else {
+            std::uint64_t value{};
+            const auto &text = arguments[0];
+            if (std::from_chars(text.data(), text.data() + text.size(), value).ec == std::errc{}) {
+                if (value >= 1 && value <= s.offers.size()) pick = &s.offers[value - 1];
+                for (const auto &o : s.offers)
+                    if (o.leader == value) pick = &o;
+            }
+        }
+        if (!pick) return s.offers.empty() ? "error: there is no game to join." : "error: which one? mode games lists them.";
+        const auto offer = *pick;
+        return join_offer(s, offer, now);
+    }
     if (v == "bounce") {
         const auto describe = [&] {
             return s.bounce <= 0 ? std::string("Bail bounce off.")
@@ -1214,6 +1459,9 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         g.leading = true;
         g.settings.mode = *mode;
         g.settings.duration_s = default_duration(*mode);
+        // Where it was set up: its banner's spot for the others until an area or route is placed.
+        g.settings.spawn = s.position;
+        g.settings.has_spawn = true;
         g.heard = now;
         s.game = std::move(g);
         std::string next;
@@ -1286,7 +1534,9 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
             if (g.settings.mode == Mode::race) { // a route is skated again from its start
                 g.settings.points.clear();
                 g.settings.yaws.clear();
+                g.settings.widths.clear();
                 s.yaw_offset = 0;
+                s.draft_width = std::clamp(g.settings.radius, min_gate_half_width, max_gate_half_width);
                 settings_changed(g);
             }
             s.placing = State::Placing::points;
@@ -1341,7 +1591,14 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
     if (v == "time") return set_number(30, 3600, [&](float x) { g.settings.duration_s = static_cast<std::uint32_t>(x); }, "Time (s)");
     if (v == "turn") return set_number(10, 120, [&](float x) { g.settings.turn_s = static_cast<std::uint32_t>(x); }, "Turn time (s)");
     if (v == "strikes") return set_number(1, 5, [&](float x) { g.settings.strikes = static_cast<std::uint8_t>(x); }, "Strikes");
-    if (v == "radius") return set_number(1, 50, [&](float x) { g.settings.radius = x; }, "Radius (m)");
+    if (v == "radius")
+        return set_number(1, 50, [&](float x) {
+            g.settings.radius = x;
+            // Deathrace: the reach is how wide its gates are, the ones placed already too.
+            const float half = std::clamp(x, min_gate_half_width, max_gate_half_width);
+            for (auto &width : g.settings.widths) width = half;
+            s.draft_width = half;
+        }, "Radius (m)");
     if (v == "start") {
         if (const auto why = missing(g.settings); !why.empty()) return "error: " + why;
         if (s.skater) {
@@ -1378,7 +1635,7 @@ overlay::ModesHud hud() {
     overlay::ModesHud h;
     {
         std::lock_guard lock(s.hud_mutex);
-        if (!s.hud.active) return {};
+        if (!s.hud.active && s.hud.offers.empty() && s.hud.invite.empty()) return {};
         h = s.hud;
     }
     if (const auto view = latest_game_view()) {

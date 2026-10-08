@@ -313,8 +313,22 @@ struct ModesHudTag {
     bool gap{};
     std::uint32_t color{};
 };
+// Another player's game the local player is not in, shown like a throwdown drop: a banner over
+// its spot (the start gate, the area's centre or where it was set up) and a row in the menu.
+struct ModesHudOffer {
+    std::string mode, host, detail;  // "HALL OF MEAT", "Huntredbanzzz", "3 players - join now"
+    std::array<float, 3> at{};
+    bool has_at{};
+    bool open{};   // still taking players (setting up or counting down)
+    bool target{}; // the one the join button acts on now
+    std::uint64_t id{}; // `mode join <id>`
+};
 struct ModesHud {
-    bool active{};
+    bool active{};        // in a game (the panel, the area and the rest); offers draw either way
+    std::vector<ModesHudOffer> offers;
+    std::string invite;   // "Huntredbanzzz is starting Hall of Meat", shown for a while after it appears
+    float invite_fade{};  // 0..1
+    bool can_join{};      // a join button press would join `target` now
     std::string title;    // "Graffiti"
     std::string clock;    // "2:31", the countdown's "3", or empty
     std::string status;   // what to do now
@@ -348,6 +362,7 @@ struct ModesHud {
     int next_point{-1};                        // Deathrace: the local player's next checkpoint
     bool route{};                              // the points are a Deathrace route: start, checkpoints, finish
     std::vector<float> point_yaws;             // each gate's facing, degrees (the trainer's heading); empty: along the route
+    std::vector<float> point_widths;           // each gate's half width in metres; empty: `radius`
     float radius{};
     std::vector<ModesHudTag> tags;
     std::array<float, 16> camera{}; // world matrix: right, up, back, position rows
@@ -417,6 +432,7 @@ struct ModesMenu {
     std::string bone_cam;         // "meat", "on" or "off"
     float area_radius{};          // > 0: the area is a circle
     std::string placing;          // "circle", "corners", "points" while placing on the skater; else empty
+    std::vector<ModesHudOffer> offers; // other players' games, to join from the menu
 };
 using ModesMenuFeed = ModesMenu (*)();
 void set_modes_menu_feed(ModesMenuFeed) noexcept;

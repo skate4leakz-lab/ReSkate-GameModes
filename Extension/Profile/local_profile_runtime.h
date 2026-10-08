@@ -68,8 +68,9 @@ bool clear_local_persisted_objects(std::string_view map);
 bool delete_local_placed_object(std::string_view map, std::uint64_t token);
 bool teleport_to_local_placed_object(std::string_view map, std::uint64_t token);
 // Teleports the local skater to a world position (sent within 5 s, when the skater can be
-// moved). False when the game's teleport is unavailable.
-bool teleport_local_skater(const std::array<float, 3>& position);
+// moved). False when the game's teleport is unavailable. `yaw`: the way the skater faces after it, in the
+// trainer's heading degrees (facing sin(yaw), cos(yaw) on x and z); none keeps the old upright default.
+bool teleport_local_skater(const std::array<float, 3>& position, std::optional<float> yaw = std::nullopt);
 // Small allowlisted progression commands, executed on the game update thread.
 bool set_local_progression(const std::vector<std::string>& arguments);
 // Small ReSkate-owned booleans saved beside the profile under a "ReSkate."

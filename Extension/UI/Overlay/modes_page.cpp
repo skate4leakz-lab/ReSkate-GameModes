@@ -76,8 +76,20 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
     const auto m = modes_menu();
     ImGui::BeginChild("modes-page", ImVec2(0, page_body_height(menu)));
     const auto *current = find_mode(m.mode);
+    // Other players' games, like the throwdown list: what is on, who hosts it, and a way in.
+    if (!m.offers.empty()) {
+        begin_card(menu, "modes-open", "OPEN GAMES", "Other players' games. Joining puts you at its start.");
+        for (const auto &offer : m.offers) {
+            ImGui::PushID(static_cast<int>(offer.id & 0x7fffffff));
+            info(menu, offer.mode.c_str(), offer.host + "  -  " + offer.detail);
+            if (primary_button(menu, offer.open ? "JOIN" : "IN PROGRESS", offer.open && !(m.in_game && m.phase != 4)))
+                command(menu, callbacks, std::format("join {}", offer.id));
+            ImGui::PopID();
+        }
+        end_card();
+    }
     if (!m.in_game) {
-        begin_card(menu, "modes-new", "START A GAME", "Pick a Skate 3 online mode. Everyone in your lobby with game modes joins.");
+        begin_card(menu, "modes-new", "START A GAME", "Pick a Skate 3 online mode. Everyone in your lobby with game modes gets an invite.");
         choice(menu, "modes-pick-a", p.pick, {"SPOT JAM", "1-UP", "HALL OF MEAT"});
         int second = p.pick - 3;
         if (choice(menu, "modes-pick-b", second, {"DEATHRACE", "DOMINATION", "GRAFFITI"})) p.pick = second + 3;
@@ -92,9 +104,11 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
         end_card();
 
         if (!m.placing.empty()) {
-            begin_card(menu, "modes-placing", "PLACING", "Close this menu (Insert) and skate. The controls are on screen.");
-            if (m.placing == "circle") note("Skate to the centre. D-pad Up/Down (PgUp/PgDn) sizes the circle; D-pad Right (Enter) sets it.");
-            else note("D-pad Right (Enter) adds one where you stand, D-pad Left (Backspace) undoes, D-pad Down (End) finishes.");
+            begin_card(menu, "modes-placing", "PLACING", "Close this menu (Insert): the free camera flies and the controls are on screen.");
+            note("Fly with WASD, Q/E and the right mouse button (or the sticks and triggers). Aim the reticle at the ground.");
+            if (m.placing == "circle") note("Mouse wheel sizes the circle; left click (Enter) sets it; Backspace cancels.");
+            else if (m.mode == "race") note("Left click drops the start, then each checkpoint; F drops the finish. The wheel turns a gate, Ctrl + wheel (or [ ]) widens it. Backspace undoes.");
+            else note("Left click (Enter) drops one where you aim, Backspace undoes, F (End) finishes.");
             if (small_button(menu, "STOP PLACING")) command(menu, callbacks, "place cancel");
             end_card();
         }
@@ -122,7 +136,7 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
                 info(menu, "Route", m.points == 0 ? std::string("not set")
                                     : m.points == 1 ? std::string("start only")
                                     : std::format("start, {} checkpoint{}, finish", m.points - 2, m.points == 3 ? "" : "s"));
-                note("Skate the course: D-pad Right drops the start, then each checkpoint; D-pad Down drops the finish.");
+                note("Fly the free camera along the course: left click drops the start and each checkpoint, F the finish. Turn a gate with the wheel, widen it with Ctrl + wheel.");
                 if (primary_button(menu, "PLACE ROUTE")) command(menu, callbacks, "place points");
             } else {
                 info(menu, "Placed", std::to_string(m.points));

@@ -32,7 +32,7 @@ bool timed(Mode) noexcept; // ends when the clock runs out (1-Up ends on strikes
 enum class Phase : std::uint8_t { setup = 1, countdown = 2, playing = 3, results = 4 };
 
 inline constexpr std::uint8_t wire_magic = 0xD5; // never a throwdown message's first byte (1..15)
-inline constexpr std::uint8_t wire_version = 4; // 2: circle areas; 3: Graffiti tags; 4: spawn, gate facings
+inline constexpr std::uint8_t wire_version = 5; // 2: circle areas; 3: Graffiti tags; 4: spawn, gate facings; 5: gate widths
 inline constexpr std::size_t max_corners = 16, max_points = 16, max_players = 16, max_zones = 64, max_calls = 4,
                              max_call_length = 96, max_tags = 64, max_tag_points = 6, max_line_tags = 6;
 inline constexpr std::uint32_t countdown_ms = 5000, results_ms = 12000;
@@ -47,6 +47,7 @@ struct Settings {
     float area_radius{};            // > 0: the area is a circle this wide around corners[0] instead
     std::vector<Vec3> points;       // Deathrace checkpoints in order, Domination spots
     std::vector<float> yaws;        // Deathrace: each gate's facing in degrees (empty: along the route)
+    std::vector<float> widths;      // Deathrace: each gate's half width in metres (empty: `radius`)
     Vec3 spawn{};                   // where everyone starts when the countdown begins
     bool has_spawn{};
     bool operator==(const Settings &) const = default;
@@ -62,6 +63,9 @@ bool has_area(const Settings &) noexcept;
 // Where to put back a player who wandered out: the corners' average height, at their middle.
 Vec3 area_centre(const std::vector<Vec3> &corners) noexcept;
 inline constexpr float min_area_radius = 3.0f, max_area_radius = 300.0f;
+// A Deathrace gate's half width: its own, or the game's checkpoint radius.
+inline constexpr float min_gate_half_width = 1.5f, max_gate_half_width = 40.0f;
+float gate_half_width(const Settings &, std::size_t gate) noexcept;
 
 // Graffiti tags, the way THPS tags what you skate: a grind is the path the board slid along a
 // curb, ledge or rail; a gap is a drop of a metre or more from takeoff to landing (stair sets,

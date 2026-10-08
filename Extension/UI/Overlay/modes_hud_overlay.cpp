@@ -159,9 +159,9 @@ float horizontal_to_segment(const Vec3 &p, const Vec3 &a, const Vec3 &b) {
     return std::sqrt(x * x + z * z);
 }
 
-// The play area's edge, the way skate. marks a jam: a glowing see-through wall fading upward, with
-// stripes drifting along it and a bright line on the ground. Away from the edge it stays faint and
-// comes up as the skater nears it. While being placed it is blue.
+// The play area's edge, the way skate.'s throwdowns mark theirs: a tall see-through wall, brightest
+// at the ground and thinning as it rises, with fine ribs and soft bands drifting up it, always in
+// sight and lighting up round the skater as they come close. While being placed it is blue.
 void draw_boundary(ImDrawList *draw, const Camera &cam, const ModesHud &h, float scale) {
     std::vector<std::pair<Vec3, Vec3>> edges;
     if (h.area_radius > 0 && !h.corners.empty()) {
@@ -179,63 +179,78 @@ void draw_boundary(ImDrawList *draw, const Camera &cam, const ModesHud &h, float
     }
     if (edges.empty()) return;
     const ImU32 base = h.placing ? placing_colour : theme::bar;
-    const float height = 2.4f, time = static_cast<float>(ImGui::GetTime());
+    const float time = static_cast<float>(ImGui::GetTime());
+    // As tall as a throwdown's wall, and taller when the skater climbs: the area has no lid.
+    const float floor_y = edges.front().first[1];
+    const float height = std::max(25.0f, h.have_me ? h.me[1] - floor_y + 12.0f : 25.0f);
+    const auto at = [](const Vec3 &p, float up) { return Vec3{p[0], p[1] + up, p[2]}; };
     for (const auto &[a, b] : edges) {
-        if (cam.distance(a) > 400.0f && cam.distance(b) > 400.0f) continue;
-        const float gap = h.have_me ? horizontal_to_segment(h.me, a, b) : 30.0f;
-        const float show = h.placing ? 0.9f : std::clamp(1.25f - gap / 18.0f, 0.18f, 1.0f);
-        const Vec3 a0{a[0], a[1] + 0.02f, a[2]}, b0{b[0], b[1] + 0.02f, b[2]}, a1{a[0], a[1] + height, a[2]}, b1{b[0], b[1] + height, b[2]};
-        const ImU32 bottom = with_alpha(base, 0.42f * show), top = with_alpha(base, 0.0f);
-        const Vec3 wall[]{a0, b0, b1, a1};
-        const ImU32 shade[]{bottom, bottom, top, top};
-        fill_world(draw, cam, wall, shade);
-        // The area reaches all the way up: a skater on a roof sees the wall at their own height
-        // too, a glowing band fading above and below them.
-        if (h.have_me && h.me[1] - a[1] > 3.0f) {
-            const float y = h.me[1] - a[1], low = y - 1.2f, mid = y + 0.4f, high = y + 2.0f;
-            const auto at = [](const Vec3 &p, float up) { return Vec3{p[0], p[1] + up, p[2]}; };
-            const ImU32 glow = with_alpha(base, 0.34f * show), none = with_alpha(base, 0.0f);
-            const Vec3 lower[]{at(a, low), at(b, low), at(b, mid), at(a, mid)}, upper[]{at(a, mid), at(b, mid), at(b, high), at(a, high)};
-            const ImU32 rise[]{none, none, glow, glow}, fall[]{glow, glow, none, none};
-            fill_world(draw, cam, lower, rise);
-            fill_world(draw, cam, upper, fall);
-            line3(draw, cam, at(a, mid), at(b, mid), with_alpha(theme::white, 0.5f * std::max(show, 0.4f)), std::max(1.0f, 1.6f * scale));
+        if (cam.distance(a) > 600.0f && cam.distance(b) > 600.0f) continue;
+        // Always there, a little stronger where the skater is close to it.
+        const float gap = h.have_me ? horizontal_to_segment(h.me, a, b) : 60.0f;
+        const float closeness = h.placing ? 1.0f : std::clamp(1.0f - gap / 25.0f, 0.0f, 1.0f);
+        const float body = 0.16f + 0.14f * closeness;
+        // The curtain: brightest at the ground, thinning out as it rises.
+        {
+            const Vec3 low[]{at(a, 0.02f), at(b, 0.02f), at(b, 3.0f), at(a, 3.0f)};
+            const Vec3 high[]{at(a, 3.0f), at(b, 3.0f), at(b, height), at(a, height)};
+            const ImU32 foot = with_alpha(base, body * 1.6f), mid = with_alpha(base, body * 0.75f), top = with_alpha(base, 0.0f);
+            const ImU32 low_shade[]{foot, foot, mid, mid}, high_shade[]{mid, mid, top, top};
+            fill_world(draw, cam, low, low_shade);
+            fill_world(draw, cam, high, high_shade);
         }
-        // Slanted stripes drifting along the wall.
         const float dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], length = std::sqrt(dx * dx + dz * dz);
         if (length > 0.05f) {
-            constexpr float spacing = 1.6f, width = 0.35f, lean = 0.6f, rise = 1.5f;
             const auto along = [&](float s, float up) {
                 const float t = std::clamp(s / length, 0.0f, 1.0f);
                 return Vec3{a[0] + dx * t, a[1] + dy * t + up, a[2] + dz * t};
             };
-            const ImU32 stripe = with_alpha(base, 0.32f * show), fade = with_alpha(base, 0.0f);
-            for (float s = -std::fmod(time * 0.9f, spacing) - lean; s < length; s += spacing) {
-                if (s + width + lean < 0) continue;
-                const Vec3 quad[]{along(s, 0.04f), along(s + width, 0.04f), along(s + width + lean, rise), along(s + lean, rise)};
-                const ImU32 shades[]{stripe, stripe, fade, fade};
+            // Fine vertical ribs every 2 m, fading up the wall. Only near the camera and in front of it:
+            // 5 cm wide, far ones are under a pixel, and a big circle has a thousand of them.
+            for (float s = 0; s <= length; s += 2.0f) {
+                const Vec3 foot = along(s, 0.02f), head = along(s, height * 0.6f);
+                if (cam.distance(foot) > 150.0f ||
+                    (cam.view(foot).depth <= Camera::near_plane && cam.view(head).depth <= Camera::near_plane))
+                    continue;
+                const Vec3 quad[]{foot, along(s + 0.05f, 0.02f), along(s + 0.05f, height * 0.6f), head};
+                const ImU32 strong = with_alpha(theme::white, 0.10f + 0.12f * closeness), none = with_alpha(theme::white, 0.0f);
+                const ImU32 shades[]{strong, strong, none, none};
                 fill_world(draw, cam, quad, shades);
             }
+            // Soft bands drifting slowly up the wall.
+            for (int band = 0; band < 3; ++band) {
+                const float y = std::fmod(time * 1.2f + band * 4.0f, 12.0f), thick = 0.9f, fade = 1.0f - y / 12.0f;
+                const ImU32 glow = with_alpha(base, (0.10f + 0.12f * closeness) * fade), none = with_alpha(base, 0.0f);
+                const Vec3 lower[]{along(0, y), along(length, y), along(length, y + thick), along(0, y + thick)};
+                const Vec3 upper[]{along(0, y + thick), along(length, y + thick), along(length, y + thick * 2), along(0, y + thick * 2)};
+                const ImU32 rise[]{none, none, glow, glow}, fall[]{glow, glow, none, none};
+                fill_world(draw, cam, lower, rise);
+                fill_world(draw, cam, upper, fall);
+            }
+            // Where the skater is close, the wall lights up round them at their height.
+            if (h.have_me && closeness > 0.2f && !h.placing) {
+                const float ax = h.me[0] - a[0], az = h.me[2] - a[2];
+                const float s = std::clamp((ax * dx + az * dz) / length, 0.0f, length), y = std::max(0.0f, h.me[1] - a[1]);
+                const float w = 3.0f, tall = 2.5f, glow = closeness * closeness;
+                const ImU32 hot = with_alpha(theme::white, 0.28f * glow), edge = with_alpha(base, 0.0f);
+                const Vec3 left[]{along(s - w, y - tall + 1), along(s, y - tall + 1), along(s, y + tall + 1), along(s - w, y + tall + 1)};
+                const Vec3 right[]{along(s, y - tall + 1), along(s + w, y - tall + 1), along(s + w, y + tall + 1), along(s, y + tall + 1)};
+                const ImU32 l_shade[]{edge, hot, hot, edge}, r_shade[]{hot, edge, edge, hot};
+                fill_world(draw, cam, left, l_shade);
+                fill_world(draw, cam, right, r_shade);
+            }
         }
-        line3(draw, cam, a0, b0, with_alpha(base, 0.25f * show), std::max(3.0f, 8.0f * scale));
-        line3(draw, cam, a0, b0, with_alpha(theme::white, 0.85f * std::max(show, 0.45f)), std::max(1.5f, 2.2f * scale));
+        // The line on the ground: a soft glow with a white core.
+        line3(draw, cam, at(a, 0.03f), at(b, 0.03f), with_alpha(base, 0.35f + 0.25f * closeness), std::max(3.0f, 9.0f * scale));
+        line3(draw, cam, at(a, 0.03f), at(b, 0.03f), with_alpha(theme::white, 0.75f + 0.2f * closeness), std::max(1.2f, 2.0f * scale));
     }
-    // Posts at a shape's corners, and pillars around a circle, up to the skater when they are high.
-    const auto reach = [&](const Vec3 &c) { return h.have_me ? std::max(height, h.me[1] - c[1] + 2.0f) : height; };
-    if (h.area_radius <= 0) {
-        for (const auto &c : h.corners)
-            line3(draw, cam, c, {c[0], c[1] + reach(c), c[2]}, with_alpha(base, 0.85f), std::max(2.0f, 3.5f * scale));
-    } else if (h.have_me && h.me[1] - h.corners.front()[1] > 3.0f) {
-        const auto &c = h.corners.front();
-        constexpr int pillars = 12;
-        for (int i = 0; i < pillars; ++i) {
-            const float angle = 6.2831853f * i / pillars;
-            const Vec3 foot{c[0] + std::cos(angle) * h.area_radius, c[1], c[2] + std::sin(angle) * h.area_radius};
-            line3(draw, cam, foot, {foot[0], foot[1] + reach(foot), foot[2]}, with_alpha(base, 0.35f), std::max(1.5f, 2.0f * scale));
+    // A shape's corners: a post of light the wall's height.
+    if (h.area_radius <= 0)
+        for (const auto &c : h.corners) {
+            line3(draw, cam, c, at(c, height), with_alpha(base, 0.35f), std::max(3.0f, 7.0f * scale));
+            line3(draw, cam, c, at(c, height), with_alpha(theme::white, 0.55f), std::max(1.2f, 2.0f * scale));
         }
-    }
 }
-
 // A neon glow along a path in the world: a wide soft halo, a coloured body and a hot white core,
 // each sized in metres so it hugs a rail up close and stays a thin line far away.
 void glow_path(ImDrawList *draw, const Camera &cam, const std::vector<Vec3> &path, ImU32 colour, float metres, float strength) {
@@ -472,7 +487,9 @@ void draw_centre(ImDrawList *draw, HudState &st, float scale) {
 // its arrows run; gates already passed fade back. Each gate faces the way it was placed.
 void draw_route(ImDrawList *draw, const Camera &cam, const ModesHud &h, float scale, ImFont *font) {
     const auto count = h.points.size();
-    const float half = std::clamp(h.radius, 3.0f, 8.0f), pillar_r = 0.28f, top = 4.4f, banner_low = 3.4f;
+    const float pillar_r = 0.28f, top = 4.4f, banner_low = 3.4f;
+    // Each gate as wide as it was set (a wide street needs a wide gate).
+    const auto half_of = [&](std::size_t i) { return std::clamp(i < h.point_widths.size() ? h.point_widths[i] : h.radius, 1.5f, 40.0f); };
     const float time = static_cast<float>(ImGui::GetTime());
     const auto up = [](const Vec3 &v, float y) { return Vec3{v[0], v[1] + y, v[2]}; };
     // Which way gate i faces: its own facing when it has one, else along the route.
@@ -511,7 +528,7 @@ void draw_route(ImDrawList *draw, const Camera &cam, const ModesHud &h, float sc
         const ImU32 colour = preview ? placing_colour : finish ? IM_COL32(245, 245, 245, 255) : start ? start_blue : accent;
         const float alpha = done ? 0.3f : 1.0f;
         const auto d = facing(i);
-        const float sx = -d[1] * half, sz = d[0] * half;
+        const float half = half_of(i), sx = -d[1] * half, sz = d[0] * half;
         const Vec3 left{p[0] + sx, p[1], p[2] + sz}, right{p[0] - sx, p[1], p[2] - sz};
         if (next) {
             // A soft column of light rising from the gate.
@@ -596,12 +613,19 @@ void draw_route(ImDrawList *draw, const Camera &cam, const ModesHud &h, float sc
     (void)scale;
 }
 
-void draw_world(ImDrawList *draw, const ModesHud &h, float scale) {
-    if (!(h.vertical_fov > 1 && h.vertical_fov < 175)) return;
+// The game's camera this frame, or nothing while its view is unknown.
+std::optional<Camera> world_camera(const ModesHud &h) {
+    if (!(h.vertical_fov > 1 && h.vertical_fov < 175)) return std::nullopt;
     const auto display = ImGui::GetIO().DisplaySize;
     const auto &m = h.camera;
-    Camera cam{{m[0], m[1], m[2]}, {m[4], m[5], m[6]}, {m[8], m[9], m[10]}, {m[12], m[13], m[14]},
-               display.y / (2.0f * std::tan(h.vertical_fov * 3.14159265f / 360.0f)), ImVec2(display.x * 0.5f, display.y * 0.5f)};
+    return Camera{{m[0], m[1], m[2]}, {m[4], m[5], m[6]}, {m[8], m[9], m[10]}, {m[12], m[13], m[14]},
+                  display.y / (2.0f * std::tan(h.vertical_fov * 3.14159265f / 360.0f)), ImVec2(display.x * 0.5f, display.y * 0.5f)};
+}
+
+void draw_world(ImDrawList *draw, const ModesHud &h, float scale) {
+    const auto view = world_camera(h);
+    if (!view) return;
+    const auto &cam = *view;
     const float thick = std::max(1.5f, 2.5f * scale);
     draw_boundary(draw, cam, h, scale);
     if (h.placing && (h.aim_ok || !h.aiming)) {
@@ -633,6 +657,102 @@ void draw_world(ImDrawList *draw, const ModesHud &h, float scale) {
                     std::format("{}  {:.0f} m", i + 1, d));
         }
     }
+}
+
+// A face button as the game draws it: a filled disc with its letter (A, or the PlayStation cross).
+void face_button(ImDrawList *draw, ImFont *font, ImVec2 c, float r) {
+    draw->AddCircleFilled(c, r, IM_COL32(18, 20, 26, 230), 24);
+    draw->AddCircle(c, r, IM_COL32(90, 200, 90, 255), 24, std::max(1.0f, r * 0.14f));
+    const float size = r * 1.25f, w = text_width(font, size, "A");
+    draw->AddText(font, size, ImVec2(c.x - w * 0.5f, c.y - size * 0.52f), IM_COL32(120, 230, 120, 255), "A");
+}
+// "(A) / X hold (or J)  JOIN": the join prompt on a drop's card and on the announcement (A / X is
+// skate.'s push, so a pad joins on a hold).
+void join_prompt(ImDrawList *draw, ImFont *font, ImVec2 at, float scale, float alpha) {
+    const float r = 11.0f * scale, size = 16.0f * scale;
+    face_button(draw, font, ImVec2(at.x + r, at.y + r), r);
+    float x = at.x + r * 2 + 6 * scale;
+    const auto put = [&](const std::string &text, ImU32 colour) {
+        soft_text(draw, font, size, ImVec2(x, at.y + r - size * 0.55f), with_alpha(colour, alpha), text);
+        x += text_width(font, size, text);
+    };
+    put("/ X hold (or J)  ", IM_COL32(190, 195, 205, 255));
+    put("JOIN", IM_COL32(255, 255, 255, 255));
+}
+
+// Other players' games, the way skate. shows a throwdown drop: a beam of light standing on the
+// game's spot, seen from across the map, a ring pulsing on the ground and a card over it with the
+// mode, the host, how many are in and how far it is. The one the join button would take lights up.
+void draw_offers(ImDrawList *draw, const ModesHud &h, float scale) {
+    const auto view = h.offers.empty() ? std::nullopt : world_camera(h);
+    if (!view) return;
+    const auto &cam = *view;
+    auto &s = state();
+    auto *heading = s.menu.heading ? s.menu.heading : ImGui::GetFont();
+    auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
+    const float time = static_cast<float>(ImGui::GetTime());
+    for (const auto &offer : h.offers) {
+        if (!offer.has_at) continue;
+        const auto &p = offer.at;
+        const float distance = cam.distance(p);
+        if (distance > 1500.0f) continue;
+        const ImU32 colour = offer.open ? accent : IM_COL32(150, 155, 165, 255);
+        // The beam: wide and soft, with a bright core, fading up into the sky.
+        for (const auto &[width, alpha] : {std::pair{1.6f, 0.10f}, std::pair{0.7f, 0.18f}, std::pair{0.22f, 0.55f}}) {
+            const Vec3 side{cam.right[0] * width, 0, cam.right[2] * width};
+            const Vec3 beam[]{{p[0] - side[0], p[1], p[2] - side[2]}, {p[0] + side[0], p[1], p[2] + side[2]},
+                              {p[0] + side[0], p[1] + 80.0f, p[2] + side[2]}, {p[0] - side[0], p[1] + 80.0f, p[2] - side[2]}};
+            const ImU32 low = with_alpha(colour, alpha), high = with_alpha(colour, 0.0f), shades[]{low, low, high, high};
+            fill_world(draw, cam, beam, shades);
+        }
+        // The ring on the ground, pulsing outward.
+        const float pulse = std::fmod(time * 0.6f, 1.0f);
+        ring(draw, cam, p, 2.5f, with_alpha(colour, 0.9f), std::max(2.0f, 3.0f * scale));
+        ring(draw, cam, p, 2.5f + pulse * 3.0f, with_alpha(colour, 0.6f * (1.0f - pulse)), std::max(1.5f, 2.0f * scale));
+        // The card, a fixed size on screen above the spot.
+        const auto anchor = cam.project({p[0], p[1] + 4.0f, p[2]});
+        if (!anchor) continue;
+        const float title_size = 22.0f * scale, line_size = 15.0f * scale;
+        const std::string where = std::format("{:.0f} m", distance);
+        const float w = std::max({text_width(heading, title_size, offer.mode) + 46.0f * scale, text_width(bold, line_size, offer.host + "   " + where),
+                                  text_width(bold, line_size, offer.detail), offer.target ? 190.0f * scale : 0.0f}) + 28.0f * scale;
+        const float card_h = (offer.target ? 104.0f : 74.0f) * scale;
+        const ImVec2 a(anchor->x - w * 0.5f, anchor->y - card_h), b(anchor->x + w * 0.5f, anchor->y);
+        const ImU32 back = IM_COL32(10, 12, 16, offer.target ? 220 : 185);
+        draw->AddRectFilled(a, b, back, 3.0f * scale);
+        draw->AddRectFilled(a, ImVec2(b.x, a.y + 4.0f * scale), colour, 3.0f * scale, ImDrawFlags_RoundCornersTop);
+        if (offer.target) draw->AddRect(a, b, with_alpha(colour, 0.9f), 3.0f * scale, 0, std::max(1.5f, 2.0f * scale));
+        // A pointer down to the spot.
+        draw->AddTriangleFilled(ImVec2(anchor->x - 8 * scale, b.y), ImVec2(anchor->x + 8 * scale, b.y), ImVec2(anchor->x, b.y + 9 * scale), back);
+        diamond(draw, ImVec2(a.x + 20 * scale, a.y + 22 * scale), 8.0f * scale, colour);
+        soft_text(draw, heading, title_size, ImVec2(a.x + 36 * scale, a.y + 10 * scale), IM_COL32(255, 255, 255, 255), offer.mode);
+        soft_text(draw, bold, line_size, ImVec2(a.x + 14 * scale, a.y + 38 * scale), IM_COL32(200, 205, 215, 255), offer.host);
+        soft_text(draw, bold, line_size, ImVec2(b.x - 14 * scale - text_width(bold, line_size, where), a.y + 38 * scale), colour, where);
+        soft_text(draw, bold, line_size, ImVec2(a.x + 14 * scale, a.y + 55 * scale), IM_COL32(160, 165, 175, 255), offer.detail);
+        if (offer.target && h.can_join) join_prompt(draw, bold, ImVec2(a.x + 14 * scale, a.y + 76 * scale), scale, 1.0f);
+    }
+}
+
+// The announcement of a new game: a toast sliding in at the top, the game's own way (a dark band,
+// the accent diamond, the mode in capitals), with the join prompt while it can be joined.
+void draw_invite(ImDrawList *draw, const ModesHud &h, float scale) {
+    if (h.invite.empty() || h.invite_fade <= 0.01f) return;
+    auto &s = state();
+    auto *title = s.menu.heading ? s.menu.heading : ImGui::GetFont();
+    auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
+    const auto display = ImGui::GetIO().DisplaySize;
+    const float alpha = std::clamp(h.invite_fade, 0.0f, 1.0f), slide = (1.0f - std::min(1.0f, alpha * 3.0f)) * 30.0f * scale;
+    const float y = 110.0f * scale - slide, mid = display.x * 0.5f;
+    const std::string head = "NEW GAME";
+    const float size = 15.0f * scale, big = 24.0f * scale;
+    const float w = std::max(text_width(title, big, h.invite), 260.0f * scale);
+    band(draw, ImVec2(mid - w * 0.5f - 160 * scale, y - 10 * scale), ImVec2(mid + w * 0.5f + 160 * scale, y + 86 * scale), 0.7f * alpha, 0);
+    draw->AddRectFilled(ImVec2(mid - w * 0.5f, y - 10 * scale), ImVec2(mid + w * 0.5f, y - 7 * scale), with_alpha(accent, alpha));
+    diamond(draw, ImVec2(mid - text_width(bold, size, head) * 0.5f - 14 * scale, y + 9 * scale), 6.0f * scale, with_alpha(accent, alpha));
+    soft_text(draw, bold, size, ImVec2(mid - text_width(bold, size, head) * 0.5f, y + 1 * scale), with_alpha(accent, alpha), head);
+    soft_text(draw, title, big, ImVec2(mid - text_width(title, big, h.invite) * 0.5f, y + 22 * scale),
+              IM_COL32(255, 255, 255, static_cast<int>(255 * alpha)), h.invite);
+    if (h.can_join) join_prompt(draw, bold, ImVec2(mid - 105.0f * scale, y + 54 * scale), scale, alpha);
 }
 
 // A gold crown: a band with three points, a jewel on each point.
@@ -710,16 +830,20 @@ bool modes_hud_pending() {
     if (const auto feed = modes_hud_feed.load()) {
         try { h.hud = feed(); } catch (...) { h.hud = {}; }
     }
-    return h.hud.active;
+    return h.hud.active || !h.hud.offers.empty() || !h.hud.invite.empty();
 }
 
 void draw_modes_hud() {
     auto &h = hud_state();
-    if (!h.hud.active) return;
+    if (!h.hud.active && h.hud.offers.empty() && h.hud.invite.empty()) return;
     const auto display = ImGui::GetIO().DisplaySize;
     if (display.x <= 0 || display.y <= 0) return;
     const float scale = std::clamp(display.y / 1080.0f, 0.8f, 2.0f);
     auto *draw = ImGui::GetBackgroundDrawList();
+    // Other players' games show whether or not the player is in one.
+    draw_offers(draw, h.hud, scale);
+    draw_invite(draw, h.hud, scale);
+    if (!h.hud.active) return;
     draw_world(draw, h.hud, scale);
     if (h.hud.results) {
         draw_results(draw, h.hud, scale);

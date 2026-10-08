@@ -51,6 +51,8 @@ bool valid_settings(const Settings &s) noexcept {
     if (!(s.radius >= 1.0f && s.radius <= 50.0f)) return false;
     if (s.corners.size() > max_corners || s.points.size() > max_points) return false;
     if (!s.yaws.empty() && s.yaws.size() != s.points.size()) return false;
+    if (!s.widths.empty() && s.widths.size() != s.points.size()) return false;
+    if (!std::all_of(s.widths.begin(), s.widths.end(), [](float w) { return w >= min_gate_half_width && w <= max_gate_half_width; })) return false;
     if (!std::all_of(s.yaws.begin(), s.yaws.end(), [](float y) { return std::isfinite(y); }) || (s.has_spawn && !finite(s.spawn))) return false;
     if (s.area_radius != 0.0f && !(s.area_radius >= min_area_radius && s.area_radius <= max_area_radius && s.corners.size() == 1))
         return false;
@@ -120,6 +122,7 @@ std::string missing(const Settings &s) {
     return {};
 }
 
+float gate_half_width(const Settings &s, std::size_t gate) noexcept { return gate < s.widths.size() ? s.widths[gate] : s.radius; }
 bool has_area(const Settings &s) noexcept { return s.area_radius > 0.0f ? !s.corners.empty() : s.corners.size() >= 3; }
 bool inside(const Settings &s, const Vec3 &p) noexcept {
     if (s.area_radius > 0.0f && !s.corners.empty()) return horizontal_distance(p, s.corners[0]) <= s.area_radius;
@@ -282,6 +285,8 @@ std::vector<std::uint8_t> encode(const Message &m) {
         w.real(s.area_radius);
         w.integer(s.yaws.size(), 1);
         for (const auto yaw : s.yaws) w.real(yaw);
+        w.integer(s.widths.size(), 1);
+        for (const auto width : s.widths) w.real(width);
         w.integer(s.has_spawn ? 1 : 0, 1);
         if (s.has_spawn) w.vec(s.spawn);
         w.integer(s.corners.size(), 1);
@@ -369,6 +374,9 @@ std::optional<Message> decode(std::span<const std::uint8_t> bytes) noexcept {
             const auto yaws = r.integer(1);
             if (yaws > max_points) return std::nullopt;
             for (std::uint64_t i = 0; i < yaws && r.ok; ++i) s.yaws.push_back(r.real());
+            const auto widths = r.integer(1);
+            if (widths > max_points) return std::nullopt;
+            for (std::uint64_t i = 0; i < widths && r.ok; ++i) s.widths.push_back(r.real());
             s.has_spawn = r.integer(1) != 0;
             if (s.has_spawn) s.spawn = r.vec();
             const auto corners = r.integer(1);
@@ -585,7 +593,10 @@ void Referee::event(std::uint64_t player, Event event, std::int32_t value, const
     case Mode::race: {
         if (event != Event::checkpoint || value != p->score) return;
         if (settings_.points.empty() || static_cast<std::size_t>(value) >= settings_.points.size()) return;
-        if (horizontal_distance(at, settings_.points[static_cast<std::size_t>(value)]) > settings_.radius * 1.5f) return;
+        // Within the gate's own width (where the crossing was reported), with some slack for lag.
+        if (horizontal_distance(at, settings_.points[static_cast<std::size_t>(value)]) >
+            gate_half_width(settings_, static_cast<std::size_t>(value)) * 1.3f + 3.0f)
+            return;
         ++p->score;
         if (static_cast<std::size_t>(p->score) == settings_.points.size()) {
             p->finished = true;

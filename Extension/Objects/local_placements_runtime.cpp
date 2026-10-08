@@ -593,8 +593,11 @@ void update_position_teleport() {
         !read(manager, state) || state != 0) return;
     const auto at = *r.position_teleport;
     r.position_teleport.reset();
-    // Upright at the spot. The native teleport manager handles streaming, ground checks and physics reset.
-    alignas(16) const std::array<float, 16> transform{1,0,0,0, 0,1,0,0, 0,0,1,0, at[0], at[1], at[2], 1};
+    // Upright at the spot, facing `yaw` when one was asked for (rows: right, up, forward). The native
+    // teleport manager handles streaming, ground checks and physics reset.
+    const float yaw = r.position_teleport_yaw.value_or(0.0f) * 3.14159265f / 180.0f, sy = std::sin(yaw), cy = std::cos(yaw);
+    r.position_teleport_yaw.reset();
+    alignas(16) const std::array<float, 16> transform{cy,0,-sy,0, 0,1,0,0, sy,0,cy,0, at[0], at[1], at[2], 1};
     alignas(16) std::array<std::uint64_t, 2> transition{};
     r.transition_ctor(transition.data());
     struct Destroy { decltype(r.transition_destroy) call; void* value; ~Destroy() { call(value); } } destroy{r.transition_destroy, transition.data()};

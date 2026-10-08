@@ -179,6 +179,47 @@ void race_flow() {
     check(r.phase() == Phase::results, "everyone still racing finished");
 }
 
+// Each Deathrace gate has its own width: it goes over the wire, bad ones are refused, and the
+// referee takes a crossing as far from the gate's middle as the gate is wide.
+void gate_width_flow() {
+    Settings s;
+    s.mode = Mode::race;
+    s.points = {{0, 0, 0}, {50, 0, 0}, {100, 0, 0}};
+    s.yaws = {90, 90, 90};
+    s.widths = {6, 25, 6};
+    Message setup;
+    setup.kind = Message::Kind::setup;
+    setup.leader = a;
+    setup.game = 9;
+    setup.settings = s;
+    check(decode(encode(setup)) == setup, "gate widths round trip");
+    check(gate_half_width(s, 1) == 25 && gate_half_width(Settings{}, 0) == Settings{}.radius, "a gate's own width, else the radius");
+    auto bad = setup;
+    bad.settings.widths = {6, 6};
+    bool refused = false;
+    try { (void)encode(bad); } catch (const std::invalid_argument &) { refused = true; }
+    check(refused, "one width per gate");
+    bad.settings.widths = {6, 0.1f, 6};
+    refused = false;
+    try { (void)encode(bad); } catch (const std::invalid_argument &) { refused = true; }
+    check(refused, "a gate is at least a few metres wide");
+    Referee r(s, a, 9);
+    r.add_player(a);
+    r.add_player(b);
+    r.start(0);
+    r.tick(countdown_ms);
+    r.event(a, Event::checkpoint, 0, {0, 0, 2}, 1, countdown_ms + 100);
+    r.event(a, Event::checkpoint, 1, {50, 0, 20}, 2, countdown_ms + 200); // 20 m off the middle of a 50 m gate
+    r.event(b, Event::checkpoint, 0, {0, 0, 20}, 1, countdown_ms + 300);  // 20 m off a 12 m gate
+    const auto st = r.state(countdown_ms + 300);
+    const auto score = [&](std::uint64_t id) {
+        for (const auto &p : st.standings) if (p.player == id) return p.score;
+        return -1;
+    };
+    check(score(a) == 2, "a wide gate takes a crossing near its edge");
+    check(score(b) == 0, "a narrow gate does not take one far outside it");
+}
+
 void domination_flow() {
     Settings s;
     s.mode = Mode::domination;
@@ -265,6 +306,7 @@ int main() {
         jam_flow();
         one_up_flow();
         race_flow();
+        gate_width_flow();
         domination_flow();
         tag_flow();
         graffiti_flow();

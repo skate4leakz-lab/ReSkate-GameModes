@@ -955,10 +955,10 @@ bool teleport_allowed(std::string &why) {
     }
     return true;
 }
-std::string go_to(const Vec3 &position, const std::string &what) {
+std::string go_to(const Vec3 &position, const std::string &what, std::optional<float> yaw = std::nullopt) {
     std::string why;
     if (!teleport_allowed(why)) return "error: " + why;
-    if (!teleport_local_skater(position)) return "error: teleporting is unavailable right now.";
+    if (!teleport_local_skater(position, yaw)) return "error: teleporting is unavailable right now.";
     state().motion.valid = false;
     return "Teleporting to " + what + ".";
 }
@@ -1606,8 +1606,10 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
     }
     if (v == "tp") {
         const auto x = number(arg(0)), y = number(arg(1)), z = number(arg(2));
-        if (!x || !y || !z) return "error: usage: trainer tp <x> <y> <z>";
-        return go_to({static_cast<float>(*x), static_cast<float>(*y), static_cast<float>(*z)}, "that point");
+        if (!x || !y || !z) return "error: usage: trainer tp <x> <y> <z> [heading degrees]";
+        const auto heading = number(arg(3));
+        return go_to({static_cast<float>(*x), static_cast<float>(*y), static_cast<float>(*z)}, "that point",
+                     heading ? std::optional<float>(static_cast<float>(*heading)) : std::nullopt);
     }
     if (v == "spot") {
         const auto index = number(arg(0));
