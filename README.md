@@ -3,3 +3,5 @@ Adds DeathRace, Hall of meat, 1-UP, Domination, spot battle,Spot jam, Graffiti t
 This Mod Works with ReSkate 1.1.6
 Other Players need this mod to join the game modes!
 Hit *Insert* and u should see a new game modes tab in the ReSkate Trainer!
+Please Remeber this is a WIP it will be updated day by day until it is perfect! 
+ENJOY <3!
