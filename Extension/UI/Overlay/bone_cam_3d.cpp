@@ -131,8 +131,13 @@ struct Builder {
     }
     void draw(ImDrawList *list) {
         std::sort(tris.begin(), tris.end(), [](const Tri &a, const Tri &b) { return a.depth > b.depth; });
+        // Thousands of small, overlapping triangles over a dimmed screen: their edges need no
+        // smoothing, which would add a fringe of vertices to every one.
+        const auto flags = list->Flags;
+        list->Flags &= ~ImDrawListFlags_AntiAliasedFill;
         for (const auto &t : tris)
             if ((t.colour >> IM_COL32_A_SHIFT) & 0xff) list->AddTriangleFilled(t.p[0], t.p[1], t.p[2], t.colour);
+        list->Flags = flags;
         tris.clear();
     }
 };
