@@ -142,8 +142,9 @@ void fill_world(ImDrawList *draw, const Camera &cam, std::span<const Vec3> point
     }
     if (out.size() < 3) return;
     const auto uv = ImGui::GetFontTexUvWhitePixel();
-    const auto first = static_cast<ImDrawIdx>(draw->_VtxCurrentIdx);
     draw->PrimReserve(static_cast<int>((out.size() - 2) * 3), static_cast<int>(out.size()));
+    // After the reserve: past 64k vertices it starts a new vertex offset and the index restarts at 0.
+    const auto first = static_cast<ImDrawIdx>(draw->_VtxCurrentIdx);
     for (const auto &c : out) draw->PrimWriteVtx(cam.screen(c.at), uv, ImGui::ColorConvertFloat4ToU32(c.colour));
     for (std::size_t k = 1; k + 1 < out.size(); ++k) {
         draw->PrimWriteIdx(first);

@@ -18,7 +18,8 @@ std::string bone_cam_setting(); // "meat", "on" or "off"
 // The local skater just bailed (game_modes.cpp finds bails; any thread).
 void bone_cam_bail() noexcept;
 // Whether the skater's body stopped dead (lost 7 m/s within a third of a second) since the last
-// call: the ground, a pole, a wall. Only followed while the Bone Cam would show.
+// call: the ground, a pole, a wall. Only followed while the Bone Cam would show or a Hall of Meat
+// game is on.
 bool bone_cam_slam() noexcept;
 // The overlay's snapshot, with the latest camera (any thread).
 overlay::BoneCam bone_cam();

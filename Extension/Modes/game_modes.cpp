@@ -352,7 +352,6 @@ void track_bail(State &s, std::uint32_t physics, float vertical, std::uint64_t n
 
 void track_skater(State &s, bool in_world, std::uint64_t now) {
     const auto t = trainer::telemetry();
-    const auto watch = watched_physics_state();
     const float dt = s.last_tick && now > s.last_tick ? std::min(0.25f, (now - s.last_tick) / 1000.0f) : 0.0f;
     s.last_tick = now;
     const bool skater = in_world && t.skater;
@@ -551,7 +550,8 @@ void track_game(State &s, std::uint64_t now) {
     if (!s.outside_since) s.outside_since = now;
     if (now - s.outside_since >= out_of_area_ms) {
         s.outside_since = now; // try again later if the teleport is refused
-        const auto back = s.last_inside ? *s.last_inside : area_centre(g.settings.corners);
+        // The last spot inside only while it is inside this game's area (it may be from an earlier game's).
+        const auto back = s.last_inside && inside(g.settings, *s.last_inside) ? *s.last_inside : area_centre(g.settings.corners);
         (void)trainer::command("tp", {std::format("{:.2f}", back[0]), std::format("{:.2f}", back[1] + 0.3f),
                                       std::format("{:.2f}", back[2])});
     }

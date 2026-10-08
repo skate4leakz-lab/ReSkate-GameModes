@@ -18,13 +18,13 @@ namespace dingosdk::overlay::detail {
 thread_local unsigned overlay_input_access = 0;
 // XInput buttons kept from the game (dingosdk::overlay::hide_game_buttons); ReSkate's own reads still see them.
 std::atomic<std::uint16_t> hidden_game_buttons{};
-std::atomic<bool> game_input_paused{};
+std::atomic<std::uint64_t> game_input_paused_until{};
 std::atomic<int> paused_wheel{};
 thread_local HRAWINPUT noted_raw_input = nullptr;
 bool block_polled_input() {
     const auto error = GetLastError();
     // The menu owning the pointer, or game modes pausing the game's input (free-camera placing).
-    const bool capture = !overlay_input_access && (game_input_paused.load(std::memory_order_relaxed) || owns_menu_cursor(state()));
+    const bool capture = !overlay_input_access && (game_input_paused() || owns_menu_cursor(state()));
     SetLastError(error);
     return capture;
 }
@@ -335,8 +335,8 @@ DWORD WINAPI captured_xinput(DWORD user, XINPUT_STATE* output) {
         output->dwPacketNumber ^= 0x80000000u;
     } else if (result == ERROR_SUCCESS && output && !overlay_input_access) {
         // Buttons ReSkate is using for itself right now (game modes' placing): the game never sees them.
+        // (A paused game's sticks were cleared above: block_polled_input covers the pause.)
         output->Gamepad.wButtons &= static_cast<WORD>(~hidden_game_buttons.load(std::memory_order_relaxed));
-        hide_sticks(output->Gamepad);
     }
     return result;
 }
@@ -648,7 +648,9 @@ bool install_input_capture() {
 
 namespace dingosdk::overlay {
 void hide_game_buttons(std::uint16_t buttons) noexcept { detail::hidden_game_buttons.store(buttons, std::memory_order_relaxed); }
-void pause_game_input(bool paused) noexcept { detail::game_input_paused.store(paused, std::memory_order_relaxed); }
+void pause_game_input(bool paused) noexcept {
+    detail::game_input_paused_until.store(paused ? GetTickCount64() + 500 : 0, std::memory_order_relaxed);
+}
 int take_mouse_wheel() noexcept { return detail::paused_wheel.exchange(0, std::memory_order_relaxed); }
 bool key_down(int virtual_key) noexcept {
     detail::OverlayInputAccess access;

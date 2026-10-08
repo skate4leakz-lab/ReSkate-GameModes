@@ -42,7 +42,7 @@ std::atomic<std::uint16_t> held_buttons{};
 
 bool block_digital() {
     if (overlay_input_access) return false;
-    if (game_input_paused.load(std::memory_order_relaxed)) return true;
+    if (game_input_paused()) return true;
     const auto hidden = hidden_game_buttons.load(std::memory_order_relaxed) & 0x000f;
     return hidden && (held_buttons.load(std::memory_order_relaxed) & hidden);
 }
@@ -60,7 +60,7 @@ DigitalActionData *patched_digital(void *self, DigitalActionData *out, std::uint
 template <std::size_t I>
 AnalogActionData *patched_analog(void *self, AnalogActionData *out, std::uint64_t controller, std::uint64_t action) {
     auto *result = interfaces[I].analog.load(std::memory_order_acquire)(self, out, controller, action);
-    if (result && !overlay_input_access && game_input_paused.load(std::memory_order_relaxed)) result->x = result->y = 0;
+    if (result && !overlay_input_access && game_input_paused()) result->x = result->y = 0;
     return result;
 }
 
@@ -104,7 +104,7 @@ std::array<TopHook, 3> tops; // XInputGetState, #100 (XInputGetStateEx), XInputG
 std::uint8_t *top_stubs{};
 
 void mask_state(XINPUT_STATE &state) {
-    if (game_input_paused.load(std::memory_order_relaxed)) {
+    if (game_input_paused()) {
         state.Gamepad = {};
         return;
     }

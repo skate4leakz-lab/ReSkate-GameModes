@@ -279,7 +279,7 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
     const bool usable = seconds > 0.004f && seconds < 0.1f;
     float lowest = std::numeric_limits<float>::max();
     for (const auto &w : watches) lowest = std::min(lowest, s.joints[w.joint].position[1]);
-    const auto broken = static_cast<std::size_t>(std::count(s.level.begin(), s.level.end(), std::uint8_t{2}));
+    auto broken = static_cast<std::size_t>(std::count(s.level.begin(), s.level.end(), std::uint8_t{2}));
     const float decay = usable ? std::exp(-seconds / 0.33f) : 0.0f;
     for (std::size_t w = 0; w < watch_count; ++w) {
         const auto &p = s.joints[watches[w].joint].position;
@@ -312,8 +312,15 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
                 const float into = std::max(0.0f, s.carry_down[w] - down);
                 const float sideways = std::max(0.0f, s.carry_side[w] - side);
                 const float impact = into + 0.35f * sideways;
-                if (impact >= watches[w].snap && broken < 3) injure(s, w, 2);
-                else if (impact >= watches[w].crack) injure(s, w, 1);
+                // The preview shows the skeleton alone: nothing cracks or breaks in it.
+                if (!s.preview) {
+                    if (impact >= watches[w].snap && broken < 3) {
+                        if (s.level[w] < 2) ++broken; // the cap holds within one tick too
+                        injure(s, w, 2);
+                    } else if (impact >= watches[w].crack) {
+                        injure(s, w, 1);
+                    }
+                }
                 if (!s.preview && watches[w].joint == joint::head) s.head_hit = std::max(s.head_hit, impact);
                 // Spent: the same hit is not counted again next tick.
                 if (impact >= 3.0f) {
@@ -485,7 +492,9 @@ void tick_bone_cam(std::uintptr_t base, std::uintptr_t client, bool playing) noe
                 s.shown = {};
             }
             // Between bails the joints are still followed, so the hit that sets off a bail counts.
-            if (wanted && read_pose(s, base, client).empty()) find_impacts(s, now, false);
+            // Hall of Meat needs them with the Bone Cam off too: its on-foot slams (bone_cam_slam)
+            // come from here.
+            if ((wanted || local_meat_game()) && read_pose(s, base, client).empty()) find_impacts(s, now, false);
             return;
         }
         if (const auto why = read_pose(s, base, client); !why.empty()) {

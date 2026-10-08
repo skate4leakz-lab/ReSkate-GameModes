@@ -17,16 +17,12 @@ extern thread_local HRAWINPUT noted_raw_input;
 bool block_polled_input();
 extern std::atomic<std::uint16_t> hidden_game_buttons;
 // All the player's input kept from the game (game modes' free-camera placing): block_polled_input
-// is true while it is, as with the menu open.
-extern std::atomic<bool> game_input_paused;
+// is true while it is, as with the menu open. Held until this GetTickCount64 time: game modes
+// publish it every tick, so a game modes tick that stops running cannot leave the game deaf.
+extern std::atomic<std::uint64_t> game_input_paused_until;
+inline bool game_input_paused() noexcept { return GetTickCount64() < game_input_paused_until.load(std::memory_order_relaxed); }
 // Mouse wheel movement (WHEEL_DELTA units) the game did not get while its input was paused.
 extern std::atomic<int> paused_wheel;
-// Clears the sticks and triggers of an XInput state while the game's input is paused.
-inline void hide_sticks(XINPUT_GAMEPAD &pad) noexcept {
-    if (!game_input_paused.load(std::memory_order_relaxed)) return;
-    pad.sThumbLX = pad.sThumbLY = pad.sThumbRX = pad.sThumbRY = 0;
-    pad.bLeftTrigger = pad.bRightTrigger = 0;
-}
 bool install_input_capture();
 // The game's own DualShock 4 / DualSense HID reads: the D-pad is released in them while
 // hide_game_buttons keeps it (playstation_filter.cpp). Installed by install_input_capture.

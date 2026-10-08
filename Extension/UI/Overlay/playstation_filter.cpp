@@ -33,8 +33,10 @@ struct Filter {
     // The game's open pad handles: checked on every ReadFile, so lock-free.
     std::array<std::atomic<HANDLE>, max_pads> handles{};
     std::array<std::atomic<PlayStationPad>, max_pads> kinds{};
-    std::mutex mutex;
+    std::mutex mutex; // pending
     std::unordered_map<const OVERLAPPED *, PendingRead> pending;
+    // Its own lock: CreateFileW (which forgets reused values) may run while `mutex` is held.
+    std::mutex checked_mutex;
     std::unordered_set<HANDLE> checked; // handles identify() already looked at
     std::atomic<bool> announced{};
 };
@@ -104,10 +106,25 @@ HANDLE WINAPI captured_create(LPCWSTR name, DWORD access, DWORD share, LPSECURIT
                               DWORD flags, HANDLE templ) {
     const auto handle = original<HANDLE(WINAPI *)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE)>(
         filter().create)(name, access, share, security, disposition, flags, templ);
-    if (handle == INVALID_HANDLE_VALUE || overlay_input_access) return handle;
+    if (handle == INVALID_HANDLE_VALUE) return handle;
     const auto error = GetLastError();
+    auto &f = filter();
+    // A handle value comes back from the system only after its old handle was closed: whatever was
+    // known about it (a pad, or checked and not one) belonged to that old handle. Without this a
+    // file opened under a closed pad's value would have its reads "released" like a pad report.
+    for (std::size_t i = 0; i < max_pads; ++i) {
+        HANDLE expected = handle;
+        f.handles[i].compare_exchange_strong(expected, nullptr);
+    }
+    {
+        std::lock_guard lock(f.checked_mutex);
+        f.checked.erase(handle);
+    }
+    if (overlay_input_access) {
+        SetLastError(error);
+        return handle;
+    }
     if (const auto kind = pad_from_path(name); kind != PlayStationPad::none) {
-        auto &f = filter();
         for (std::size_t i = 0; i < max_pads; ++i) {
             HANDLE expected = nullptr;
             // A slot is reused when its handle value comes back from the system for another pad.
@@ -126,7 +143,7 @@ PlayStationPad identify(HANDLE file, DWORD size) noexcept {
     if (size != 64 && size != 78) return PlayStationPad::none;
     auto &f = filter();
     {
-        std::lock_guard lock(f.mutex);
+        std::lock_guard lock(f.checked_mutex);
         if (f.checked.contains(file)) return PlayStationPad::none;
         f.checked.insert(file);
     }

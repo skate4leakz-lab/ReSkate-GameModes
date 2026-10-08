@@ -242,7 +242,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
         }
         // Game modes pausing the game's input (free-camera placing) keeps its keys and mouse too,
         // all but the system keys (Alt+Tab, Alt+F4).
-        const bool paused = game_input_paused.load(std::memory_order_relaxed) && is_input(message) &&
+        const bool paused = game_input_paused() && is_input(message) &&
                             message != WM_SYSKEYDOWN && message != WM_SYSKEYUP && message != WM_SYSCHAR;
         if (paused) {
             // The wheel turns a gate or sizes a circle while placing (take_mouse_wheel).

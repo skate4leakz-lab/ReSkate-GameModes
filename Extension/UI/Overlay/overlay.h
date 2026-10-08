@@ -428,7 +428,8 @@ bool interface_open() noexcept;
 void hide_game_buttons(std::uint16_t buttons) noexcept;
 // All of the player's input kept from the game (keyboard, mouse and pad, Steam Input included),
 // as ReSkate's menu does, without opening anything: game modes' free-camera placing flies on it.
-// ReSkate's own reads still see it (key_down, the free camera, the controller reads).
+// ReSkate's own reads still see it (key_down, the free camera, the controller reads). Publish every
+// tick while wanted: a pause expires after 500 ms.
 void pause_game_input(bool paused) noexcept;
 // A key as the player holds it, past the gates above (GetAsyncKeyState's high bit).
 bool key_down(int virtual_key) noexcept;

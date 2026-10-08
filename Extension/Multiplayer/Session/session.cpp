@@ -316,7 +316,7 @@ void publish_party(Session &s) {
 // every tick, with no session too, so linked drops are removed when it ends. The input
 // persists: its player list is rebuilt when the admitted players change, and names
 // (Steam lookups) are refreshed once a second.
-void relay_throwdowns(Session &s, bool in_world) {
+void relay_throwdowns(Session &s, bool in_world, std::string_view offline_map = {}) {
     auto &input = s.throwdown_input;
     const bool in_session = s.mode == Mode::host || s.mode == Mode::join;
     const auto local = in_session ? s.transport.status().local_id : 0;
@@ -379,7 +379,11 @@ void relay_throwdowns(Session &s, bool in_world) {
     game.local = input.local;
     game.local_name = input.local_name;
     game.in_world = in_world;
-    game.world = input.world;
+    // Without a session input.world is always 0: the loaded map tells a solo game's worlds apart
+    // (the last one known while a load leaves the name empty).
+    static std::uint64_t offline_world = 0;
+    if (!in_session && !offline_map.empty()) offline_world = map_hash(offline_map);
+    game.world = in_session ? input.world : offline_world;
     game.barred = input.barred;
     for (const auto &peer : input.peers) game.peers.push_back({peer.id, peer.name});
     for (auto &message : modes::tick(game)) send_throwdown(s, std::move(message));
@@ -825,7 +829,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool ready, std::string_vi
         if (s.mode == Mode::off) {
             physics_tuning::release(base); // the player's own tuning again after a session
             set_session_tuning_enforced(false);
-            relay_throwdowns(s, ready);
+            relay_throwdowns(s, ready, map_name);
             // Without a session the UI model follows at the same 10 Hz as in one;
             // commands still publish at once.
             if (const auto now = now_us(); now >= s.next_publish) {
