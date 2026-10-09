@@ -185,7 +185,7 @@ BOOL WINAPI captured_read(HANDLE file, LPVOID buffer, DWORD size, LPDWORD read, 
         (hidden_game_buttons.load(std::memory_order_relaxed) & dpad_bits)) {
         DWORD transferred{};
         const auto finish = original<BOOL(WINAPI *)(HANDLE, LPOVERLAPPED, LPDWORD, DWORD, BOOL)>(filter().overlapped_ex);
-        if (finish(file, overlapped, &transferred, 50, FALSE)) {
+        if (finish && finish(file, overlapped, &transferred, 50, FALSE)) {
             release_dpad(kind, static_cast<std::uint8_t *>(buffer), std::min(transferred, size));
             if (overlapped->hEvent) SetEvent(overlapped->hEvent);
             SetLastError(ERROR_IO_PENDING);
