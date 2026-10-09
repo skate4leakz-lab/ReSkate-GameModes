@@ -1282,6 +1282,8 @@ void run_skate(State &s, std::uint64_t now) {
         return;
     }
     if (!t.mine || t.key != st->call_serial) { // a new turn: nothing done before it counts
+        logging::log(logging::Level::info, logging::Channel::runtime, "S.K.A.T.E.: your turn, {} ({} trick list note{} before it ignored).",
+                     st->trick.empty() ? std::string("setting") : "copying the " + st->trick, notes.size(), notes.size() == 1 ? "" : "s");
         t.mine = true;
         t.key = st->call_serial;
         t.sent = false;
@@ -1293,6 +1295,8 @@ void run_skate(State &s, std::uint64_t now) {
     if (t.sent) return;
     const auto send_attempt = [&](bool landed) {
         const auto trick = skate_trick(t);
+        logging::log(logging::Level::info, logging::Channel::runtime, "S.K.A.T.E.: attempt \"{}\" {}.", trick,
+                     landed ? "landed" : "missed (a bail or a failed landing)");
         report(s, Event::trick, landed ? 1 : 0, 0, s.position, {}, trick);
         popup(s, landed ? "Landed: " + trick : trick.empty() ? std::string("Missed") : "Missed: " + trick);
         t.sent = true;
@@ -1304,6 +1308,8 @@ void run_skate(State &s, std::uint64_t now) {
         return text.find("revert") != std::string::npos;
     };
     for (const auto &note : notes) {
+        logging::log(logging::Level::info, logging::Channel::runtime, "S.K.A.T.E.: trick list {} \"{}\" (entry {:x}).",
+                     note.kind == 'n' ? "name" : note.kind == 's' ? "side" : "landing", note.text, note.entry);
         if (note.kind == 'n') {
             if (revert(note.text)) continue;
             if (t.parts.size() < 8) t.parts.push_back({note.entry, note.text});
@@ -1726,6 +1732,8 @@ std::vector<std::vector<std::uint8_t>> tick(const SessionInput &input) {
         static bool tapped = false;
         if (tap != tapped) {
             hall_of_meat::set_model_write_tap(tap ? &trick_tap : nullptr);
+            logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: skate.'s trick list {}.",
+                         tap ? (hall_of_meat::available() ? "is read from now on" : "cannot be read on this game version") : "is no longer read");
             tapped = tap;
         }
         flush_trick_log();
