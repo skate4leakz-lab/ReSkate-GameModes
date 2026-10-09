@@ -22,6 +22,10 @@ void bone_cam_bail() noexcept;
 // call: the ground, a pole, a wall. Only followed while the Bone Cam would show or a Hall of Meat
 // game is on.
 bool bone_cam_slam() noexcept;
+// Whether the skater's head, chest, shoulders or hips struck an object at speed (a pole, a tree, a
+// rail: nearly stopped while the body was still flying) since the last call. Followed as
+// bone_cam_slam is.
+bool bone_cam_struck() noexcept;
 // The overlay's snapshot, with the latest camera (any thread).
 overlay::BoneCam bone_cam();
 // From game_modes.cpp (game thread): the local player is playing a Hall of Meat game; a session is on.

@@ -134,6 +134,10 @@ struct State {
     std::size_t hips_next{};
     std::atomic<bool> slam_seen{};
     std::uint64_t slam_time{};
+    // The head, chest, shoulders or hips striking an object at speed (bone_cam_struck), and when
+    // any part last did.
+    std::atomic<bool> struck_seen{};
+    std::uint64_t struck_time{};
     std::array<std::uint8_t, watch_count> level{};
     std::array<std::uint8_t, static_cast<std::size_t>(BoneSprite::count)> hurt{};
     std::vector<Joint> joints = std::vector<Joint>(skater_joint_count);
@@ -288,11 +292,22 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
     // than that, give or take. An arm swung down in a handplant, a foot on a stair, a jump on the
     // spot move a limb fast while the body barely moves, and none of them is a fall.
     float body_down = 0, body_side = 0;
+    // The body's speed (the hips') last tick and now, to notice a part of it hitting an object.
+    float body_before = 0, body_now = 0;
     for (std::size_t w = 0; w < watch_count; ++w)
         if (watches[w].joint == joint::hips) {
             body_down = s.carry_down[w];
             body_side = s.carry_side[w];
+            const auto &was = s.velocity[w];
+            body_before = std::sqrt(was[0] * was[0] + was[1] * was[1] + was[2] * was[2]);
+            if (s.have_position && usable) {
+                const auto &p = s.joints[joint::hips].position, &q = s.position[w];
+                const float dx = (p[0] - q[0]) / seconds, dy = (p[1] - q[1]) / seconds, dz = (p[2] - q[2]) / seconds;
+                body_now = std::sqrt(dx * dx + dy * dy + dz * dz);
+            }
         }
+    // A real collision slows the body too, as it wraps round what it hit.
+    const bool body_slowed = body_before >= 6.0f && body_now < 0.85f * body_before;
     if (s.have_position && usable) {
         s.hips_vy = hips_vertical;
         if (s.armed) s.fell = std::min(s.fell, hips_vertical); // the fastest fall since the bail began
@@ -329,13 +344,29 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
             const bool stopped = std::abs(v[1]) < 2.5f;
             const bool on_ground = p[1] - lowest <= 0.3f && body_stopped && stopped;
             const bool against = s.slam_time && now - s.slam_time <= 150 && std::hypot(side, v[1]) < 3.0f;
-            const bool touching = on_ground || against;
+            // Struck an object (a pole, a tree, a rail, a ramp's edge): moving with the body at speed
+            // a moment ago, nearly stopped now while the body was still going, the body slowing as it
+            // wraps round it. A swinging limb does not stop dead in the world while the body flies on.
+            const auto &was = s.velocity[w];
+            const float before = std::sqrt(was[0] * was[0] + was[1] * was[1] + was[2] * was[2]);
+            const float after = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            const bool struck = s.have_velocity && body_slowed && before >= 0.7f * body_before && after <= 0.35f * body_before &&
+                                p[1] - lowest > 0.3f;
+            if (struck) {
+                // The head, the chest, the shoulders or the hips: the body itself hit it (a limb alone
+                // only counts once a bail is on).
+                const auto j = watches[w].joint;
+                const bool body = j == joint::head || j == joint::spine2 || j == joint::hips || j == joint::right_arm || j == joint::left_arm;
+                if (body && now - s.struck_time > 1000) s.struck_seen.store(true);
+                s.struck_time = now;
+            }
+            const bool touching = on_ground || against || struck;
             if (injuring && s.have_velocity && touching) {
                 // The speed it carried into the ground and lost, plus some of the speed along it
-                // lost (a scrape or a wall).
+                // lost (a scrape or a wall). Striking an object: all the speed it lost.
                 const float into = std::min(std::max(0.0f, s.carry_down[w] - down), body_down + 2.0f);
                 const float sideways = std::min(std::max(0.0f, s.carry_side[w] - side), body_side + 2.0f);
-                const float impact = into + 0.35f * sideways;
+                const float impact = struck ? std::min(before - after, body_before + 2.0f) : into + 0.35f * sideways;
                 // The preview shows the skeleton alone: nothing cracks or breaks in it.
                 if (!s.preview) {
                     if (impact >= watches[w].snap && broken < 3) {
@@ -508,7 +539,9 @@ void tick_bone_cam(std::uintptr_t base, std::uintptr_t client, bool playing) noe
         if (s.armed) {
             const bool landed = s.fell < -3.0f && s.hips_vy > -2.5f;
             const bool never_fell = s.fell >= -3.0f && s.hips_vy > -2.5f && now - s.armed_at > 400;
-            if (landed || never_fell || now - s.armed_at > 6000) show(s, now);
+            // Or the moment it hits something on the way down: a pole, a tree, a rail.
+            const bool struck = s.struck_time >= s.armed_at && now - s.struck_time < 300;
+            if (landed || never_fell || struck || now - s.armed_at > 6000) show(s, now);
         }
         // The X-ray ends after a few seconds; a concussion's after-effects last a while longer.
         if (s.active && now - s.started >= duration_ms) s.active = false;
@@ -548,6 +581,8 @@ void tick_bone_cam(std::uintptr_t base, std::uintptr_t client, bool playing) noe
 void bone_cam_bail() noexcept { state().bail_pending.store(true); }
 
 bool bone_cam_slam() noexcept { return state().slam_seen.exchange(false); }
+
+bool bone_cam_struck() noexcept { return state().struck_seen.exchange(false); }
 
 std::string bone_cam_setting() {
     switch (state().setting) {

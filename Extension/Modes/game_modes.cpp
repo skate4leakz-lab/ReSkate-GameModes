@@ -332,6 +332,12 @@ void track_bail(State &s, std::uint32_t physics, float vertical, std::uint64_t n
     // own wipeout states say when a landing went wrong. Only when the game itself had the skater
     // going fast (7 m/s and more): the pose's own speed jumps about on stairs, in a jump on the
     // spot and through tricks, and alone it is no proof of anything.
+    // Striking an object at speed (a pole, a tree, a rail) is a bail on the board or off it, when
+    // the game itself had the skater going (6 m/s and more).
+    if (bone_cam_struck() && !reset && s.recent_speed >= 6.0f) {
+        logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: hit an object at {:.1f} m/s.", s.recent_speed);
+        bailed = true;
+    }
     const bool slam = bone_cam_slam();
     if (slam && on_foot && s.recent_speed >= 7.0f) {
         logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: on-foot slam (the body stopped dead).");
