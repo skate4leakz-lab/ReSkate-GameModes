@@ -1,0 +1,165 @@
+# Follows official ReSkate: when it publishes a new release, merge it into the game-modes
+# branch, build, run the tests, push, and publish a new game modes release. Every player's
+# launcher reads the latest release, so they get it on their next start.
+#
+# A merge conflict or a failing build or test stops it before anything is pushed or
+# published, and opens an issue saying what went wrong.
+name: Follow ReSkate updates
+
+on:
+  schedule:
+    - cron: '23 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Merge, build and test only; push and publish nothing
+        type: boolean
+        default: true
+      force:
+        description: Run even when the newest ReSkate is already merged
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+concurrency:
+  group: follow-reskate
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: Dingo-Shenanigans/ReSkate
+  BRANCH: game-modes
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.newest.outputs.tag }}
+      needed: ${{ steps.newest.outputs.needed }}
+    steps:
+      # GitHub turns off timed workflows after 60 days without repository activity;
+      # re-enabling it each run keeps it going through quiet stretches.
+      - name: Keep this schedule alive
+        continue-on-error: true
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/follow-reskate.yml/enable"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+
+      - name: Newest official ReSkate
+        id: newest
+        run: |
+          tag=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          git fetch --no-tags "https://github.com/$UPSTREAM.git" "refs/tags/$tag:refs/tags/$tag"
+          needed=true
+          if git merge-base --is-ancestor "$tag" HEAD; then needed=false; fi
+          # A failed attempt already opened an issue; wait for it rather than retrying every run.
+          stuck=$(gh issue list --repo "${{ github.repository }}" --state open --search "\"Automatic update to ReSkate $tag\" in:title" --json number --jq length)
+          if [ "$stuck" != "0" ]; then echo "Issue open for $tag; skipping"; needed=false; fi
+          if [ "${{ inputs.force }}" = "true" ]; then needed=true; fi
+          echo "Official ReSkate $tag; update needed: $needed"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "needed=$needed" >> "$GITHUB_OUTPUT"
+
+  update:
+    needs: check
+    if: needs.check.outputs.needed == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      DRY_RUN: ${{ inputs.dry_run == true }}
+      VCLibPackagePath: ${{ github.workspace }}\build\no-vcpkg\vcpkg.user
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+
+      - name: Merge official ReSkate
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898283+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags "https://github.com/$env:UPSTREAM.git" "refs/tags/${env:TAG}:refs/tags/${env:TAG}"
+          git merge --no-edit -m "Merge official ReSkate $env:TAG" $env:TAG
+          if ($LASTEXITCODE) {
+            $files = git diff --name-only --diff-filter=U
+            "Conflicting files:`n$($files -join "`n")" | Set-Content conflicts.txt
+            git merge --abort
+            throw "Merging $env:TAG conflicts with game modes"
+          }
+
+      - name: Build and test
+        run: |
+          cmake -S . -B build/ci -G 'Visual Studio 17 2022' -A x64 -T v143 -DDINGOSDK_BUILD_MULTIPLAYER_TESTS=ON
+          if ($LASTEXITCODE) { throw 'CMake configure failed' }
+          cmake --build build/ci --config Release -- /m
+          if ($LASTEXITCODE) { throw 'Build failed' }
+          ctest --test-dir build/ci -C Release --output-on-failure
+          if ($LASTEXITCODE) { throw 'Tests failed' }
+
+      - name: Pick the version
+        id: version
+        run: |
+          $base = $env:TAG.TrimStart('v')
+          $tags = gh release list --repo '${{ github.repository }}' --limit 200 --json tagName --jq '.[].tagName'
+          $n = 0
+          foreach ($t in $tags) {
+            if ($t -match "^v$([regex]::Escape($base))-modes\.(\d+)$") { $n = [math]::Max($n, [int]$Matches[1]) }
+          }
+          $version = "$base-modes.$($n + 1)"
+          "Releasing $version"
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Push the merge
+        if: env.DRY_RUN != 'true'
+        run: |
+          git push origin "HEAD:$env:BRANCH"
+          if ($LASTEXITCODE) { throw 'Push failed' }
+
+      - name: Build and publish the release
+        if: env.DRY_RUN != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $notes = @"
+          An automatic update that brings in official ReSkate $env:TAG ([what's new in ReSkate](https://github.com/$env:UPSTREAM/releases/tag/$env:TAG)), so you can keep playing with everyone on the newest version. Game modes and Hall of Meat are unchanged.
+
+          If you already have the game modes launcher, this installs itself the next time you start the game.
+
+          ## New install
+          1. Close skate.
+          2. Download **ReSkate-GameModes-$env:VERSION.zip** below and copy ``ReSkateLauncher.exe`` and ``ReSkate.dll`` into your skate. folder (the one with ``Skate.exe``).
+          3. Start the game with ``ReSkateLauncher.exe``. It keeps itself up to date from then on.
+
+          ## Credits
+          - Built on [ReSkate](https://github.com/$env:UPSTREAM) (GPL-3.0). Source code: the ``game-modes`` branch of this repository.
+          - Skeleton: BodyParts3D, © The Database Center for Life Science, licensed under [CC Attribution 4.0 International](https://dbarchive.biosciencedbc.jp/en/bodyparts3d/lic.html).
+          "@
+          ./contrib/release-modes.ps1 -Version $env:VERSION -Repo '${{ github.repository }}' `
+            -Title "ReSkate Game Modes $env:VERSION" -Notes $notes -Publish
+
+      - name: Report a failure
+        if: failure() && env.DRY_RUN != 'true'
+        run: |
+          $details = if (Test-Path conflicts.txt) { Get-Content conflicts.txt -Raw } else { 'The build, the tests or the release failed; the run log has the details.' }
+          $body = @"
+          Official ReSkate $env:TAG came out, but the automatic update stopped before publishing anything. Players stay on the last game modes release until this is fixed.
+
+          $details
+
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          "@
+          gh issue create --repo '${{ github.repository }}' --title "Automatic update to ReSkate $env:TAG needs a hand" --body $body
