@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gamepad_input.h"
 #include "launch.h"
 #include "text_encoding.h"
 #include "thunderstore.h"
@@ -138,7 +139,9 @@ void virtual_rows(int count, Height height, Row row) {
     float y = start.y;
     for (int index = 0; index < count; ++index) {
         const float tall = height(index);
-        if (y + tall >= scroll && y <= scroll + view) {
+        // One row past each edge too: a controller moving off the last row
+        // shown needs the next one there to move to.
+        if (y + 2 * tall >= scroll && y <= scroll + view + tall) {
             ImGui::SetCursorPos(ImVec2(start.x, y));
             row(index, tall);
         }
@@ -162,6 +165,11 @@ inline std::atomic<unsigned> g_captured_key{};
 // Paths dropped on the window, picked up by the next frame.
 inline std::mutex g_dropped_mutex;
 inline std::vector<fs::path> g_dropped;
+// Every connected controller merged into one: XInput pads (Xbox, and Steam
+// Input's virtual pad on a Steam Deck), else a DualShock 4 / DualSense over HID.
+PadState read_pad();
+// The window's controller input, told about mouse moves by the window procedure.
+inline PadFeed* g_pad_feed{};
 
 // ---------------------------------------------------------------- settings
 
@@ -379,6 +387,32 @@ struct Icons {
     }
 };
 
+// READMEs for the mod overviews: an installed mod's own README.md, or a package's from
+// Thunderstore, fetched on a worker the first time its overview opens and kept while the
+// launcher runs.
+struct Readmes {
+    struct Entry {
+        bool loading{}, failed{};
+        thunderstore::Readme readme;
+    };
+    std::map<std::string, Entry, std::less<>> entries;   // by "Owner-Name-1.2.3" or the mod's folder; UI thread
+    struct Job { std::string key; std::wstring url; };
+    struct Done { std::string key, markdown; bool failed{}; };
+
+    std::thread worker;
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::deque<Job> queue;
+    std::vector<Done> done;
+    bool stop{};
+
+    ~Readmes() {
+        { std::lock_guard lock(mutex); stop = true; }
+        wake.notify_all();
+        if (worker.joinable()) worker.join();
+    }
+};
+
 // The Mods panel's list plus one background install at a time.
 struct ModsPanel {
     bool scanned{};
@@ -415,6 +449,7 @@ struct ModsPanel {
 
     Store store;
     Icons icons;
+    Readmes readmes;
 
     ~ModsPanel() {
         cancel = true;
@@ -453,6 +488,16 @@ void pump_icons(ModsPanel& panel);
 void browse_page(Launcher& launcher, const Fonts& fonts, ModsPanel& panel, float height, bool installing);
 // Everything Thunderstore knows about one package, in a popup over the page.
 void package_overview(const Fonts& fonts, ModsPanel& panel, ImVec2 size, bool installing);
+// The README section of an overview: the installed mod's own README.md when it has one, else
+// the package's from Thunderstore. Either may be null. False, with nothing drawn, when there is none.
+bool readme_field(const Fonts& fonts, ModsPanel& panel, const thunderstore::Package* package, const mods::Mod* mod);
+// An overview's body: the README in a child of `readme` width (the caller's), then
+// begin_overview_details ... end_overview_details around its facts, each an overview_fact.
+struct OverviewColumns { float readme{}, details{}, height{}, gap{}; };
+OverviewColumns overview_columns(float popup_height);
+void begin_overview_details(const char* id, const OverviewColumns& columns);
+void end_overview_details();
+void overview_fact(const Fonts& fonts, const char* name, const std::string& value);
 // Whether `package` is ticked for the next install, and ticking it.
 bool picked(const Store& store, const std::string& full_name);
 void pick(Store& store, const std::string& full_name, bool on);

@@ -3,6 +3,7 @@
 #include "Extension/Multiplayer/Session/peer_slots.h"
 #include "Extension/Multiplayer/Session/object_state.h"
 #include "Extension/Multiplayer/Remote/audio_state.h"
+#include "Extension/Multiplayer/Net/effects.h"
 #include "Extension/Multiplayer/Voice/voice_state.h"
 #include "Engine/Game/Multiplayer/distance_settings.h"
 #include "Engine/Game/Multiplayer/object_placement.h"
@@ -25,12 +26,27 @@ namespace dingosdk::multiplayer {
 constexpr std::size_t max_skater_bones = 512, max_board_bones = 64;
 constexpr std::size_t max_packet = 24576;
 constexpr std::size_t packet_header_size = 64;
-constexpr std::uint16_t protocol_version = 44;
+constexpr std::uint16_t protocol_version = 45;
+// A dedicated server's chat lines unless its owner says otherwise: violet (#8E5CFF) and lavender (#D9C8FF).
+inline constexpr std::uint32_t default_server_chat_badge = 0xffff5c8eU, default_server_chat_text = 0xffffc8d9U;
 constexpr std::size_t max_throwdown_message = 4096;
 // Packet::tuning: the host's SkatePhysicsTuning differences (Extension/Skater/physics_tuning.h).
 constexpr std::size_t max_physics_tuning = 16384;
 // Votes a dedicated server runs (Packet::server_votes).
 constexpr std::uint8_t server_vote_map = 1, server_vote_kick = 2, server_vote_time = 4;
+// The vote a dedicated server is running, or has just finished (Packet::vote): games show it
+// with its tally and let the player answer. `id` is 0 when there is none. `kind` is one of the
+// server_vote_* bits; `seconds` is what is left of a running one.
+constexpr std::size_t max_vote_label = 120;
+constexpr std::uint8_t vote_running = 0, vote_passed = 1, vote_failed = 2, vote_cancelled = 3;
+struct ServerVote {
+    std::uint32_t id{};
+    std::uint8_t kind{}, outcome{vote_running};
+    std::uint16_t yes{}, no{}, needed{}, seconds{};
+    std::uint64_t starter{}, target{}; // target: the player a kick vote is about, who has no vote in it
+    std::string label;                 // "change the map to ..."
+    bool operator==(const ServerVote &) const = default;
+};
 enum class PacketKind : std::uint16_t {
     hello = 1,
     welcome = 2,
@@ -73,7 +89,10 @@ enum class PacketKind : std::uint16_t {
     // The host's physics that its tuning does not carry: the trainer's tuning-class values and
     // trick multipliers (Engine/Game/Multiplayer/session_physics.h; opaque here, empty = the
     // game's own). Like physics_tuning, only the host sends it and a dedicated server never does.
-    physics_extras = 30
+    physics_extras = 30,
+    // A player's skater touching the world (effects.h): the game's sparks, dust and puffs for
+    // it, shown on that player's skater by everyone near. Unreliable, relayed like voice.
+    effects = 31
 };
 // Packet::party_action. Requests go from a player to whoever hosts, a dedicated server or a
 // lobby's host (party_player = the other player involved, 0 for leave/open/close); invited
@@ -173,9 +192,20 @@ struct Packet {
     ObjectPlacement object_placement = ObjectPlacement::everyone;
     // Objects each player may have placed (object_placement.h); 0: no limit.
     unsigned object_limit{};
+    // Roster: players may place objects at another size than their own. Off: a dedicated server
+    // shares every player's objects at their own size (its admins' excepted).
+    bool object_scaling{true};
+    // Roster: players see each other's skater effects (effects.h, and the trails and fire of
+    // each other's costumes and skateboards). Off: a dedicated server relays none and games
+    // neither send theirs nor show other players'.
+    bool sync_effects{true};
     // Bumped each time the host deletes all guest objects. Guests delete their
     // own session objects when it changes after their first roster.
     std::uint32_t object_clears{};
+    // Roster: the colours of a dedicated server's own chat lines, its badge and name and the
+    // text after them (IM_COL32 layout; the server's owner chooses them).
+    std::uint32_t chat_badge = default_server_chat_badge, chat_text = default_server_chat_text;
+    ServerVote vote; // roster
     bool force_world_layers{};
     WorldLayerState layers = WorldLayerState(world_layers().size()); // all "default"
     ParkChoices parks; // One allowlisted selection byte per shared native park slot.
@@ -201,6 +231,7 @@ struct Packet {
     std::array<float, 3> teleport{};          // teleport: where the receiver goes (world position)
     std::vector<std::uint8_t> tuning;         // physics_tuning: 0..max_physics_tuning bytes
     std::vector<std::uint8_t> extras;         // physics_extras: 0..max_physics_extras bytes
+    std::vector<Impact> impacts;              // effects: 1..max_impacts contacts
     PartyAction party_action = PartyAction::leave; // party: what is asked or told
     std::uint64_t party_player{};                   // party: the other player (see PartyAction)
     // scoring: the sender's scoring fingerprint, 0 for the game's own; `text` names the mods

@@ -62,6 +62,9 @@ struct ServerConfig {
     std::vector<std::uint64_t> reserved;
     std::string password;      // empty: anyone may join
     std::string welcome;       // sent to each player as they join
+    // The colours of the server's own lines in chat, as "#RRGGBB": its badge and name, and the
+    // text after them.
+    std::string chat_color = "#8E5CFF", chat_text_color = "#D9C8FF";
     bool listed = true;        // shown in the in-game server browser
     // A Steam game server login token (steamcommunity.com/dev/managegameservers, app 3354750).
     // With one the server signs in to its own account and keeps the same Steam ID every start,
@@ -75,6 +78,9 @@ struct ServerConfig {
     // panel has eight rows). Off, nobody can be in one.
     bool parties = true;
     unsigned party_size = 8;
+    // Minutes a player may be away (not moving, talking, typing or building) before the server
+    // removes them, 1 to 1440; 0: never. Admins are never removed for it.
+    unsigned afk_kick = 0;
     // Players whose game runs fast (a speedhack; Server/speed_check.h): "warn" takes them out of
     // throwdowns and coop challenges and tells the admins, "kick" also removes them, "off" does not check.
     std::string speed_check = "warn";
@@ -97,6 +103,13 @@ struct ServerConfig {
     ObjectPlacement object_placement = ObjectPlacement::everyone;
     // Objects each player may have placed (object_placement.h); 0: no limit. Admins are not held to it.
     unsigned object_limit = default_object_limit;
+    // Players may place objects at another size than their own. Off: every player's objects
+    // are shared at their own size; admins may still resize theirs.
+    bool object_scaling = true;
+    // Players see each other's skater effects: sparks and dust where a skater touches the world,
+    // and the trails and fire of costumes and skateboards. Off: nothing of them is relayed and
+    // players' games show each other without them.
+    bool sync_effects = true;
     // Whether players may use noclip (and teleport) / No Bail / the boosts (admins always may).
     bool noclip = true, no_bail = true, boosts = true;
     // Players skate with the game's own physics tuning, not copies they edited.
@@ -123,6 +136,8 @@ std::size_t extra_slots(const ServerConfig &config) noexcept;
 // max_players are on; the reserved players and the admins after that too, in the extra slots
 // (a full server of 32 shows 33/32 with one of them on).
 bool may_join(const ServerConfig &config, std::uint64_t id, std::size_t on) noexcept;
+// "#RRGGBB" (or "RRGGBB") as a colour in the layout the protocol and the overlay use, or nothing.
+std::optional<std::uint32_t> parse_colour(std::string_view text) noexcept;
 // Why `config` cannot run, or empty.
 std::string config_error(const ServerConfig &config);
 // A scoring fingerprint as the config and console write it (16 hex digits), and read back

@@ -169,8 +169,11 @@ struct Reader {
 };
 } // namespace
 bool valid_roster(std::span<const Member> members, unsigned capacity) noexcept {
-    if (capacity < 2 || capacity > max_players || members.empty() || members.size() > capacity)
+    if (capacity < 2 || capacity > max_players || members.empty() || members.size() > max_players)
         return false;
+    // A lobby holds no more than it was opened for. A dedicated server can hold a few more than
+    // it says: its reserved players and admins join past its limit (33 of 32).
+    if (members.size() > capacity && !game_server_steam_id(members[0].id)) return false;
     for (std::size_t i = 0; i < members.size(); ++i) {
         const auto &m = members[i];
         // The host comes first, and may be a dedicated server rather than a player.
@@ -372,6 +375,8 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
         throw std::invalid_argument("Invalid object update");
     if (p.kind == PacketKind::voice && (!p.map || !p.source || !valid_voice(p.voice)))
         throw std::invalid_argument("Invalid voice packet");
+    if (p.kind == PacketKind::effects && (!p.map || !p.source || !valid_impacts(p.impacts)))
+        throw std::invalid_argument("Invalid effects packet");
     if (p.kind == PacketKind::chat && (!p.source || !valid_chat_text(p.text)))
         throw std::invalid_argument("Invalid chat message");
     if (p.kind == PacketKind::admin && (!p.source || !valid_admin_text(p.text)))
@@ -424,7 +429,8 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
         p.kind != PacketKind::objects && p.kind != PacketKind::voice && p.kind != PacketKind::chat &&
         p.kind != PacketKind::admin && p.kind != PacketKind::bans && p.kind != PacketKind::maps &&
         p.kind != PacketKind::throwdown && p.kind != PacketKind::teleport && p.kind != PacketKind::physics_tuning &&
-        p.kind != PacketKind::party && p.kind != PacketKind::scoring && p.kind != PacketKind::physics_extras)
+        p.kind != PacketKind::party && p.kind != PacketKind::scoring && p.kind != PacketKind::physics_extras &&
+        p.kind != PacketKind::effects)
         throw std::invalid_argument("Unknown packet kind");
     const auto payload = greeting ? 72
                          : p.kind == PacketKind::away
@@ -547,6 +553,17 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
         w.integer(p.tuning.size(), 2);
         w.bytes.insert(w.bytes.end(), p.tuning.begin(), p.tuning.end());
     }
+    if (p.kind == PacketKind::effects) {
+        w.integer(p.impacts.size(), 1);
+        for (const auto &impact : p.impacts) {
+            for (const auto v : impact.position) w.integer(std::bit_cast<std::uint32_t>(v), 4);
+            for (const auto v : impact.velocity)
+                w.integer(static_cast<std::uint16_t>(static_cast<std::int16_t>(std::lround(v * 100.f))), 2);
+            for (const auto v : impact.normal)
+                w.integer(static_cast<std::uint8_t>(static_cast<std::int8_t>(std::lround(v * 127.f))), 1);
+            w.integer(impact.material, 2);
+        }
+    }
     if (p.kind == PacketKind::physics_extras) {
         w.integer(p.extras.size(), 2);
         w.bytes.insert(w.bytes.end(), p.extras.begin(), p.extras.end());
@@ -597,9 +614,27 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
         w.integer(p.object_clears, 4);
         if (!valid_multiplayer_tps(p.tps)) throw std::invalid_argument("Invalid session TPS");
         w.integer(p.tps, 1);
+        w.integer(p.chat_badge & 0xffffff, 3); // red, green, blue
+        w.integer(p.chat_text & 0xffffff, 3);
+        w.integer(p.vote.id, 4);
+        if (p.vote.id) {
+            if (p.vote.label.size() > max_vote_label || p.vote.outcome > vote_cancelled) throw std::invalid_argument("Invalid server vote");
+            w.integer(p.vote.kind, 1);
+            w.integer(p.vote.outcome, 1);
+            w.integer(p.vote.yes, 2);
+            w.integer(p.vote.no, 2);
+            w.integer(p.vote.needed, 2);
+            w.integer(p.vote.seconds, 2);
+            w.integer(p.vote.starter, 8);
+            w.integer(p.vote.target, 8);
+            w.integer(p.vote.label.size(), 1);
+            w.bytes.insert(w.bytes.end(), p.vote.label.begin(), p.vote.label.end());
+        }
         w.integer(static_cast<std::uint8_t>(p.object_placement), 1);
         if (!valid_object_limit(p.object_limit)) throw std::invalid_argument("Invalid object limit");
         w.integer(p.object_limit, 2);
+        w.integer(p.object_scaling ? 1 : 0, 1);
+        w.integer(p.sync_effects ? 1 : 0, 1);
         w.integer(p.force_world_layers, 1);
         // One mode per world-layer catalog row; both peers read the same catalog
         // from the same game build.
@@ -807,6 +842,20 @@ std::optional<Packet> decode(std::span<const std::uint8_t> bytes) noexcept {
                 return {};
             p.tuning.assign(bytes.begin() + static_cast<std::ptrdiff_t>(r.at), bytes.end());
             r.at = bytes.size();
+        } else if (p.kind == PacketKind::effects) {
+            const auto count = r.integer(1);
+            if (!p.map || !p.source || !count || count > max_impacts || count * impact_wire_size != bytes.size() - r.at)
+                return {};
+            p.impacts.resize(static_cast<std::size_t>(count));
+            for (auto &impact : p.impacts) {
+                for (auto &v : impact.position) v = r.number();
+                for (auto &v : impact.velocity)
+                    v = static_cast<float>(static_cast<std::int16_t>(static_cast<std::uint16_t>(r.integer(2)))) / 100.f;
+                for (auto &v : impact.normal)
+                    v = static_cast<float>(static_cast<std::int8_t>(static_cast<std::uint8_t>(r.integer(1)))) / 127.f;
+                impact.material = static_cast<std::uint16_t>(r.integer(2));
+            }
+            if (!valid_impacts(p.impacts)) return {};
         } else if (p.kind == PacketKind::physics_extras) {
             const auto length = r.integer(2);
             if (!p.source || length > max_physics_extras || length != bytes.size() - r.at)
@@ -903,12 +952,35 @@ std::optional<Packet> decode(std::span<const std::uint8_t> bytes) noexcept {
             p.object_clears = static_cast<std::uint32_t>(r.integer(4));
             p.tps = static_cast<unsigned>(r.integer(1));
             if (!valid_multiplayer_tps(p.tps)) return {};
+            p.chat_badge = 0xff000000U | static_cast<std::uint32_t>(r.integer(3));
+            p.chat_text = 0xff000000U | static_cast<std::uint32_t>(r.integer(3));
+            p.vote.id = static_cast<std::uint32_t>(r.integer(4));
+            if (p.vote.id) {
+                p.vote.kind = static_cast<std::uint8_t>(r.integer(1));
+                p.vote.outcome = static_cast<std::uint8_t>(r.integer(1));
+                p.vote.yes = static_cast<std::uint16_t>(r.integer(2));
+                p.vote.no = static_cast<std::uint16_t>(r.integer(2));
+                p.vote.needed = static_cast<std::uint16_t>(r.integer(2));
+                p.vote.seconds = static_cast<std::uint16_t>(r.integer(2));
+                p.vote.starter = r.integer(8);
+                p.vote.target = r.integer(8);
+                const auto length = r.integer(1);
+                if (p.vote.outcome > vote_cancelled || length > max_vote_label || length > bytes.size() - r.at) return {};
+                p.vote.label.assign(reinterpret_cast<const char *>(bytes.data() + r.at), static_cast<std::size_t>(length));
+                r.at += static_cast<std::size_t>(length);
+            }
             const auto placement = r.integer(1);
             if (!valid_object_placement(placement)) return {};
             p.object_placement = static_cast<ObjectPlacement>(placement);
             const auto object_limit = r.integer(2);
             if (!valid_object_limit(object_limit)) return {};
             p.object_limit = static_cast<unsigned>(object_limit);
+            const auto scaling = r.integer(1);
+            if (scaling > 1) return {};
+            p.object_scaling = scaling != 0;
+            const auto shared_effects = r.integer(1);
+            if (shared_effects > 1) return {};
+            p.sync_effects = shared_effects != 0;
             const auto forced = r.integer(1);
             if (forced > 1) return {};
             p.force_world_layers = forced != 0;

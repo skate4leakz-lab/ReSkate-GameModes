@@ -13,6 +13,9 @@
 #include <vector>
 
 namespace dingosdk::overlay::detail {
+// Here rather than in input_capture.cpp: this reader is also built on its own, without the
+// rest of the overlay.
+thread_local unsigned overlay_input_access = 0;
 namespace {
 struct Pad {
     std::wstring path;
@@ -101,7 +104,7 @@ std::unique_ptr<Pad> open_pad(const std::wstring& path) {
 // Drains every queued report so the newest one wins. Returns false once the
 // device is gone.
 bool drain(Pad& pad) {
-    OverlayInputAccess access; // ReSkate's own reads: the game's report filter leaves them alone
+    OverlayInputAccess access; // ReSkate's own HID stream (menu, free camera, game modes): the game's report filters leave it alone
     for (int reports = 0; reports < 256; ++reports) {
         if (!pad.pending) {
             ResetEvent(pad.event);

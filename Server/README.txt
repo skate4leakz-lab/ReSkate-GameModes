@@ -51,6 +51,11 @@ time the server starts.
 name               Shown in the browser: 1-64 letters, numbers, spaces and - _ / [ ] ( ).
 password           Empty for anyone; otherwise players type it to join.
 welcome_message    A chat line sent to each player as they join.
+chat_color         The colour of the server's own lines in chat: its "Server" badge
+                   and name, as "#RRGGBB" (default "#8E5CFF", violet).
+chat_text_color    The colour of the text of those lines (default "#D9C8FF",
+                   lavender). Pick one that reads on a dark background.
+                   Console: chat-color <#badge> [<#text>].
 listed             false hides the server; players then need the code.
 max_players        1-249.
 port, query_port   Steam game server ports (default 27015, 27016).
@@ -110,12 +115,33 @@ allow_parties      Let players form parties (default true): invite each other
                    members join each other's coop challenges, see each other on
                    the map and talk with /p <message>.
 party_size         Most players in one party, 2-8 (default 8).
+afk_kick_minutes   Remove a player who has been away this many minutes, 1-1440
+                   (default 0: never). Away is not moving, speaking, typing
+                   in chat or changing their objects. They are warned in chat
+                   a minute before and can join again at once. Admins are
+                   never removed for it. Console: afk-kick <minutes>|off.
 allow_voice_chat   Allow voice chat.
 voice_range        How far proximity voice reaches, 50-1000 m.
 object_placement   everyone, admins (only admins can build), or nobody.
 object_limit       How many objects each player may have placed, 1-1024
                    (default 100), or 0 for no limit. Admins are not limited.
                    A player at the limit deletes one to place another.
+                   A player who places more than twice the limit plus 100
+                   in a minute (a modified game animating objects by
+                   respawning them) has theirs deleted for everyone, and
+                   nothing they place is shared for a minute; the log
+                   says who. Admins are exempt.
+allow_object_scaling  Let players place objects bigger or smaller than their
+                   own size (default true). false shares every player's
+                   objects at their own size and turns the size controls
+                   off in their park editor. Admins can still resize
+                   theirs. Console: object-scaling on|off.
+sync_effects       Let players see each other's skater effects (default true):
+                   sparks and dust where a skater touches the world, and
+                   the trails and fire of costumes and skateboards. false
+                   relays none and players' games show each other without
+                   them, which saves a little traffic and drawing on a busy
+                   server. Console: effects on|off.
 announce_throwdowns  Tell everyone in chat when a throwdown drop is placed
                    (default true).
 
@@ -261,12 +287,15 @@ and change voice, distances, placement and kicks from the Multiplayer menu.
   distances <full> <half> <half-return> <low>
   placement everyone|admins|nobody   clear-objects
   objects <number>|off          How many objects each player may have placed.
+  object-scaling on|off         Whether players may resize the objects they place.
+  effects on|off                Whether players see each other's skater effects.
   noclip on|off   nobail on|off   boosts on|off
                                 What players may use (admins always can).
   tuning on|off                 Everyone on the game's own physics tuning.
   tpall [player]                Everyone to you (admins in game) or to a player.
   tphere <player>               One player to you (admins in game).
   park <construction|historic|financial> <layout>
+  park random                  Randomize all three park slots (excludes empty lots).
   layer-sync on|off   layer <key> default|on|off
   layers <key>=<mode> ...       Several world layers at once, each default, on or off.
   tod <default|morning|noon|afternoon|evening|night|weatherday|weathernight>
@@ -277,6 +306,7 @@ and change voice, distances, placement and kicks from the Multiplayer menu.
   announce-throwdowns on|off    Chat message when a throwdown is placed.
   parties [on|off]              List the parties, or allow them (off ends them all).
   party-size <2-8>              Most players in one party.
+  afk-kick <minutes>|off        Remove players who have been away that long.
   speed-check off|warn|kick     What happens to players whose game runs fast.
   score-check [off|warn|kick]   What happens to players whose mods change scoring
                                 or physics; with no argument, every player's result.

@@ -192,6 +192,49 @@ int run() {
               "A config in sections did not read back as it was written");
         std::filesystem::remove_all(folder / "data");
     }
+    // The away timer: off unless set, and no more than a day.
+    {
+        ServerConfig away;
+        check(away.afk_kick == 0 && config_error(away).find("afk_kick_minutes") == std::string::npos, "The away timer is not off by default");
+        away.file = folder / "away.json";
+        away.afk_kick = 15;
+        save_config(away);
+        check(load_config(away.file).afk_kick == 15, "The away timer was not kept");
+        away.afk_kick = 1441;
+        check(config_error(away).find("afk_kick_minutes") != std::string::npos, "An away timer over a day was accepted");
+        std::filesystem::remove_all(folder / "data");
+    }
+    // Skater effects: shared unless turned off, and kept in the file.
+    {
+        ServerConfig plain;
+        check(plain.sync_effects, "Skater effects are not shared by default");
+        plain.file = folder / "plain.json";
+        plain.sync_effects = false;
+        save_config(plain);
+        check(!load_config(plain.file).sync_effects && text(plain.file).find("\"sync_effects\": false") != std::string::npos,
+              "The skater effects setting was not kept");
+        std::filesystem::remove_all(folder / "data");
+    }
+    // Object scaling: allowed unless turned off, and kept in the file.
+    {
+        ServerConfig sized;
+        check(sized.object_scaling, "Object scaling is not allowed by default");
+        sized.file = folder / "sized.json";
+        sized.object_scaling = false;
+        save_config(sized);
+        check(!load_config(sized.file).object_scaling && text(sized.file).find("\"allow_object_scaling\": false") != std::string::npos,
+              "The object scaling setting was not kept");
+        std::filesystem::remove_all(folder / "data");
+    }
+    // The server's chat colours: violet and lavender unless set, red first as written.
+    {
+        ServerConfig colours;
+        check(colours.chat_color == "#8E5CFF" && parse_colour(colours.chat_color) == 0xffff5c8eU && parse_colour("d9c8ff") == 0xffffc8d9U,
+              "The default chat colours are not violet and lavender");
+        check(!parse_colour("#12345") && !parse_colour("#12345G") && !parse_colour("") && !parse_colour("#1234567"), "A bad colour was read");
+        colours.chat_text_color = "blue";
+        check(config_error(colours).find("chat_text_color") != std::string::npos, "A chat colour that is not one was accepted");
+    }
     // Bans have a file of their own; a config that still holds them has them moved there.
     {
         std::filesystem::remove_all(folder / "data");

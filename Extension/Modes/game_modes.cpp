@@ -4,6 +4,7 @@
 #include "Extension/Trainer/trainer.h"
 #include "Extension/Skater/no_bail.h"
 #include "Extension/Skater/client_source_spawn.h"
+#include "Extension/HallOfMeat/hall_of_meat.h"
 #include "Engine/Game/UI/game_view.h"
 #include "Engine/Core/Log/logging.h"
 #include "Extension/Console/commands.h"
@@ -305,6 +306,10 @@ std::uint32_t default_duration(Mode mode) {
 }
 
 // ---- the local skater ----------------------------------------------------------------
+// A Hall of Meat game played with ReSkate's own Hall of Meat (Extension/HallOfMeat), as it made it:
+// its skeleton, card and slow motion show each bail and its Meat scores it. Without it (a game
+// build it does not know), the Bone Cam and the bail measured here stand in.
+bool official_meat() noexcept { return local_meat_game() && hall_of_meat::available(); }
 // Bails are watched before anything else: during a ragdoll the trainer may have no skater to
 // measure, but the physics state the bail hook reports keeps coming.
 void track_bail(State &s, std::uint32_t physics, float vertical, std::uint64_t now, float dt) {
@@ -362,7 +367,7 @@ void track_bail(State &s, std::uint32_t physics, float vertical, std::uint64_t n
     if (bailed && !s.bail.active) {
         logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: bail (state {} -> {}) at {:.1f} m/s.",
                      s.previous_state, physics, s.recent_speed);
-        bone_cam_bail();
+        if (!official_meat()) bone_cam_bail();
         if (s.line.tricks) popup(s, "Line lost!");
         s.line = {};
         // The drop counts from the highest the skater was in the last few seconds: a fall is often
@@ -394,8 +399,11 @@ void track_bail(State &s, std::uint32_t physics, float vertical, std::uint64_t n
             logging::log(logging::Level::info, logging::Channel::runtime,
                          "Game modes: bounce check: {} physics steps with it on, {} in a state it acts in, {} reading the body, fastest fall {:.1f} m/s{}{}.",
                          bounces.steps, bounces.eligible, bounces.read, bounces.fastest, bounces.why.empty() ? "" : ", last problem: ", bounces.why);
-            report(s, Event::bail, score, 0, s.bail.at);
-            if (s.game && s.game->settings.mode == Mode::meat) popup(s, "Meat: " + grouped(score));
+            // Hall of Meat's own Meat scores the bail instead (in the tick, below).
+            if (!official_meat()) {
+                report(s, Event::bail, score, 0, s.bail.at);
+                if (s.game && s.game->settings.mode == Mode::meat) popup(s, "Meat: " + grouped(score));
+            }
         }
     }
 }
@@ -1362,6 +1370,14 @@ std::vector<std::vector<std::uint8_t>> tick(const SessionInput &input) {
         track_game(s, now);
         // The ragdoll bounces in Hall of Meat (or always, if the player asked).
         set_bail_bounce(s.bounce_always || local_meat_game() ? s.bounce : 0.0f);
+        // Hall of Meat games: ReSkate's Hall of Meat held on while one is played (not saved; the
+        // menu's switch is the player's own), and every bail that hurt a bone scored with its Meat.
+        const bool official = official_meat();
+        hall_of_meat::set_forced(official);
+        if (const auto bail = hall_of_meat::take_finished_bail(); bail && official && bail->shown && bail->meat > 0) {
+            report(s, Event::bail, bail->meat, 0, s.position);
+            popup(s, "Meat: " + grouped(bail->meat));
+        }
         build_hud(s, now);
     } catch (...) {}
     auto out = std::move(s.outbox);

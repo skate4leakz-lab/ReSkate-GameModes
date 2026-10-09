@@ -128,6 +128,11 @@ class Host {
         std::unordered_map<std::uint16_t, sound_codec::In> sound_in;
         Transform still_at;
         std::uint64_t moved_at{};
+        // When they last did something a player at their game does: moved, spoke, typed in chat
+        // or changed their objects (0 until their game has loaded the map). And whether they have
+        // been told they are about to be removed for being away.
+        std::uint64_t active_at{};
+        bool away_warned{};
         std::uint64_t pose_arrival{};
         std::array<PoseDelivery, max_players> pose_delivery;
         CrowdLimits crowd; // how far the full and half rates reach for them in a crowd
@@ -139,6 +144,7 @@ class Host {
         VoiceBudget voice_budget;
         OutfitBudget outfit_budget;
         SoundBudget sound_budget;
+        EffectBudget effect_budget;
         ChatRate chat_rate;
         ChatBudget admin_budget, throwdown_budget, party_budget;
         SpeedCheck speed;           // how fast their game runs, from their pose timestamps
@@ -162,6 +168,9 @@ class Host {
         ObjectState objects, shared;
         std::uint64_t shared_from{};
         std::set<std::uint64_t> cleared;
+        // Objects they placed in the last minute, and until when none of theirs are shared, for
+        // placing more than a person does (sync_objects).
+        std::uint64_t placed_since{}, placed{}, objects_held_until{};
         struct ObjectDelivery {
             std::map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>> sent;
             std::vector<ObjectChunk> chunks;
@@ -178,6 +187,7 @@ class Host {
     // The running player vote (server_votes.cpp), and when each player may start another.
     struct Vote {
         VoteKind kind{};
+        std::uint32_t id{}; // told to games, so each can tell one vote from the next
         std::uint64_t starter{}, target{}; // target: the player a kick vote is about
         std::string value, label;          // value: the map or time; label: "change the map to ..."
         std::set<std::uint64_t> yes, no;
@@ -185,6 +195,17 @@ class Host {
         unsigned shown_yes{}, shown_no{};  // the tally last announced
     };
     std::optional<Vote> vote_;
+    // What games are shown of the vote (the roster carries it): the running one with its
+    // tally, or the one just finished with how it ended, for a few seconds.
+    multiplayer::ServerVote vote_shown_;
+    std::uint64_t vote_shown_until_{};
+    std::uint32_t vote_ids_{};
+    void show_vote(const Vote &vote, std::uint8_t outcome, unsigned yes, unsigned no, unsigned needed);
+    void active(Guest &guest) {
+        guest.active_at = now_;
+        guest.away_warned = false;
+    }
+    void remove_away();
     bool vote_recount_{}; // a player left: recount in tick(), never while guests_ is being walked
     std::map<std::uint64_t, std::uint64_t> vote_cooldowns_;
     std::uint64_t map_since_{}; // rotation clock start: the last map change, or while nobody is on
@@ -194,6 +215,8 @@ class Host {
     std::uint64_t party_revision_{};
     std::map<std::uint64_t, std::unique_ptr<Guest>> guests_;
     std::set<std::uint64_t> kicked_;
+    // The name each player last joined under, for banning one who has left by their SteamID.
+    std::map<std::uint64_t, std::string> seen_names_;
     JoinBackoff join_backoff_; // Steam IDs whose attempts to join keep failing
     std::optional<PasswordKey> password_;
     std::uint64_t id_{}, secret_{}, epoch_{}, map_{}, world_ = 1;
