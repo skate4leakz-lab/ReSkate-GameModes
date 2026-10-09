@@ -210,6 +210,9 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
             field(menu, "Camera on other turns");
             int follow = m.spectate ? 0 : 1;
             if (choice(menu, "modes-spectate", follow, {"WATCH WHO'S UP", "STAY ON ME"})) command(menu, callbacks, follow == 0 ? "spectate on" : "spectate off");
+            field(menu, "Flick diagrams for");
+            int stance = m.goofy ? 1 : 0;
+            if (choice(menu, "modes-stance", stance, {"REGULAR", "GOOFY"})) command(menu, callbacks, stance == 1 ? "stance goofy" : "stance regular");
         }
         if (current) note(current->summary);
         if (m.leading) {

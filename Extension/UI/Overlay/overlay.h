@@ -351,8 +351,18 @@ struct ModesHudPlayer {
     std::uint32_t color{}; // IM_COL32
     bool it{}, self{};
 };
+// S.K.A.T.E.: one part of the trick to copy, with its flick-it stick path when it has one (x to the
+// left, y pulled back, the gate the unit circle, a regular stance), else what kind of trick it is.
+struct ModesHudTrickPart {
+    std::string name;                         // "Kickflip", "BS 50-50 Grind"
+    std::vector<std::array<float, 2>> path;   // empty: no flick (a grab, grind or manual)
+    std::string kind;                         // "GRAB", "GRIND", "MANUAL" when there is no path
+};
 struct ModesHud {
     bool active{};        // in a game (the panel, the area and the rest); offers draw either way
+    std::string trick_title;                  // S.K.A.T.E.: "COPY THIS", over the trick's diagram
+    std::vector<ModesHudTrickPart> trick_parts;
+    bool goofy{};                             // mirror the flicks for a goofy stance
     std::vector<ModesHudPlayer> players; // Skate Tag, while it is played
     std::vector<ModesHudOffer> offers;
     std::string invite;   // "Huntredbanzzz is starting Hall of Meat", shown for a while after it appears
@@ -465,6 +475,7 @@ struct ModesMenu {
     bool official_meat{}, meat_every_bail{};
     std::uint8_t trick_kinds{0x0f}; // S.K.A.T.E.: the kinds of trick that may be set (1 flips, 2 grabs, 4 grinds, 8 manuals)
     bool spectate = true;           // S.K.A.T.E.: the camera follows whoever is up
+    bool goofy{};                   // S.K.A.T.E.: flick diagrams for a goofy stance
     float area_radius{};          // > 0: the area is a circle
     std::string placing;          // "circle", "corners", "points" while placing on the skater; else empty
     std::vector<ModesHudOffer> offers; // other players' games, to join from the menu

@@ -8,6 +8,7 @@
 #include "Extension/HallOfMeat/hall_of_meat_hud.h"
 #include "Engine/Core/Platform/memory.h"
 #include "Extension/Multiplayer/Hud/native_party.h"
+#include "trick_gestures.h"
 #include "Engine/Game/UI/game_view.h"
 #include "Engine/Core/Log/logging.h"
 #include "Extension/Console/commands.h"
@@ -166,6 +167,9 @@ struct State {
         std::uint64_t spectating{};
     } skate;
     bool spectate = true; // `mode spectate on|off`: watch whoever is up in S.K.A.T.E.
+    bool goofy{};         // `mode stance regular|goofy`: S.K.A.T.E.'s flick diagrams mirrored for goofy
+    std::uint64_t diagram_until{}; // `mode diagram <trick>`: its flick diagram on screen until then
+    std::string diagram_trick;
     std::mutex hud_mutex;
     overlay::ModesHud hud;
     overlay::ModesMenu menu;
@@ -1259,6 +1263,7 @@ void run_skate(State &s, std::uint64_t now) {
     const auto *st = s.game && s.game->state ? &*s.game->state : nullptr;
     const auto *me = s.game ? standing(*s.game, self) : nullptr;
     const bool in = st && s.game->settings.mode == Mode::skate && st->phase == Phase::playing && me && !me->out;
+    if (s.game && s.game->settings.mode == Mode::skate) prepare_trick_gestures(); // once, in the background
     trick_feed().on.store(in, std::memory_order_release);
     auto notes = take_trick_notes();
     // The camera on whoever is up, not on the local player's own turn.
@@ -1301,6 +1306,26 @@ void run_skate(State &s, std::uint64_t now) {
     if (s.bail.active && s.bail.started >= t.since) send_attempt(false);
 }
 
+// S.K.A.T.E.'s trick to copy for the HUD: each part with its flick (or what kind of trick it is).
+void fill_trick_parts(overlay::ModesHud &h, const std::string &trick, std::string title, bool goofy) {
+    h.trick_title = std::move(title);
+    h.goofy = goofy;
+    std::size_t start = 0;
+    while (start < trick.size() && h.trick_parts.size() < 4) {
+        auto end = trick.find(" + ", start);
+        if (end == std::string::npos) end = trick.size();
+        overlay::ModesHudTrickPart part;
+        part.name = trick.substr(start, end - start);
+        part.path = trick_gesture(part.name);
+        if (part.path.empty()) {
+            const auto kinds = trick_kinds_of(part.name);
+            part.kind = kinds & trick_grinds ? "GRIND" : kinds & trick_manuals ? "MANUAL" : kinds & trick_grabs ? "GRAB" : "TRICK";
+        }
+        h.trick_parts.push_back(std::move(part));
+        start = end + 3;
+    }
+}
+
 void build_hud(State &s, std::uint64_t now) {
     overlay::ModesHud h;
     if (s.game) {
@@ -1337,6 +1362,8 @@ void build_hud(State &s, std::uint64_t now) {
                 h.status = st->turn == self ? "YOUR TURN: " + target : name_of(s, st->turn) + " is up: " + target;
             } else if (mode == Mode::skate && st->turn) {
                 const bool setting = st->trick.empty();
+                // The trick to copy, drawn the way skate.'s own S.K.A.T.E. shows it: each part's flick.
+                if (!setting) fill_trick_parts(h, st->trick, st->turn == self ? "COPY THIS" : name_of(s, st->turn) + " IS TRYING", s.goofy);
                 if (st->turn == self)
                     h.status = setting ? "YOUR SET: land a trick (" + trick_kinds_text(g.settings.trick_kinds) + ")"
                                        : "YOUR TURN: land the " + st->trick;
@@ -1524,11 +1551,19 @@ void build_hud(State &s, std::uint64_t now) {
         h.winner_value = h.rows.front().value;
         h.closing_ms = static_cast<std::uint32_t>(s.results_preview_until - now);
     }
+    // `mode diagram <trick>`: S.K.A.T.E.'s flick diagram for a trick, without a game.
+    if (!h.active && now < s.diagram_until) {
+        h.active = true;
+        h.title = "S.K.A.T.E.";
+        h.status = "Flick diagram preview";
+        fill_trick_parts(h, s.diagram_trick, "COPY THIS", s.goofy);
+    }
     // What the Game Modes page of the ReSkate menu shows and offers.
     overlay::ModesMenu m;
     m.bone_cam = bone_cam_setting();
     m.bone_cam_ringing = bone_cam_ringing();
     m.spectate = s.spectate;
+    m.goofy = s.goofy;
     m.official_meat = hall_of_meat::available();
     m.meat_every_bail = hall_of_meat::switched_on();
     if (s.game) {
@@ -1827,6 +1862,23 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         return join_offer(s, offer, now);
     }
     if (v == "tricklog") return trick_log_command(arguments);
+    if (v == "diagram") {
+        std::string trick;
+        for (const auto &word : arguments) trick += (trick.empty() ? "" : " ") + word;
+        if (trick.empty()) return "error: usage: mode diagram <trick>, e.g. mode diagram 360 Flip + Indy";
+        prepare_trick_gestures();
+        s.diagram_trick = trick;
+        s.diagram_until = now + 10000;
+        return trick_gesture(trick.substr(0, trick.find(" + "))).empty()
+                   ? "Showing it for 10 seconds (if the trick has a flick, its diagram shows once the game's gestures are read)."
+                   : "Showing its flick diagram for 10 seconds.";
+    }
+    if (v == "stance") {
+        if (arguments.empty() || (arguments[0] != "regular" && arguments[0] != "goofy"))
+            return std::format("S.K.A.T.E.'s flick diagrams are shown for a {} stance. Usage: mode stance regular|goofy", s.goofy ? "goofy" : "regular");
+        s.goofy = arguments[0] == "goofy";
+        return std::format("Flick diagrams shown for a {} stance.", s.goofy ? "goofy" : "regular");
+    }
     if (v == "spectate") {
         if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off"))
             return std::format("S.K.A.T.E. spectating is {}. Usage: mode spectate on|off", s.spectate ? "on" : "off");

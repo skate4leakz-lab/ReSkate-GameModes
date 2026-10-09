@@ -910,6 +910,88 @@ void crown(ImDrawList *draw, ImVec2 centre, float size, ImU32 gold) {
     for (const auto &tip : {outline[1], outline[3], outline[5]}) draw->AddCircleFilled(tip, size * 0.08f, IM_COL32(255, 70, 90, 255), 12);
 }
 
+// S.K.A.T.E.: the trick to copy, the way skate.'s own S.K.A.T.E. shows it, low in the middle of the
+// screen: for each part a stick gate with its flick drawn on it (where to start, the way round, an
+// arrow at the end, and a dot running the flick over and over), its name under it; a part with no
+// flick (a grab, a grind, a manual) says what it is instead.
+void draw_trick_diagram(ImDrawList *draw, const ModesHud &h, float scale) {
+    if (h.trick_parts.empty()) return;
+    auto &s = state();
+    auto *heading = s.menu.heading ? s.menu.heading : ImGui::GetFont();
+    auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
+    const auto display = ImGui::GetIO().DisplaySize;
+    const float r = 48.0f * scale, gap = 46.0f * scale, cell = r * 2.0f + gap;
+    const float total = cell * static_cast<float>(h.trick_parts.size()) - gap;
+    const float cy = display.y - 190.0f * scale, left = display.x * 0.5f - total * 0.5f;
+    const float time = static_cast<float>(ImGui::GetTime());
+    const ImU32 white = IM_COL32(255, 255, 255, 255);
+    band(draw, ImVec2(left - 160.0f * scale, cy - r - 52.0f * scale), ImVec2(left + total + 160.0f * scale, cy + r + 46.0f * scale), 0.55f, 0);
+    const float title = 17.0f * scale;
+    diamond(draw, ImVec2(display.x * 0.5f - text_width(bold, title, h.trick_title) * 0.5f - 14.0f * scale, cy - r - 30.0f * scale), 5.0f * scale, accent);
+    soft_text(draw, bold, title, ImVec2(display.x * 0.5f - text_width(bold, title, h.trick_title) * 0.5f, cy - r - 40.0f * scale), accent, h.trick_title);
+    for (std::size_t i = 0; i < h.trick_parts.size(); ++i) {
+        const auto &part = h.trick_parts[i];
+        const ImVec2 c(left + r + cell * static_cast<float>(i), cy);
+        if (i > 0) soft_text(draw, heading, 28.0f * scale, ImVec2(c.x - r - gap * 0.5f - 8.0f * scale, cy - 16.0f * scale), white, "+");
+        // The stick's gate.
+        draw->AddCircleFilled(c, r, IM_COL32(12, 14, 18, 190), 48);
+        draw->AddCircle(c, r, IM_COL32(255, 255, 255, 120), 48, std::max(1.5f, 2.0f * scale));
+        draw->AddCircleFilled(c, 3.0f * scale, IM_COL32(255, 255, 255, 90), 12);
+        if (!part.path.empty()) {
+            // The gesture's x is to the left: on screen that is minus x, mirrored for a goofy stance.
+            const float side = h.goofy ? 1.0f : -1.0f, reach = r * 0.82f;
+            std::vector<ImVec2> points;
+            for (const auto &p : part.path) points.emplace_back(c.x + side * p[0] * reach, c.y + p[1] * reach);
+            // Rounded through its corners a little, for the look of a flick rather than a polygon.
+            std::vector<ImVec2> smooth;
+            for (std::size_t k = 0; k + 1 < points.size(); ++k)
+                for (int step = 0; step < 8; ++step) {
+                    const float t = static_cast<float>(step) / 8.0f;
+                    smooth.emplace_back(points[k].x + (points[k + 1].x - points[k].x) * t, points[k].y + (points[k + 1].y - points[k].y) * t);
+                }
+            smooth.push_back(points.back());
+            for (int round = 0; round < 6; ++round)
+                for (std::size_t k = 1; k + 1 < smooth.size(); ++k)
+                        smooth[k] = ImVec2((smooth[k - 1].x + smooth[k].x * 2.0f + smooth[k + 1].x) * 0.25f,
+                                           (smooth[k - 1].y + smooth[k].y * 2.0f + smooth[k + 1].y) * 0.25f);
+            const float thick = std::max(2.5f, 5.0f * scale);
+            for (std::size_t k = 0; k + 1 < smooth.size(); ++k) {
+                const float t = static_cast<float>(k) / static_cast<float>(smooth.size() - 1);
+                draw->AddLine(smooth[k], smooth[k + 1], with_alpha(accent, 0.45f + 0.55f * t), thick);
+            }
+            // Where to start, and the arrow at the end.
+            draw->AddCircleFilled(smooth.front(), 6.0f * scale, white, 16);
+            draw->AddCircle(smooth.front(), 6.0f * scale, accent, 16, std::max(1.0f, 1.5f * scale));
+            const auto &tip = smooth.back(), &back = smooth[smooth.size() >= 4 ? smooth.size() - 4 : 0];
+            float dx = tip.x - back.x, dy = tip.y - back.y;
+            const float length = std::max(1e-3f, std::sqrt(dx * dx + dy * dy));
+            dx /= length;
+            dy /= length;
+            const float a = 13.0f * scale, w = 8.0f * scale;
+            draw->AddTriangleFilled(ImVec2(tip.x + dx * a * 0.5f, tip.y + dy * a * 0.5f), ImVec2(tip.x - dx * a * 0.5f - dy * w, tip.y - dy * a * 0.5f + dx * w),
+                                    ImVec2(tip.x - dx * a * 0.5f + dy * w, tip.y - dy * a * 0.5f - dx * w), accent);
+            // The stick doing it: a dot running the flick, then a pause.
+            const float cycle = std::fmod(time + 0.37f * static_cast<float>(i), 1.6f) / 0.9f;
+            if (cycle <= 1.0f) {
+                const float at = cycle * static_cast<float>(smooth.size() - 1);
+                const auto k = std::min(static_cast<std::size_t>(at), smooth.size() - 2);
+                const float f = at - static_cast<float>(k);
+                const ImVec2 dot(smooth[k].x + (smooth[k + 1].x - smooth[k].x) * f, smooth[k].y + (smooth[k + 1].y - smooth[k].y) * f);
+                draw->AddCircleFilled(dot, 9.0f * scale, IM_COL32(255, 255, 255, 230), 20);
+                draw->AddCircle(dot, 9.0f * scale, IM_COL32(20, 20, 20, 200), 20, std::max(1.0f, 1.5f * scale));
+            }
+        } else {
+            const float size = 15.0f * scale;
+            soft_text(draw, heading, size, ImVec2(c.x - text_width(heading, size, part.kind) * 0.5f, c.y - size * 0.55f), accent, part.kind);
+        }
+        // The part's name under its gate, kept to the cell.
+        const float name_size = 15.0f * scale;
+        std::string name = part.name;
+        while (name.size() > 1 && text_width(bold, name_size, name) > cell - 6.0f * scale) name.pop_back();
+        soft_text(draw, bold, name_size, ImVec2(c.x - text_width(bold, name_size, name) * 0.5f, c.y + r + 8.0f * scale), white, name);
+    }
+}
+
 // "1ST", "2ND", "3RD", "4TH" ... "11TH", "21ST".
 std::string ordinal(std::size_t n) {
     const auto tens = n % 100, ones = n % 10;
@@ -1125,6 +1207,7 @@ void draw_modes_hud() {
     }
     draw_panel(draw, h, scale);
     draw_centre(draw, h, scale);
+    draw_trick_diagram(draw, h.hud, scale);
     if (h.hud.placing && h.hud.aiming) {
         // The quick-drop reticle: white with a dot when it finds the ground, red when it does not.
         const ImVec2 c(display.x * 0.5f, display.y * 0.5f);

@@ -1,6 +1,6 @@
 // Development tool: finds an EBX asset in the installed game by part of its name and prints its
 // fields, so the skater skeleton's bone names and parent indices can be read without the game
-// running. Usage: skeleton_dump <game folder> <name part> [bundle part]
+// running. Usage: skeleton_dump <game folder> <name part> [bundle part] [most assets, 3 by default]
 #include "Engine/Vfs/game_bundles.h"
 #include "Engine/Resource/ebx_document.h"
 #include <algorithm>
@@ -52,6 +52,7 @@ int main(int argc, char **argv) {
     const std::filesystem::path root = argv[1];
     const auto wanted = lower(argv[2]);
     const std::string bundle_filter = argc > 3 ? lower(argv[3]) : std::string();
+    const int most = argc > 4 ? std::max(1, std::atoi(argv[4])) : 3;
     const dingosdk::vfs::GameData data(root);
     int found = 0;
     std::error_code error;
@@ -79,7 +80,7 @@ int main(int argc, char **argv) {
                 } catch (const std::exception &e) {
                     std::cout << "read failed: " << e.what() << '\n';
                 }
-                if (++found >= 3) return 0;
+                if (++found >= most) return 0;
             }
         }
     }

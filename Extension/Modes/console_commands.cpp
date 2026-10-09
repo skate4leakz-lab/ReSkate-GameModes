@@ -14,6 +14,8 @@ void register_mode_commands(Commands &registry) {
         {"new", "Set up a game you lead", "jam|1up|meat|race|domination|graffiti|tag|skate"},
         {"tricks", "S.K.A.T.E.: the kinds of trick that can be set", "flips grabs grinds manuals|all"},
         {"spectate", "S.K.A.T.E.: watch whoever is up", "on|off"},
+        {"stance", "S.K.A.T.E.: flick diagrams for your stance", "regular|goofy"},
+        {"diagram", "S.K.A.T.E.: show a trick's flick diagram for 10 seconds", "<trick, e.g. 360 Flip + Indy>"},
         {"circle", "Make the play area a circle around you", "[radius in metres]"},
         {"place", "Place the area, route or spots with the free camera (mouse and keyboard, or the pad)",
          "circle|corners|points|cancel|freecam on|off"},

@@ -53,6 +53,7 @@ add_library(dingosdk_runtime SHARED
     Extension/Modes/game_modes.cpp
     Extension/Modes/console_commands.cpp
     Extension/Modes/bone_cam.cpp
+    Extension/Modes/trick_gestures.cpp
     Extension/Multiplayer/Hud/native_indicators.cpp
     Extension/Multiplayer/Steam/steam_transport.cpp
     Extension/Multiplayer/Steam/steam_social.cpp
