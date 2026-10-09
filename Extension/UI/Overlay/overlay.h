@@ -321,6 +321,7 @@ struct ModesHudOffer {
     bool has_at{};
     bool open{};   // still taking players (setting up or counting down)
     bool target{}; // the one the join button acts on now
+    bool own{};    // the local player's own game: its flag only, where the others will join
     std::uint64_t id{}; // `mode join <id>`
 };
 // Skate Tag: a player where they last said they were. The one who is it wears a neon crown; arrows at

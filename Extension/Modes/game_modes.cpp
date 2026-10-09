@@ -337,9 +337,12 @@ void track_bail(State &s, std::uint32_t physics, float vertical, std::uint64_t n
     // own wipeout states say when a landing went wrong. Only when the game itself had the skater
     // going fast (7 m/s and more): the pose's own speed jumps about on stairs, in a jump on the
     // spot and through tricks, and alone it is no proof of anything.
-    // Striking an object at speed (a pole, a tree, a rail) is a bail on the board or off it, when
-    // the game itself had the skater going (6 m/s and more).
-    if (bone_cam_struck() && !reset && s.recent_speed >= 6.0f) {
+    // Striking an object at speed (a pole, a tree, a rail) off the board, when the game itself had
+    // the skater going (6 m/s and more). On the board the game wipes the skater out itself when
+    // they really hit something (state 300 and up, a bail already); a landing off a kicker jolts
+    // the pose just like a hit, and the game rolls on (state 100 or 200), so that is no bail.
+    // Read every tick all the same, so a stale strike is not kept for later.
+    if (bone_cam_struck() && on_foot && s.recent_speed >= 6.0f) {
         logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: hit an object at {:.1f} m/s.", s.recent_speed);
         bailed = true;
     }
@@ -1258,6 +1261,24 @@ void build_hud(State &s, std::uint64_t now) {
         offer.id = o.leader;
         h.offers.push_back(offer);
         m.offers.push_back(offer);
+    }
+    // The local player's own game while it takes players: its flag stands where the others join,
+    // so its leader sees what they see. Not in the menu's list: there is nothing to join.
+    if (s.game && s.game->leading) {
+        const auto &g = *s.game;
+        const auto phase = g.state ? g.state->phase : Phase::setup;
+        if (const auto spot = game_spot(g.settings); spot && (phase == Phase::setup || phase == Phase::countdown)) {
+            overlay::ModesHudOffer own;
+            std::string mode(mode_name(g.settings.mode));
+            for (auto &c : mode) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            own.mode = mode;
+            own.host = "YOUR GAME";
+            const auto players = g.state ? g.state->standings.size() : 1;
+            own.detail = std::format("{} player{}  -  others join at this flag", players, players == 1 ? "" : "s");
+            own.at = *spot;
+            own.has_at = own.open = own.own = true;
+            h.offers.push_back(own);
+        }
     }
     h.can_join = s.join_target.has_value();
     if (s.invite_at && now - s.invite_at < invite_ms) {

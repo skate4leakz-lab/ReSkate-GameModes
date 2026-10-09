@@ -673,6 +673,64 @@ void join_prompt(ImDrawList *draw, ImFont *font, ImVec2 at, float scale, float a
     put("JOIN", IM_COL32(255, 255, 255, 255));
 }
 
+// The flag on a game's spot, the way skate. marks a throwdown: a tall pole and a banner in the
+// game's colour rippling in the wind, a white hem and the mode's name across it (the diamond when
+// too far to read). The banner flies out to the camera's side so it is never seen edge on.
+void draw_flag(ImDrawList *draw, const Camera &cam, const Vec3 &p, ImU32 colour, float time, ImFont *font, const std::string &name) {
+    constexpr float pole = 6.0f, cloth_h = 1.8f, cloth_w = 3.6f;
+    constexpr int segments = 14;
+    const float distance = std::max(1.0f, cam.distance(p));
+    const float px = cam.focal / distance; // pixels per metre at the flag
+    if (px * pole < 4.0f) return;            // too far to make out: the beam marks it
+    const float rl = std::max(1e-4f, std::hypot(cam.right[0], cam.right[2]));
+    const float bl = std::max(1e-4f, std::hypot(cam.back[0], cam.back[2]));
+    const Vec3 r{cam.right[0] / rl, 0, cam.right[2] / rl}, b{cam.back[0] / bl, 0, cam.back[2] / bl};
+    const Vec3 top{p[0], p[1] + pole, p[2]};
+    const auto shade = [](ImU32 c, float f) {
+        const auto ch = [&](int shift) { return static_cast<ImU32>(std::clamp(((c >> shift) & 0xff) * f, 0.0f, 255.0f)) << shift; };
+        return ch(IM_COL32_R_SHIFT) | ch(IM_COL32_G_SHIFT) | ch(IM_COL32_B_SHIFT) | (c & IM_COL32_A_MASK);
+    };
+    // The cloth: each strip along it moved in and out of the wind's wave, lit by how it faces.
+    std::array<Vec3, segments + 1> upper{}, lower{};
+    std::array<ImU32, segments + 1> tint{};
+    for (int k = 0; k <= segments; ++k) {
+        const float x = cloth_w * k / segments, out = x / cloth_w, phase = time * 4.0f - x * 2.2f;
+        const float wave = std::sin(phase) * 0.28f * out, droop = 0.18f * out * out;
+        const Vec3 at{top[0] + r[0] * x + b[0] * wave, top[1] - droop, top[2] + r[2] * x + b[2] * wave};
+        upper[k] = at;
+        lower[k] = {at[0], at[1] - cloth_h, at[2]};
+        tint[k] = shade(colour, 0.72f + 0.28f * std::cos(phase));
+    }
+    for (int k = 0; k < segments; ++k) {
+        const Vec3 quad[]{upper[k], upper[k + 1], lower[k + 1], lower[k]};
+        const ImU32 shades[]{tint[k], tint[k + 1], tint[k + 1], tint[k]};
+        fill_world(draw, cam, quad, shades);
+    }
+    // The hem and the free edge, white.
+    const float hem = std::clamp(px * 0.09f, 1.0f, 5.0f);
+    for (int k = 0; k < segments; ++k) line3(draw, cam, lower[k], lower[k + 1], IM_COL32(255, 255, 255, 230), hem);
+    line3(draw, cam, upper[segments], lower[segments], IM_COL32(255, 255, 255, 160), hem * 0.6f);
+    // The mode's name across the middle of the banner, as big as fits; the diamond when too small to read.
+    const int mid = segments / 2;
+    const Vec3 centre{(upper[mid][0] + lower[mid][0]) * 0.5f, (upper[mid][1] + lower[mid][1]) * 0.5f, (upper[mid][2] + lower[mid][2]) * 0.5f};
+    if (const auto c = cam.project(centre)) {
+        const float unit = text_width(font, 100.0f, name);
+        const float size = std::min(px * cloth_h * 0.42f, unit > 0 ? px * cloth_w * 0.84f * 100.0f / unit : 0.0f);
+        if (!name.empty() && size >= 8.0f) {
+            const float w = text_width(font, size, name);
+            const ImVec2 at(c->x - w * 0.5f, c->y - size * 0.55f);
+            draw->AddText(font, size, ImVec2(at.x + size * 0.06f, at.y + size * 0.06f), IM_COL32(0, 0, 0, 110), name.c_str());
+            draw->AddText(font, size, at, IM_COL32(255, 255, 255, 245), name.c_str());
+        } else if (px * 0.4f >= 3.0f) {
+            diamond(draw, *c, px * 0.4f, IM_COL32(255, 255, 255, 235));
+        }
+    }
+    // The pole, drawn over the cloth's near edge, with a cap.
+    line3(draw, cam, p, {top[0], top[1] + 0.15f, top[2]}, IM_COL32(225, 228, 235, 255), std::clamp(px * 0.07f, 1.5f, 7.0f));
+    if (const auto cap = cam.project({top[0], top[1] + 0.2f, top[2]}))
+        draw->AddCircleFilled(*cap, std::clamp(px * 0.09f, 2.0f, 9.0f), IM_COL32(255, 255, 255, 255), 12);
+}
+
 // Other players' games, the way skate. shows a throwdown drop: a beam of light standing on the
 // game's spot, seen from across the map, a ring pulsing on the ground and a card over it with the
 // mode, the host, how many are in and how far it is. The one the join button would take lights up.
@@ -702,8 +760,9 @@ void draw_offers(ImDrawList *draw, const ModesHud &h, float scale) {
         const float pulse = std::fmod(time * 0.6f, 1.0f);
         ring(draw, cam, p, 2.5f, with_alpha(colour, 0.9f), std::max(2.0f, 3.0f * scale));
         ring(draw, cam, p, 2.5f + pulse * 3.0f, with_alpha(colour, 0.6f * (1.0f - pulse)), std::max(1.5f, 2.0f * scale));
-        // The card, a fixed size on screen above the spot.
-        const auto anchor = cam.project({p[0], p[1] + 4.0f, p[2]});
+        draw_flag(draw, cam, p, colour, time, heading, offer.mode);
+        // The card, a fixed size on screen above the flag.
+        const auto anchor = cam.project({p[0], p[1] + 7.2f, p[2]});
         if (!anchor) continue;
         const float title_size = 22.0f * scale, line_size = 15.0f * scale;
         const std::string where = std::format("{:.0f} m", distance);
