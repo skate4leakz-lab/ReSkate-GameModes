@@ -1016,7 +1016,7 @@ void draw_results(ImDrawList *draw, const ModesHud &h, float scale) {
     draw->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(display.x * 0.55f, display.y), IM_COL32(0, 0, 0, static_cast<int>(150 * shade)),
                                   IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, static_cast<int>(150 * shade)));
 
-    const float x = 64.0f * scale, width = 500.0f * scale, right = x + width;
+    const float x = 64.0f * scale, width = 580.0f * scale, right = x + width;
     float y = display.y * 0.17f;
     // The header: the mode in the accent, RESULTS large, an accent line fading out.
     {
@@ -1061,19 +1061,28 @@ void draw_results(ImDrawList *draw, const ModesHud &h, float scale) {
         } else {
             soft_text(draw, heading, place_size, ImVec2(left, y + (tall - place_size) * 0.5f), with_alpha(badge, a), place);
         }
-        // The player's colour, their name and their score.
-        const float name_size = (i == 0 ? 34.0f : podium ? 25.0f : 18.0f) * scale;
-        const float name_x = left + place_w + 8.0f * scale;
+        // The player's colour, their name and their score. The score is placed first, on the right; the
+        // name gets the room left of it (with YOU after it for the local player): a long name is drawn
+        // smaller, down to 70%, and past that cut short with "...", so the two never run into each other.
+        auto *name_font = i == 0 ? heading : bold;
+        const float value_size = (i == 0 ? 26.0f : podium ? 21.0f : 17.0f) * scale;
+        const float value_w = text_width(heading, value_size, row.value);
+        const float name_x = left + place_w + 8.0f * scale, text_x = name_x + 14.0f * scale;
+        const float you_w = row.self ? text_width(bold, 13.0f * scale, "YOU") + 10.0f * scale : 0.0f;
+        const float room = std::max(40.0f * scale, end - value_w - 18.0f * scale - text_x - you_w);
+        float name_size = (i == 0 ? 34.0f : podium ? 25.0f : 18.0f) * scale;
+        if (const float w = text_width(name_font, name_size, row.name); w > room) name_size = std::max(name_size * 0.7f, name_size * room / w);
+        std::string name = row.name;
+        while (name.size() > 1 && text_width(name_font, name_size, name + "...") > room) name.pop_back();
+        if (name != row.name) name += "...";
         const float name_y = y + (tall - name_size) * 0.5f - (i == 0 ? 2.0f * scale : 0.0f);
         draw->AddRectFilled(ImVec2(name_x, name_y + name_size * 0.15f), ImVec2(name_x + 5.0f * scale, name_y + name_size * 0.95f), with_alpha(row.color, a));
-        soft_text(draw, i == 0 ? heading : bold, name_size, ImVec2(name_x + 14.0f * scale, name_y), with_alpha(white, a), row.name);
-        const float value_size = (i == 0 ? 26.0f : podium ? 21.0f : 17.0f) * scale;
-        soft_text(draw, heading, value_size, ImVec2(end - text_width(heading, value_size, row.value), y + (tall - value_size) * 0.5f),
-                  with_alpha(i == 0 ? metal[0] : white, a), row.value);
+        soft_text(draw, name_font, name_size, ImVec2(text_x, name_y), with_alpha(white, a), name);
+        soft_text(draw, heading, value_size, ImVec2(end - value_w, y + (tall - value_size) * 0.5f), with_alpha(i == 0 ? metal[0] : white, a), row.value);
         if (row.self) {
             draw->AddRectFilledMultiColor(ImVec2(left - 12.0f * scale, y + tall - 3.0f * scale), ImVec2(end + 60.0f * scale, y + tall),
                                           with_alpha(accent, a), with_alpha(accent, 0.0f), with_alpha(accent, 0.0f), with_alpha(accent, a));
-            const float you_x = name_x + 14.0f * scale + text_width(i == 0 ? heading : bold, name_size, row.name) + 10.0f * scale;
+            const float you_x = text_x + text_width(name_font, name_size, name) + 10.0f * scale;
             soft_text(draw, bold, 13.0f * scale, ImVec2(you_x, name_y + name_size - 15.0f * scale), with_alpha(accent, a), "YOU");
         }
         y += tall + (podium ? 8.0f : 4.0f) * scale;
