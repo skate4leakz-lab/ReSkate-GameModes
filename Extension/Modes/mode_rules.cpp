@@ -70,6 +70,7 @@ std::string_view mode_name(Mode m) noexcept {
     case Mode::domination: return "Domination";
     case Mode::graffiti: return "Graffiti";
     case Mode::tag: return "Skate Tag";
+    case Mode::infection: return "Infection";
     case Mode::skate: return "S.K.A.T.E.";
     }
     return "Game";
@@ -83,6 +84,7 @@ std::string_view mode_key(Mode m) noexcept {
     case Mode::domination: return "domination";
     case Mode::graffiti: return "graffiti";
     case Mode::tag: return "tag";
+    case Mode::infection: return "infection";
     case Mode::skate: return "skate";
     }
     return "";
@@ -96,6 +98,7 @@ std::string_view mode_summary(Mode m) noexcept {
     case Mode::domination: return "Take spots with your best line there. Every second you hold one scores.";
     case Mode::graffiti: return "Grind it, manual it, gap it: what you skate takes your colour. A bigger line steals it. Most tags wins.";
     case Mode::tag: return "One player is it: get close to tag someone else. No tag-backs. Least time spent it wins.";
+    case Mode::infection: return "One player starts infected. Everyone they reach is infected too and joins the hunt. Survive longest to win.";
     case Mode::skate: return "Set a trick, everyone copies it or takes a letter. Spell S.K.A.T.E. and you're out; last one standing wins.";
     }
     return "";
@@ -110,6 +113,7 @@ std::optional<Mode> parse_mode(std::string_view text) noexcept {
     if (key == "domination" || key == "dom") return Mode::domination;
     if (key == "graffiti" || key == "thps") return Mode::graffiti;
     if (key == "tag" || key == "skatetag" || key == "skate_tag") return Mode::tag;
+    if (key == "infection" || key == "infect" || key == "zombie" || key == "zombies") return Mode::infection;
     if (key == "skate" || key == "s.k.a.t.e." || key == "s.k.a.t.e") return Mode::skate;
     return std::nullopt;
 }
@@ -601,6 +605,12 @@ void Referee::remove_player(std::uint64_t player, std::uint64_t now_ms) {
         if (players_.size() > 1 && still_in() <= 1) finish(now_ms);
         return;
     }
+    // Infection: the last survivor leaving, or the last of the infected, ends it.
+    if (settings_.mode == Mode::infection) {
+        const bool hunters = std::any_of(players_.begin(), players_.end(), [](const Player &q) { return !q.out && q.infected; });
+        if (players_.size() > 1 && (survivors() == 0 || !hunters || still_in() <= 1)) finish(now_ms);
+        return;
+    }
     if (settings_.mode == Mode::one_up && turn_ < players_.size() && players_[turn_].id == player) next_turn(now_ms);
     else if (settings_.mode == Mode::one_up && (still_in() == 0 || (players_.size() > 1 && still_in() <= 1))) finish(now_ms);
     if (settings_.mode == Mode::skate) {
@@ -630,6 +640,42 @@ void Referee::begin_play(std::uint64_t now_ms) {
     }
     // Skate Tag: someone starts it, picked by the game's id so every game starts differently.
     if (settings_.mode == Mode::tag && !players_.empty()) make_it(players_[game_ % players_.size()].id, 0, now_ms);
+    // Infection: patient zero, picked the same way; everyone else starts clean.
+    if (settings_.mode == Mode::infection && !players_.empty()) {
+        auto &zero = players_[game_ % players_.size()];
+        zero.infected = true;
+        it_counted_ = now_ms;
+        call(name_of(zero.id) + " is patient zero!");
+    }
+}
+std::size_t Referee::survivors() const noexcept {
+    return static_cast<std::size_t>(std::count_if(players_.begin(), players_.end(), [](const Player &p) { return !p.out && !p.infected; }));
+}
+// Infection: every infected player whose position is fresh infects each survivor within reach whose
+// position is fresh too. A game of more than one player ends when nobody is left clean.
+void Referee::try_infections(std::uint64_t now_ms) {
+    const float reach = settings_.radius;
+    const auto fresh = [&](const Player &p) { return !p.out && p.at_time && now_ms - p.at_time <= position_fresh_ms; };
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> caught; // victim, by
+    for (const auto &hunter : players_) {
+        if (!hunter.infected || !fresh(hunter)) continue;
+        for (const auto &q : players_) {
+            if (q.infected || !fresh(q)) continue;
+            const float dx = q.at[0] - hunter.at[0], dy = q.at[1] - hunter.at[1], dz = q.at[2] - hunter.at[2];
+            if (dx * dx + dy * dy + dz * dz <= reach * reach &&
+                std::none_of(caught.begin(), caught.end(), [&](const auto &c) { return c.first == q.id; }))
+                caught.push_back({q.id, hunter.id});
+        }
+    }
+    for (const auto &[victim, by] : caught) {
+        auto *p = find(victim);
+        p->infected = true;
+        call(std::format("{} infected {}!", name_of(by), name_of(victim)));
+    }
+    if (!caught.empty() && players_.size() > 1 && survivors() == 0) {
+        call(name_of(caught.back().first) + " was the last survivor");
+        finish(now_ms);
+    }
 }
 void Referee::make_it(std::uint64_t player, std::uint64_t by, std::uint64_t now_ms) {
     it_ = player;
@@ -779,20 +825,23 @@ void Referee::event(std::uint64_t player, Event event, std::int32_t value, const
     auto *p = find(player);
     if (!p || p->out || p->finished || sequence <= p->sequence) return;
     p->sequence = sequence;
-    // Skate Tag runs on where everyone is (anywhere: leaving the area is dealt with by sending them back).
-    if (settings_.mode == Mode::tag) {
+    // Skate Tag and Infection run on where everyone is (anywhere: leaving the area is dealt with by
+    // sending them back).
+    if (tag_like(settings_.mode)) {
         if (event != Event::position) return;
         for (const auto v : at)
             if (!std::isfinite(v) || std::abs(v) > 1e6f) return;
         p->at = at;
         p->at_time = now_ms;
-        try_tags(now_ms);
+        if (settings_.mode == Mode::tag) try_tags(now_ms);
+        else try_infections(now_ms);
         return;
     }
     if (event == Event::position) return;
     if (settings_.mode != Mode::race && !inside(settings_, at)) return; // out of the area: nothing counts
     switch (settings_.mode) {
-    case Mode::tag: return; // handled above, from positions
+    case Mode::tag:
+    case Mode::infection: return; // handled above, from positions
     case Mode::skate:
         if (event != Event::trick || turn_ >= players_.size() || players_[turn_].id != player) return;
         skate_attempt(*p, value != 0, trick, now_ms);
@@ -924,6 +973,15 @@ bool Referee::tick(std::uint64_t now_ms) {
             }
             it_counted_ = now_ms;
         }
+        if (settings_.mode == Mode::infection) {
+            // Each survivor's time clean, in tenths of a second (the score: more wins).
+            for (auto &p : players_)
+                if (!p.out && !p.infected) {
+                    p.it_ms += now_ms - it_counted_;
+                    p.score = static_cast<std::int32_t>(std::min<std::uint64_t>(p.it_ms / 100, 0x7fffffff));
+                }
+            it_counted_ = now_ms;
+        }
         if (settings_.mode == Mode::one_up && turn_ < players_.size() && now_ms >= turn_at_ + settings_.turn_s * 1000ull) {
             strike(players_[turn_], now_ms, "ran out of time");
             return true;
@@ -978,6 +1036,11 @@ Message Referee::state(std::uint64_t now_ms) const {
     for (std::size_t i = 0; i < players_.size(); ++i) {
         const auto &p = players_[i];
         m.standings.push_back({p.id, p.score, p.aux, p.out, m.turn == p.id});
+        // Infection: aux 1 and `up` for the infected (who wear the reaper), score the tenths survived.
+        if (settings_.mode == Mode::infection) {
+            m.standings.back().aux = p.infected ? 1 : 0;
+            m.standings.back().up = p.infected;
+        }
     }
     const auto mode = settings_.mode;
     std::stable_sort(m.standings.begin(), m.standings.end(), [mode, this](const Standing &a, const Standing &b) {
@@ -991,6 +1054,10 @@ Message Referee::state(std::uint64_t now_ms) const {
         if (mode == Mode::tag) { // least time spent it first
             if (a.out != b.out) return !a.out;
             return a.score < b.score;
+        }
+        if (mode == Mode::infection) { // longest survived first; a survivor before the infected on a tie
+            if (a.score != b.score) return a.score > b.score;
+            return a.aux < b.aux;
         }
         if (mode == Mode::one_up || mode == Mode::skate) {
             if (a.out != b.out) return !a.out;

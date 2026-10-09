@@ -30,6 +30,9 @@ std::vector<std::vector<std::uint8_t>> tick(const SessionInput &input);
 bool receive(std::uint64_t sender, std::span<const std::uint8_t> message);
 // Lines for the local chat since the last call (game thread).
 std::vector<std::string> take_notices();
+// Infection: whether this other player is infected now, so their skater wears the reaper here
+// (game thread, from the session's outfit pass).
+bool infected_look(std::uint64_t player) noexcept;
 // `mode <verb> [arguments]` from the console dispatcher (game thread).
 std::string command(std::string_view verb, const std::vector<std::string> &arguments);
 // The HUD's snapshot, with the latest camera (any thread).

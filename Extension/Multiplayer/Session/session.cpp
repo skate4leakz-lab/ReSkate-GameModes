@@ -5,6 +5,7 @@
 #include "party_book.h"
 #include "Engine/Game/World/world_names.h"
 #include "Extension/Multiplayer/Remote/native_skater.h"
+#include "Extension/Multiplayer/Remote/native_cosmetics.h"
 #include "Extension/Multiplayer/Hud/custom_nametags.h"
 #include "Extension/Multiplayer/Hud/follow_camera.h"
 #include "Extension/Throwdowns/native_throwdowns.h"
@@ -510,6 +511,17 @@ void render(Session &s, std::uintptr_t client, const NativeFrame &local, std::ui
         if (p.applied_cosmetics != p.cosmetic_revision && !spawned) {
             if (native_pass) return;
             native_pass = true;
+        }
+        // Game Modes' Infection: an infected player wears the Grim Reaper here, over their own outfit,
+        // which comes back once they are not (the next pass applies it again, as it differs).
+        if (modes::infected_look(p.member.id)) {
+            auto dressed = *p.appearance.value();
+            if (dress_in_costume(s.base, local.entity, dressed.skater, "grimreaper")) {
+                update_remote_cosmetics(s.base, local, dressed, p.cosmetic_status);
+                p.last_cosmetic_apply = now;
+                p.applied_cosmetics = p.cosmetic_revision;
+                return;
+            }
         }
         update_remote_cosmetics(s.base, local, *p.appearance.value(), p.cosmetic_status);
         // The effects their costume and board items come with follow the outfit.

@@ -174,6 +174,7 @@ struct State {
     } skate;
     bool spectate = true; // `mode spectate on|off`: watch whoever is up in S.K.A.T.E.
     bool goofy{};         // `mode stance regular|goofy`: S.K.A.T.E.'s flick diagrams mirrored for goofy
+    bool was_infected{};  // Infection: the local player was infected at the last tick
     std::uint64_t diagram_until{}; // `mode diagram <trick>`: its flick diagram on screen until then
     std::string diagram_trick;
     std::mutex hud_mutex;
@@ -327,6 +328,7 @@ std::uint32_t default_duration(Mode mode) {
     case Mode::meat: return 180;
     case Mode::race: return 300;
     case Mode::tag: return 240;
+    case Mode::infection: return 300;
     default: return 300;
     }
 }
@@ -745,7 +747,7 @@ void line_up(State &s) {
         else if (has_area(g.settings)) centre = area_centre(g.settings.corners);
         else return;
         // Skate Tag spreads everyone well out, so whoever starts it has a chase on their hands.
-        const float spread = g.settings.mode == Mode::tag ? 15.0f + 2.0f * count : 2.0f + 0.6f * count;
+        const float spread = tag_like(g.settings.mode) ? 15.0f + 2.0f * count : 2.0f + 0.6f * count;
         const float ring = count <= 1 ? 0.0f : spread, angle = 6.2831853f * index / std::max(1.0f, count);
         spot = {centre[0] + std::cos(angle) * ring, centre[1], centre[2] + std::sin(angle) * ring};
         // Round the circle everyone faces its middle; alone, the way the leader set it up.
@@ -862,7 +864,7 @@ void track_game(State &s, std::uint64_t now) {
     auto &g = *s.game;
     const auto *me = standing(g, self_id(s));
     if (!me || me->out) return;
-    if (g.settings.mode == Mode::tag) {
+    if (tag_like(g.settings.mode)) {
         // Where we are, to the leader and everyone (about 7 times a second), and the sounds of
         // being tagged and of tagging.
         s.positions[self_id(s)] = {s.position, now};
@@ -870,6 +872,16 @@ void track_game(State &s, std::uint64_t now) {
             s.position_sent = now;
             report(s, Event::position, 0, 0, s.position);
         }
+    }
+    // Infection: the moment the local player is caught.
+    if (g.settings.mode == Mode::infection) {
+        if (me->up && !s.was_infected) {
+            play(Cue::missed);
+            popup(s, "YOU'RE INFECTED! Hunt the survivors");
+        }
+        s.was_infected = me->up;
+    }
+    if (g.settings.mode == Mode::tag) {
         const auto it = g.state ? g.state->turn : 0;
         if (it && it != s.last_it) {
             if (it == self_id(s)) {
@@ -1391,6 +1403,10 @@ void build_hud(State &s, std::uint64_t now) {
             } else if (mode == Mode::tag && st->turn) {
                 h.status = st->turn == self ? std::string("YOU'RE IT! Get close to someone to tag them")
                                             : name_of(s, st->turn) + " is it. Don't get tagged!";
+            } else if (mode == Mode::infection && me) {
+                const auto clean = std::count_if(st->standings.begin(), st->standings.end(), [](const Standing &p) { return !p.up && !p.out; });
+                h.status = me->up ? std::format("YOU'RE INFECTED! Catch the survivors ({} left)", clean)
+                                  : std::format("SURVIVE! Stay away from the reapers ({} still clean)", clean);
             } else if (!me) {
                 h.status = "Watching.";
             } else {
@@ -1413,14 +1429,17 @@ void build_hud(State &s, std::uint64_t now) {
             h.banner = st->calls.back();
             h.banner_serial = st->call_serial;
         }
-        // Skate Tag: every player whose position is fresh, the one who is it marked.
-        if (mode == Mode::tag && st && (phase == Phase::playing || phase == Phase::results))
+        // Skate Tag: every player whose position is fresh, the one who is it marked. Infection: the
+        // infected marked (all of them hunt).
+        if (tag_like(mode) && st && (phase == Phase::playing || phase == Phase::results)) {
+            h.infection = mode == Mode::infection;
             for (const auto &p : st->standings) {
                 const auto found = s.positions.find(p.player);
                 if (found == s.positions.end() || now - found->second.second > 3000 || p.out) continue;
-                h.players.push_back({name_of(s, p.player), found->second.first, player_colour(st, p.player), p.player == st->turn,
-                                     p.player == self});
+                const bool marked = mode == Mode::infection ? p.up : p.player == st->turn;
+                h.players.push_back({name_of(s, p.player), found->second.first, player_colour(st, p.player), marked, p.player == self});
             }
+        }
         // S.K.A.T.E. reads trick names through Hall of Meat's UI hook: without it no attempt can count.
         if (mode == Mode::skate && me && !hall_of_meat::available())
             h.warning = "This game version can't read trick names: S.K.A.T.E. won't see your tricks.";
@@ -1453,6 +1472,7 @@ void build_hud(State &s, std::uint64_t now) {
                 case Mode::domination: row.value = grouped(p.score) + " pts"; break;
                 case Mode::graffiti: row.value = std::format("{} zone{}", p.score, p.score == 1 ? "" : "s"); break;
                 case Mode::tag: row.value = std::format("{:.1f} s it", p.score / 10.0); break;
+                case Mode::infection: row.value = std::format("{}{:.1f} s", p.up ? "INFECTED  " : "", p.score / 10.0); break;
                 case Mode::skate:
                     row.value = p.out ? "OUT" : p.aux > 0 ? skate_letters(static_cast<unsigned>(p.aux), g.settings.strikes) : "no letters";
                     break;
@@ -1988,7 +2008,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         g.leading = true;
         g.settings.mode = *mode;
         g.settings.duration_s = default_duration(*mode);
-        if (*mode == Mode::tag) g.settings.radius = default_tag_reach; // how close tags
+        if (tag_like(*mode)) g.settings.radius = default_tag_reach; // how close tags (or infects)
         if (*mode == Mode::skate) { // S.K.A.T.E.: five letters, time to line a trick up
             g.settings.strikes = 5;
             g.settings.turn_s = 45;
@@ -2004,6 +2024,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         case Mode::domination: next = "Ride to each spot and use `mode point`, then `mode start`."; break;
         case Mode::graffiti: next = "Open GAME MODES to set an area if you want one, then START GAME."; break;
         case Mode::tag: next = "The whole map is the playground; PLACE CIRCLE in GAME MODES fences it in (up to 3 km across). Then START GAME."; break;
+        case Mode::infection: next = "The whole map is the hunting ground; PLACE CIRCLE in GAME MODES fences it in. Then START GAME."; break;
         case Mode::skate: next = "Pick the tricks that count in GAME MODES (or `mode tricks flips grabs grinds manuals`), then START GAME."; break;
         default: next = "Optional: `mode corner` at each corner of an area. Then `mode start`."; break;
         }
@@ -2172,6 +2193,15 @@ overlay::ModesMenu menu_view() {
     auto &s = state();
     std::lock_guard lock(s.hud_mutex);
     return s.menu;
+}
+
+bool infected_look(std::uint64_t player) noexcept {
+    const auto &s = state();
+    if (!s.game || !s.game->state || s.game->settings.mode != Mode::infection) return false;
+    const auto phase = s.game->state->phase;
+    if (phase != Phase::playing && phase != Phase::results) return false;
+    const auto *p = standing(*s.game, player);
+    return p && p->up && !p->out;
 }
 
 bool local_meat_game() noexcept {

@@ -103,4 +103,41 @@ void apply_cosmetic_recipe(std::uintptr_t base, std::uintptr_t entity, std::uint
         "Multiplayer: peer cosmetics queued; entity={:#x}, component={:#x}, template={:#x}, slots={}.",
         entity, c, usable.key, usable.items.size());
 }
+bool dress_in_costume(std::uintptr_t base, std::uintptr_t local_entity, CosmeticRecipe &recipe, std::string_view name) {
+    try {
+        const auto lower = [](std::string_view text) {
+            std::string out;
+            for (const char ch : text) out += static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch);
+            return out;
+        };
+        // The costume's exact name, as the catalog spells it (the asset's hash depends on its case).
+        // Looked for again every few seconds until the catalog has it.
+        static std::string asset;
+        static ULONGLONG next_look{};
+        if (asset.empty() && GetTickCount64() >= next_look) {
+            next_look = GetTickCount64() + 5000;
+            const auto wanted = lower(name);
+            for (const auto &[key, info] : profile_runtime::cosmetic_runtime().items) {
+                const auto k = lower(key);
+                if (k.find("costume") == std::string::npos || k.find(wanted) == std::string::npos) continue;
+                if (asset.empty() || k.ends_with("_00001")) asset = key;
+            }
+            if (!asset.empty())
+                logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: infected players wear \"{}\".", asset);
+        }
+        if (asset.empty()) return false;
+        // The slot it fits: the one whose category the costume is in, by the local skater's template
+        // (every skater has the same one). The slot's own parameters stay.
+        const CosmeticMemory memory{readable, base};
+        const auto resource = memory.resource(memory.component(local_entity));
+        for (std::size_t i = 0; i < recipe.items.size(); ++i) {
+            CosmeticSlot candidate{recipe.items[i].slot, asset, recipe.items[i].parameters};
+            if (memory.item_installed(resource, i, candidate)) {
+                recipe.items[i] = std::move(candidate);
+                return true;
+            }
+        }
+    } catch (...) {}
+    return false;
+}
 } // namespace dingosdk::multiplayer

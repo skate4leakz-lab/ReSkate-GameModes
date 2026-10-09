@@ -348,6 +348,51 @@ void graffiti_flow() {
     check(r.state(countdown_ms).standings.size() == 3, "everyone is on the board");
 }
 
+void infection_flow() {
+    Settings s;
+    s.mode = Mode::infection;
+    s.radius = default_tag_reach;
+    s.duration_s = 120;
+    Referee r(s, a, 9); // game 9 with three players: players[9 % 3] = a is patient zero
+    r.add_player(a);
+    r.add_player(b);
+    r.add_player(c);
+    r.start(0);
+    r.tick(countdown_ms);
+    std::uint64_t t = countdown_ms;
+    std::uint32_t sa = 0, sb = 0, sc = 0;
+    const auto of = [&](const Message &m, std::uint64_t id) {
+        return *std::find_if(m.standings.begin(), m.standings.end(), [&](const Standing &x) { return x.player == id; });
+    };
+    auto st = r.state(t);
+    check(of(st, a).up && of(st, a).aux == 1 && !of(st, b).up && !of(st, c).up, "a is patient zero");
+    r.event(a, Event::position, 0, {0, 0, 0}, ++sa, t);
+    r.event(b, Event::position, 0, {20, 0, 0}, ++sb, t);
+    r.event(c, Event::position, 0, {60, 0, 0}, ++sc, t);
+    t += 10000;
+    r.tick(t);
+    st = r.state(t);
+    check(of(st, b).score == 100 && of(st, c).score == 100 && of(st, a).score == 0, "survivors score their time clean");
+    r.event(b, Event::position, 0, {20, 0, 0}, ++sb, t);
+    r.event(a, Event::position, 0, {18, 0, 0}, ++sa, t);
+    st = r.state(t);
+    check(of(st, b).up && !of(st, c).up && r.phase() == Phase::playing, "a infected b; c survives");
+    t += 5000;
+    r.tick(t);
+    r.event(c, Event::position, 0, {60, 0, 0}, ++sc, t);
+    r.event(b, Event::position, 0, {58, 0, 0}, ++sb, t); // the newly infected hunt too
+    check(r.phase() == Phase::results, "b infected c, the last survivor: game over");
+    st = r.state(t);
+    check(st.standings.front().player == c && of(st, c).score == 150 && of(st, b).score == 100, "c survived longest and wins");
+    check(decode(encode(st)) == st, "an Infection state round trips");
+    Message setup;
+    setup.kind = Message::Kind::setup;
+    setup.leader = a;
+    setup.game = 9;
+    setup.settings = s;
+    check(decode(encode(setup)) == setup && parse_mode("zombies") == Mode::infection, "the Infection setup round trips");
+}
+
 void skate_flow() {
     check(trick_kinds_of("Kickflip") == trick_flips && trick_kinds_of("BS 50-50 Grind") == trick_grinds, "flips and grinds are told apart");
     check(trick_kinds_of("Heelflip + Seatbelt") == (trick_flips | trick_grabs) && trick_kinds_of("Manual") == trick_manuals,
@@ -447,6 +492,7 @@ int main() {
         tag_flow();
         graffiti_flow();
         skate_flow();
+        infection_flow();
         std::cout << "Game modes: area, scoring, wire, Spot Jam, 1-Up, Deathrace, Domination, tag, Graffiti and S.K.A.T.E. flows passed.\n";
         return 0;
     } catch (const std::exception &e) {

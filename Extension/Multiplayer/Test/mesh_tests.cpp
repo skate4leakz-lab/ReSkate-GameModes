@@ -68,6 +68,7 @@ namespace dingosdk::modes {
 std::vector<std::vector<std::uint8_t>> tick(const SessionInput &) { return {}; }
 bool receive(std::uint64_t, std::span<const std::uint8_t>) { return false; }
 std::vector<std::string> take_notices() { return {}; }
+bool infected_look(std::uint64_t) noexcept { return false; }
 }
 namespace dingosdk::physics_tuning {
 void prepare() noexcept {}
@@ -270,6 +271,7 @@ bool show_remote(std::uintptr_t, std::uintptr_t, const NativeFrame &, const Pose
 }
 void remove_remote(std::uintptr_t) noexcept {}
 void update_remote_cosmetics(std::uintptr_t, const NativeFrame &, const Appearance &, std::string &) {}
+bool dress_in_costume(std::uintptr_t, std::uintptr_t, CosmeticRecipe &, std::string_view) { return false; }
 std::uint64_t remote_pose_updates() noexcept { return 0; }
 std::uint64_t remote_board_pose_updates() noexcept { return 0; }
 NativeAnimationStats remote_animation_stats() noexcept { return {}; }

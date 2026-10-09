@@ -22,8 +22,12 @@
 namespace dingosdk::modes {
 using Vec3 = std::array<float, 3>;
 
-enum class Mode : std::uint8_t { jam = 1, one_up = 2, meat = 3, race = 4, domination = 5, graffiti = 6, tag = 7, skate = 8 };
-inline constexpr Mode all_modes[]{Mode::jam, Mode::one_up, Mode::meat, Mode::race, Mode::domination, Mode::graffiti, Mode::tag, Mode::skate};
+// infection: Skate Tag where the tagged stay infected and hunt too; whoever stays clean longest wins.
+enum class Mode : std::uint8_t { jam = 1, one_up = 2, meat = 3, race = 4, domination = 5, graffiti = 6, tag = 7, skate = 8, infection = 9 };
+inline constexpr Mode all_modes[]{Mode::jam,      Mode::one_up, Mode::meat,  Mode::race,     Mode::domination,
+                                  Mode::graffiti, Mode::tag,    Mode::skate, Mode::infection};
+// Played on where everyone is (position events): Skate Tag and Infection.
+inline constexpr bool tag_like(Mode m) noexcept { return m == Mode::tag || m == Mode::infection; }
 std::string_view mode_name(Mode) noexcept;    // "Spot Jam"
 std::string_view mode_key(Mode) noexcept;     // "jam": what `mode new` takes
 std::string_view mode_summary(Mode) noexcept; // one line on how it is played
@@ -33,7 +37,7 @@ bool timed(Mode) noexcept; // ends when the clock runs out (1-Up ends on strikes
 enum class Phase : std::uint8_t { setup = 1, countdown = 2, playing = 3, results = 4 };
 
 inline constexpr std::uint8_t wire_magic = 0xD5; // never a throwdown message's first byte (1..15)
-inline constexpr std::uint8_t wire_version = 7; // 2: circle areas; 3: Graffiti tags; 4: spawn, gate facings; 5: gate widths; 6: Skate Tag; 7: S.K.A.T.E.
+inline constexpr std::uint8_t wire_version = 8; // 2: circle areas; 3: Graffiti tags; 4: spawn, gate facings; 5: gate widths; 6: Skate Tag; 7: S.K.A.T.E.; 8: Infection
 inline constexpr std::size_t max_corners = 16, max_points = 16, max_players = 16, max_zones = 64, max_calls = 4,
                              max_call_length = 96, max_tags = 64, max_tag_points = 6, max_line_tags = 6;
 inline constexpr std::uint32_t countdown_ms = 5000, results_ms = 12000;
@@ -216,7 +220,8 @@ class Referee {
         std::string name;
         Vec3 at{};                // Skate Tag: where they last said they were
         std::uint64_t at_time{};  // and when (0: never)
-        std::uint64_t it_ms{};    // Skate Tag: time spent it
+        std::uint64_t it_ms{};    // Skate Tag: time spent it; Infection: time survived
+        bool infected{};          // Infection
     };
     Player *find(std::uint64_t id) noexcept;
     const Player *find(std::uint64_t id) const noexcept;
@@ -229,6 +234,9 @@ class Referee {
     // Skate Tag: player is it from now on.
     void make_it(std::uint64_t player, std::uint64_t by, std::uint64_t now_ms);
     void try_tags(std::uint64_t now_ms);
+    // Infection: every infected player within reach of a survivor infects them.
+    void try_infections(std::uint64_t now_ms);
+    std::size_t survivors() const noexcept;
     // S.K.A.T.E.
     void skate_attempt(Player &, bool landed, std::string_view trick, std::uint64_t now_ms);
     void letter(Player &, std::string_view why);

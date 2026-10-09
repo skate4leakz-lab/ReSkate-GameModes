@@ -363,7 +363,8 @@ struct ModesHud {
     std::string trick_title;                  // S.K.A.T.E.: "COPY THIS", over the trick's diagram
     std::vector<ModesHudTrickPart> trick_parts;
     bool goofy{};                             // mirror the flicks for a goofy stance
-    std::vector<ModesHudPlayer> players; // Skate Tag, while it is played
+    std::vector<ModesHudPlayer> players; // Skate Tag and Infection, while they are played
+    bool infection{};                     // the players' `it` are the infected (the reapers), not one tagger
     std::vector<ModesHudOffer> offers;
     std::string invite;   // "Huntredbanzzz is starting Hall of Meat", shown for a while after it appears
     float invite_fade{};  // 0..1

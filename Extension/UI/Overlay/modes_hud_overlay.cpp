@@ -914,7 +914,9 @@ void draw_tag_players(ImDrawList *draw, const ModesHud &h, float scale) {
     auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
     const auto display = ImGui::GetIO().DisplaySize;
     const float time = static_cast<float>(ImGui::GetTime());
-    constexpr ImU32 neon = IM_COL32(255, 60, 200, 255);
+    // Skate Tag's it is pink and crowned; Infection's reapers are toxic green, under a halo.
+    const ImU32 neon = h.infection ? IM_COL32(110, 255, 70, 255) : IM_COL32(255, 60, 200, 255);
+    const std::string it_label = h.infection ? "REAPER" : "IT";
     bool me_it = false;
     for (const auto &p : h.players)
         if (p.self && p.it) me_it = true;
@@ -941,6 +943,16 @@ void draw_tag_players(ImDrawList *draw, const ModesHud &h, float scale) {
         };
         glow_path(draw, cam, ring(0.0f), neon, 0.02f, 1.0f);
         glow_path(draw, cam, ring(0.045f), neon, 0.012f, 0.8f);
+        if (h.infection) { // a halo, no points
+            const float d = cam.distance(c);
+            if (!p.self && d > 20.0f)
+                if (const auto label = cam.project({c[0], c[1] + 0.4f, c[2]})) {
+                    const std::string text = std::format("{}  {:.0f} m", it_label, d);
+                    const float size = 16.0f * scale, w = text_width(bold, size, text);
+                    soft_text(draw, bold, size, ImVec2(label->x - w * 0.5f, label->y - size), neon, text);
+                }
+            continue;
+        }
         std::vector<Vec3> points;
         for (int k = 0; k <= 10; ++k) {
             const float a = turn + 6.2831853f * k / 10, up = k % 2 == 0 ? 0.19f : 0.045f;
@@ -982,7 +994,7 @@ void draw_tag_players(ImDrawList *draw, const ModesHud &h, float scale) {
             right(at.x + dy * size * 0.6f, at.y - dx * size * 0.6f);
         draw->AddTriangleFilled(tip, right, left, IM_COL32(0, 0, 0, 140));
         draw->AddTriangleFilled(ImVec2(tip.x - dx * 2, tip.y - dy * 2), right, left, colour);
-        const std::string text = std::format("{}  {:.0f} m", p.it ? std::string("IT") : p.name, cam.distance(p.at));
+        const std::string text = std::format("{}  {:.0f} m", p.it ? it_label : p.name, cam.distance(p.at));
         const float text_size = 15.0f * scale, w = text_width(bold, text_size, text);
         soft_text(draw, bold, text_size, ImVec2(at.x - dx * size * 1.6f - w * 0.5f, at.y - dy * size * 1.6f - text_size * 0.5f), colour, text);
     }

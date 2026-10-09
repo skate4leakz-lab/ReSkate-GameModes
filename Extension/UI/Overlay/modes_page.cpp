@@ -26,7 +26,7 @@ namespace {
 struct ModeInfo {
     const char *key, *name, *summary, *points; // points: what `mode point` places here, or null
 };
-constexpr std::array<ModeInfo, 8> mode_info{{
+constexpr std::array<ModeInfo, 9> mode_info{{
     {"jam", "SPOT JAM", "Land lines inside the area. Every line adds to your score; highest total wins.", nullptr},
     {"1up", "1-UP", "Take turns. Beat the last score or take a strike; last one standing wins.", nullptr},
     {"meat", "HALL OF MEAT", "Bail as hard as you can. Every bail scores its Meat; most meat wins. Your bones show through your skater.", nullptr},
@@ -35,6 +35,7 @@ constexpr std::array<ModeInfo, 8> mode_info{{
     {"graffiti", "GRAFFITI", "Grind it, gap it: what you skate takes your colour. A bigger line steals it. Most tags wins.", nullptr},
     {"tag", "SKATE TAG", "One player is it and wears the crown: get close to tag someone else. No tag-backs. Least time spent it wins.", nullptr},
     {"skate", "S.K.A.T.E.", "Set a trick, everyone copies it or takes a letter. Spell S.K.A.T.E. and you're out; last one standing wins. You pick the tricks that count.", nullptr},
+    {"infection", "INFECTION", "One player starts infected and turns into the Grim Reaper. Everyone they catch turns too and joins the hunt. Survive longest to win.", nullptr},
 }};
 struct Page {
     int pick{};
@@ -112,7 +113,7 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
         int second = p.pick - 3;
         if (choice(menu, "modes-pick-b", second, {"DEATHRACE", "DOMINATION", "GRAFFITI"})) p.pick = second + 3;
         int third = p.pick - 6;
-        if (choice(menu, "modes-pick-c", third, {"SKATE TAG", "S.K.A.T.E."})) p.pick = third + 6;
+        if (choice(menu, "modes-pick-c", third, {"SKATE TAG", "S.K.A.T.E.", "INFECTION"})) p.pick = third + 6;
         p.pick = std::clamp(p.pick, 0, static_cast<int>(mode_info.size()) - 1);
         note(mode_info[static_cast<std::size_t>(p.pick)].summary);
         if (primary_button(menu, std::format("SET UP {}", mode_info[static_cast<std::size_t>(p.pick)].name).c_str()))
@@ -143,7 +144,8 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(px(200));
         // Skate Tag can spread over a whole district: up to 1.5 km out.
-        ImGui::SliderFloat("##circle-size", &p.circle, 5.0f, m.mode == "tag" ? 1500.0f : 150.0f, "%.0f m radius", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("##circle-size", &p.circle, 5.0f, m.mode == "tag" || m.mode == "infection" ? 1500.0f : 150.0f, "%.0f m radius",
+                           ImGuiSliderFlags_Logarithmic);
         if (small_button(menu, "CUSTOM SHAPE")) command(menu, callbacks, "place corners");
         ImGui::SameLine();
         if (small_button(menu, "CLEAR##area", m.corners > 0)) command(menu, callbacks, "corner clear");
@@ -206,7 +208,7 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
             setting(menu, callbacks, "Time (seconds)", "##time", p.duration, static_cast<int>(m.duration),
                     [](const char *id, int *v) { return ImGui::SliderInt(id, v, 30, 1800); }, "time");
         }
-        if (m.mode == "tag")
+        if (m.mode == "tag" || m.mode == "infection")
             setting(menu, callbacks, "Tag reach (metres)", "##reach", p.radius, m.radius,
                     [](const char *id, float *v) { return ImGui::SliderFloat(id, v, 1.5f, 8.0f, "%.1f"); }, "radius");
         if (current && current->points)
