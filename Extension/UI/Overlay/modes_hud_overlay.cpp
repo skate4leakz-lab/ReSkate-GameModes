@@ -159,9 +159,11 @@ float horizontal_to_segment(const Vec3 &p, const Vec3 &a, const Vec3 &b) {
     return std::sqrt(x * x + z * z);
 }
 
-// The play area's edge, the way skate.'s throwdowns mark theirs: a tall see-through wall, brightest
-// at the ground and thinning as it rises, with fine ribs and soft bands drifting up it, always in
-// sight and lighting up round the skater as they come close. While being placed it is blue.
+// The play area's edge, the way skate.'s throwdowns mark theirs: a tall see-through wall and
+// nothing else (no line on the ground, no posts). It is an even veil from the ground up, fading
+// out near its top, with faint ribs and slow soft swells drifting up it; seen from anywhere, a
+// little clearer where the skater comes close. While being placed it is blue, with its foot
+// marked so the leader sees exactly where it stands.
 void draw_boundary(ImDrawList *draw, const Camera &cam, const ModesHud &h, float scale) {
     std::vector<std::pair<Vec3, Vec3>> edges;
     if (h.area_radius > 0 && !h.corners.empty()) {
@@ -182,22 +184,21 @@ void draw_boundary(ImDrawList *draw, const Camera &cam, const ModesHud &h, float
     const float time = static_cast<float>(ImGui::GetTime());
     // As tall as a throwdown's wall, and taller when the skater climbs: the area has no lid.
     const float floor_y = edges.front().first[1];
-    const float height = std::max(25.0f, h.have_me ? h.me[1] - floor_y + 12.0f : 25.0f);
+    const float height = std::max(25.0f, h.have_me ? h.me[1] - floor_y + 12.0f : 25.0f), solid = height * 0.7f;
     const auto at = [](const Vec3 &p, float up) { return Vec3{p[0], p[1] + up, p[2]}; };
     for (const auto &[a, b] : edges) {
         if (cam.distance(a) > 600.0f && cam.distance(b) > 600.0f) continue;
-        // Always there, a little stronger where the skater is close to it.
         const float gap = h.have_me ? horizontal_to_segment(h.me, a, b) : 60.0f;
         const float closeness = h.placing ? 1.0f : std::clamp(1.0f - gap / 25.0f, 0.0f, 1.0f);
-        const float body = 0.16f + 0.14f * closeness;
-        // The curtain: brightest at the ground, thinning out as it rises.
+        const float veil = 0.13f + 0.09f * closeness;
+        // The veil: even from the ground to most of the way up, then fading out.
         {
-            const Vec3 low[]{at(a, 0.02f), at(b, 0.02f), at(b, 3.0f), at(a, 3.0f)};
-            const Vec3 high[]{at(a, 3.0f), at(b, 3.0f), at(b, height), at(a, height)};
-            const ImU32 foot = with_alpha(base, body * 1.6f), mid = with_alpha(base, body * 0.75f), top = with_alpha(base, 0.0f);
-            const ImU32 low_shade[]{foot, foot, mid, mid}, high_shade[]{mid, mid, top, top};
-            fill_world(draw, cam, low, low_shade);
-            fill_world(draw, cam, high, high_shade);
+            const Vec3 lower[]{at(a, 0.0f), at(b, 0.0f), at(b, solid), at(a, solid)};
+            const Vec3 upper[]{at(a, solid), at(b, solid), at(b, height), at(a, height)};
+            const ImU32 even = with_alpha(base, veil), none = with_alpha(base, 0.0f);
+            const ImU32 lower_shade[]{even, even, even, even}, upper_shade[]{even, even, none, none};
+            fill_world(draw, cam, lower, lower_shade);
+            fill_world(draw, cam, upper, upper_shade);
         }
         const float dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], length = std::sqrt(dx * dx + dz * dz);
         if (length > 0.05f) {
@@ -205,34 +206,33 @@ void draw_boundary(ImDrawList *draw, const Camera &cam, const ModesHud &h, float
                 const float t = std::clamp(s / length, 0.0f, 1.0f);
                 return Vec3{a[0] + dx * t, a[1] + dy * t + up, a[2] + dz * t};
             };
-            // Fine vertical ribs every 2 m, fading up the wall. Only near the camera and in front of it:
-            // 5 cm wide, far ones are under a pixel, and a big circle has a thousand of them.
+            // Faint ribs every 2 m, a texture more than lines; only near the camera and in front of it.
             for (float s = 0; s <= length; s += 2.0f) {
-                const Vec3 foot = along(s, 0.02f), head = along(s, height * 0.6f);
-                if (cam.distance(foot) > 150.0f ||
+                const Vec3 foot = along(s, 0.0f), head = along(s, solid);
+                if (cam.distance(foot) > 120.0f ||
                     (cam.view(foot).depth <= Camera::near_plane && cam.view(head).depth <= Camera::near_plane))
                     continue;
-                const Vec3 quad[]{foot, along(s + 0.05f, 0.02f), along(s + 0.05f, height * 0.6f), head};
-                const ImU32 strong = with_alpha(theme::white, 0.10f + 0.12f * closeness), none = with_alpha(theme::white, 0.0f);
-                const ImU32 shades[]{strong, strong, none, none};
+                const Vec3 quad[]{foot, along(s + 0.08f, 0.0f), along(s + 0.08f, solid), head};
+                const ImU32 faint = with_alpha(theme::white, 0.035f + 0.04f * closeness), none = with_alpha(theme::white, 0.0f);
+                const ImU32 shades[]{faint, faint, none, none};
                 fill_world(draw, cam, quad, shades);
             }
-            // Soft bands drifting slowly up the wall.
-            for (int band = 0; band < 3; ++band) {
-                const float y = std::fmod(time * 1.2f + band * 4.0f, 12.0f), thick = 0.9f, fade = 1.0f - y / 12.0f;
-                const ImU32 glow = with_alpha(base, (0.10f + 0.12f * closeness) * fade), none = with_alpha(base, 0.0f);
+            // Slow, wide swells drifting up the veil: no edges, just a breath of light.
+            for (int swell = 0; swell < 2; ++swell) {
+                const float y = std::fmod(time * 1.0f + swell * 9.0f, 18.0f), thick = 3.0f, fade = 1.0f - y / 18.0f;
+                const ImU32 glow = with_alpha(base, (0.05f + 0.06f * closeness) * fade), none = with_alpha(base, 0.0f);
                 const Vec3 lower[]{along(0, y), along(length, y), along(length, y + thick), along(0, y + thick)};
                 const Vec3 upper[]{along(0, y + thick), along(length, y + thick), along(length, y + thick * 2), along(0, y + thick * 2)};
                 const ImU32 rise[]{none, none, glow, glow}, fall[]{glow, glow, none, none};
                 fill_world(draw, cam, lower, rise);
                 fill_world(draw, cam, upper, fall);
             }
-            // Where the skater is close, the wall lights up round them at their height.
-            if (h.have_me && closeness > 0.2f && !h.placing) {
+            // Where the skater is close, the veil brightens softly round them at their height.
+            if (h.have_me && closeness > 0.3f && !h.placing) {
                 const float ax = h.me[0] - a[0], az = h.me[2] - a[2];
                 const float s = std::clamp((ax * dx + az * dz) / length, 0.0f, length), y = std::max(0.0f, h.me[1] - a[1]);
-                const float w = 3.0f, tall = 2.5f, glow = closeness * closeness;
-                const ImU32 hot = with_alpha(theme::white, 0.28f * glow), edge = with_alpha(base, 0.0f);
+                const float w = 4.0f, tall = 3.0f, glow = closeness * closeness;
+                const ImU32 hot = with_alpha(theme::white, 0.16f * glow), edge = with_alpha(base, 0.0f);
                 const Vec3 left[]{along(s - w, y - tall + 1), along(s, y - tall + 1), along(s, y + tall + 1), along(s - w, y + tall + 1)};
                 const Vec3 right[]{along(s, y - tall + 1), along(s + w, y - tall + 1), along(s + w, y + tall + 1), along(s, y + tall + 1)};
                 const ImU32 l_shade[]{edge, hot, hot, edge}, r_shade[]{hot, edge, edge, hot};
@@ -240,16 +240,9 @@ void draw_boundary(ImDrawList *draw, const Camera &cam, const ModesHud &h, float
                 fill_world(draw, cam, right, r_shade);
             }
         }
-        // The line on the ground: a soft glow with a white core.
-        line3(draw, cam, at(a, 0.03f), at(b, 0.03f), with_alpha(base, 0.35f + 0.25f * closeness), std::max(3.0f, 9.0f * scale));
-        line3(draw, cam, at(a, 0.03f), at(b, 0.03f), with_alpha(theme::white, 0.75f + 0.2f * closeness), std::max(1.2f, 2.0f * scale));
+        // Only while it is being placed: its foot, so the leader can see exactly where it stands.
+        if (h.placing) line3(draw, cam, at(a, 0.03f), at(b, 0.03f), with_alpha(theme::white, 0.8f), std::max(1.2f, 2.0f * scale));
     }
-    // A shape's corners: a post of light the wall's height.
-    if (h.area_radius <= 0)
-        for (const auto &c : h.corners) {
-            line3(draw, cam, c, at(c, height), with_alpha(base, 0.35f), std::max(3.0f, 7.0f * scale));
-            line3(draw, cam, c, at(c, height), with_alpha(theme::white, 0.55f), std::max(1.2f, 2.0f * scale));
-        }
 }
 // A neon glow along a path in the world: a wide soft halo, a coloured body and a hot white core,
 // each sized in metres so it hugs a rail up close and stays a thin line far away.
