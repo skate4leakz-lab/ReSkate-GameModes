@@ -220,6 +220,57 @@ void gate_width_flow() {
     check(score(b) == 0, "a narrow gate does not take one far outside it");
 }
 
+// Skate Tag: positions decide who tags whom; no tag-backs for a few seconds; least time it wins.
+void skate_tag_flow() {
+    Settings s;
+    s.mode = Mode::tag;
+    s.radius = default_tag_reach;
+    s.duration_s = 60;
+    Referee r(s, a, 4); // game 4 with three players: players[4 % 3] = b starts it
+    r.add_player(a);
+    r.add_player(b);
+    r.add_player(c);
+    r.start(0);
+    r.tick(countdown_ms);
+    std::uint64_t t = countdown_ms;
+    check(r.state(t).turn == b, "the game's id picks who starts it");
+    std::uint32_t seq_a = 0, seq_b = 0, seq_c = 0;
+    r.event(a, Event::position, 0, {0, 0, 0}, ++seq_a, t);
+    r.event(c, Event::position, 0, {50, 0, 0}, ++seq_c, t);
+    r.event(b, Event::position, 0, {10, 0, 0}, ++seq_b, t);
+    check(r.state(t).turn == b, "out of reach: nobody tagged");
+    t += 2000;
+    r.tick(t);
+    r.event(a, Event::position, 0, {0, 0, 0}, ++seq_a, t);
+    r.event(b, Event::position, 0, {2, 0, 0}, ++seq_b, t);
+    check(r.state(t).turn == a, "within reach: b tagged a");
+    t += 1000;
+    r.tick(t);
+    r.event(b, Event::position, 0, {1, 0, 0}, ++seq_b, t);
+    r.event(a, Event::position, 0, {1.5f, 0, 0}, ++seq_a, t);
+    check(r.state(t).turn == a, "no tag-backs straight away");
+    t += no_tag_back_ms;
+    r.tick(t);
+    r.event(b, Event::position, 0, {1, 0, 0}, ++seq_b, t);
+    r.event(a, Event::position, 0, {1.5f, 0, 0}, ++seq_a, t);
+    check(r.state(t).turn == b, "a tag-back once the wait is over");
+    t += 2000;
+    r.event(c, Event::position, 0, {1.2f, 0, 0}, ++seq_c, t); // c's position is fresh, b's is not
+    check(r.state(t).turn == b, "an old position tags nobody");
+    r.tick(countdown_ms + 60000);
+    const auto st = r.state(countdown_ms + 60000);
+    check(r.phase() == Phase::results && st.standings.front().player == c, "c was never it and wins");
+    check(st.standings.back().score > st.standings.front().score, "time spent it is counted");
+    Message move;
+    move.kind = Message::Kind::event;
+    move.leader = a;
+    move.game = 4;
+    move.event = Event::position;
+    move.at = {12.5f, 3, -7};
+    move.sequence = 3;
+    check(decode(encode(move)) == move, "a position round trips");
+}
+
 void domination_flow() {
     Settings s;
     s.mode = Mode::domination;
@@ -307,6 +358,7 @@ int main() {
         one_up_flow();
         race_flow();
         gate_width_flow();
+        skate_tag_flow();
         domination_flow();
         tag_flow();
         graffiti_flow();

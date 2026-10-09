@@ -68,6 +68,7 @@ std::string_view mode_name(Mode m) noexcept {
     case Mode::race: return "Deathrace";
     case Mode::domination: return "Domination";
     case Mode::graffiti: return "Graffiti";
+    case Mode::tag: return "Skate Tag";
     }
     return "Game";
 }
@@ -79,6 +80,7 @@ std::string_view mode_key(Mode m) noexcept {
     case Mode::race: return "race";
     case Mode::domination: return "domination";
     case Mode::graffiti: return "graffiti";
+    case Mode::tag: return "tag";
     }
     return "";
 }
@@ -90,6 +92,7 @@ std::string_view mode_summary(Mode m) noexcept {
     case Mode::race: return "Hit every checkpoint in order. First to the last one wins.";
     case Mode::domination: return "Take spots with your best line there. Every second you hold one scores.";
     case Mode::graffiti: return "Grind it, manual it, gap it: what you skate takes your colour. A bigger line steals it. Most tags wins.";
+    case Mode::tag: return "One player is it: get close to tag someone else. No tag-backs. Least time spent it wins.";
     }
     return "";
 }
@@ -101,7 +104,8 @@ std::optional<Mode> parse_mode(std::string_view text) noexcept {
     if (key == "meat" || key == "hallofmeat" || key == "hom") return Mode::meat;
     if (key == "race" || key == "deathrace") return Mode::race;
     if (key == "domination" || key == "dom") return Mode::domination;
-    if (key == "graffiti" || key == "tag") return Mode::graffiti;
+    if (key == "graffiti" || key == "thps") return Mode::graffiti;
+    if (key == "tag" || key == "skatetag" || key == "skate_tag") return Mode::tag;
     return std::nullopt;
 }
 bool timed(Mode m) noexcept { return m != Mode::one_up; }
@@ -434,7 +438,7 @@ std::optional<Message> decode(std::span<const std::uint8_t> bytes) noexcept {
         }
         case Message::Kind::event: {
             const auto event = r.integer(1);
-            if (event < 1 || event > 3) return std::nullopt;
+            if (event < 1 || event > 4) return std::nullopt;
             m.event = static_cast<Event>(event);
             m.value = static_cast<std::int32_t>(r.integer(4));
             m.extra = static_cast<std::int32_t>(r.integer(4));
@@ -502,6 +506,17 @@ void Referee::remove_player(std::uint64_t player, std::uint64_t now_ms) {
     p->out = true;
     call(name_of(player) + " left the game");
     if (phase_ != Phase::playing) return;
+    // Skate Tag: the one who is it leaving hands it to the next player still in.
+    if (settings_.mode == Mode::tag) {
+        if (player == it_)
+            for (const auto &q : players_)
+                if (!q.out) {
+                    make_it(q.id, 0, now_ms);
+                    break;
+                }
+        if (players_.size() > 1 && still_in() <= 1) finish(now_ms);
+        return;
+    }
     if (settings_.mode == Mode::one_up && turn_ < players_.size() && players_[turn_].id == player) next_turn(now_ms);
     else if (settings_.mode == Mode::one_up && (still_in() == 0 || (players_.size() > 1 && still_in() <= 1))) finish(now_ms);
 }
@@ -518,6 +533,30 @@ void Referee::begin_play(std::uint64_t now_ms) {
     call("GO!");
     if (settings_.mode == Mode::one_up && !players_.empty())
         call(name_of(players_[0].id) + " is up: set a score");
+    // Skate Tag: someone starts it, picked by the game's id so every game starts differently.
+    if (settings_.mode == Mode::tag && !players_.empty()) make_it(players_[game_ % players_.size()].id, 0, now_ms);
+}
+void Referee::make_it(std::uint64_t player, std::uint64_t by, std::uint64_t now_ms) {
+    it_ = player;
+    tagged_by_ = by;
+    it_since_ = it_counted_ = now_ms;
+    call(by ? std::format("{} tagged {}!", name_of(by), name_of(player)) : name_of(player) + " is it!");
+}
+// Skate Tag: whoever is it, within reach of another player who is not the one that just tagged
+// them, tags them. Both positions must be fresh: an old one is somewhere they no longer are.
+void Referee::try_tags(std::uint64_t now_ms) {
+    const auto *it = find(it_);
+    if (!it || it->out || !it->at_time || now_ms - it->at_time > position_fresh_ms) return;
+    const float reach = settings_.radius;
+    for (const auto &q : players_) {
+        if (q.id == it_ || q.out || !q.at_time || now_ms - q.at_time > position_fresh_ms) continue;
+        if (q.id == tagged_by_ && now_ms - it_since_ < no_tag_back_ms) continue; // no tag-backs
+        const float dx = q.at[0] - it->at[0], dy = q.at[1] - it->at[1], dz = q.at[2] - it->at[2];
+        if (dx * dx + dy * dy + dz * dz <= reach * reach) {
+            make_it(q.id, it_, now_ms);
+            return;
+        }
+    }
 }
 void Referee::finish(std::uint64_t now_ms) {
     if (phase_ == Phase::results) return;
@@ -558,8 +597,20 @@ void Referee::event(std::uint64_t player, Event event, std::int32_t value, const
     auto *p = find(player);
     if (!p || p->out || p->finished || sequence <= p->sequence) return;
     p->sequence = sequence;
+    // Skate Tag runs on where everyone is (anywhere: leaving the area is dealt with by sending them back).
+    if (settings_.mode == Mode::tag) {
+        if (event != Event::position) return;
+        for (const auto v : at)
+            if (!std::isfinite(v) || std::abs(v) > 1e6f) return;
+        p->at = at;
+        p->at_time = now_ms;
+        try_tags(now_ms);
+        return;
+    }
+    if (event == Event::position) return;
     if (settings_.mode != Mode::race && !inside(settings_, at)) return; // out of the area: nothing counts
     switch (settings_.mode) {
+    case Mode::tag: return; // handled above, from positions
     case Mode::jam:
         if (event != Event::line) return;
         p->score += value;
@@ -679,6 +730,14 @@ bool Referee::tick(std::uint64_t now_ms) {
                     if (auto *p = o.owner ? find(o.owner) : nullptr) ++p->score;
             }
         }
+        if (settings_.mode == Mode::tag) {
+            // The time spent it, in tenths of a second (the score: fewer wins).
+            if (auto *p = find(it_)) {
+                p->it_ms += now_ms - it_counted_;
+                p->score = static_cast<std::int32_t>(std::min<std::uint64_t>(p->it_ms / 100, 0x7fffffff));
+            }
+            it_counted_ = now_ms;
+        }
         if (settings_.mode == Mode::one_up && turn_ < players_.size() && now_ms >= turn_at_ + settings_.turn_s * 1000ull) {
             strike(players_[turn_], now_ms, "ran out of time");
             return true;
@@ -713,6 +772,7 @@ Message Referee::state(std::uint64_t now_ms) const {
     default: break;
     }
     if (settings_.mode == Mode::one_up && phase_ == Phase::playing && turn_ < players_.size()) m.turn = players_[turn_].id;
+    if (settings_.mode == Mode::tag && (phase_ == Phase::playing || phase_ == Phase::results)) m.turn = it_;
     m.target = target_;
     for (std::size_t i = 0; i < players_.size(); ++i) {
         const auto &p = players_[i];
@@ -726,6 +786,10 @@ Message Referee::state(std::uint64_t now_ms) const {
             if (fa != fb) return fa;
             if (fa) return a.aux < b.aux;
             return a.score > b.score;
+        }
+        if (mode == Mode::tag) { // least time spent it first
+            if (a.out != b.out) return !a.out;
+            return a.score < b.score;
         }
         if (mode == Mode::one_up) {
             if (a.out != b.out) return !a.out;

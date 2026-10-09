@@ -323,8 +323,17 @@ struct ModesHudOffer {
     bool target{}; // the one the join button acts on now
     std::uint64_t id{}; // `mode join <id>`
 };
+// Skate Tag: a player where they last said they were. The one who is it wears a neon crown; arrows at
+// the screen's edge point to whoever matters off screen (it, or everyone else for the one who is).
+struct ModesHudPlayer {
+    std::string name;
+    std::array<float, 3> at{};
+    std::uint32_t color{}; // IM_COL32
+    bool it{}, self{};
+};
 struct ModesHud {
     bool active{};        // in a game (the panel, the area and the rest); offers draw either way
+    std::vector<ModesHudPlayer> players; // Skate Tag, while it is played
     std::vector<ModesHudOffer> offers;
     std::string invite;   // "Huntredbanzzz is starting Hall of Meat", shown for a while after it appears
     float invite_fade{};  // 0..1

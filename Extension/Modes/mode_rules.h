@@ -8,7 +8,8 @@
 #include <vector>
 
 // Skate 3 style game modes for a ReSkate session: Spot Jam, 1-Up, Hall of Meat, Deathrace,
-// Domination and Graffiti, played inside an area the player who starts the game marks out.
+// Domination, Graffiti and Skate Tag, played inside an area the player who starts the game marks out
+// (or the whole map).
 //
 // The player who starts a game is its leader and referees it: the settings, the clock and
 // the standings are theirs. Every player (the leader too) reports only their own lines,
@@ -21,8 +22,8 @@
 namespace dingosdk::modes {
 using Vec3 = std::array<float, 3>;
 
-enum class Mode : std::uint8_t { jam = 1, one_up = 2, meat = 3, race = 4, domination = 5, graffiti = 6 };
-inline constexpr Mode all_modes[]{Mode::jam, Mode::one_up, Mode::meat, Mode::race, Mode::domination, Mode::graffiti};
+enum class Mode : std::uint8_t { jam = 1, one_up = 2, meat = 3, race = 4, domination = 5, graffiti = 6, tag = 7 };
+inline constexpr Mode all_modes[]{Mode::jam, Mode::one_up, Mode::meat, Mode::race, Mode::domination, Mode::graffiti, Mode::tag};
 std::string_view mode_name(Mode) noexcept;    // "Spot Jam"
 std::string_view mode_key(Mode) noexcept;     // "jam": what `mode new` takes
 std::string_view mode_summary(Mode) noexcept; // one line on how it is played
@@ -32,7 +33,7 @@ bool timed(Mode) noexcept; // ends when the clock runs out (1-Up ends on strikes
 enum class Phase : std::uint8_t { setup = 1, countdown = 2, playing = 3, results = 4 };
 
 inline constexpr std::uint8_t wire_magic = 0xD5; // never a throwdown message's first byte (1..15)
-inline constexpr std::uint8_t wire_version = 5; // 2: circle areas; 3: Graffiti tags; 4: spawn, gate facings; 5: gate widths
+inline constexpr std::uint8_t wire_version = 6; // 2: circle areas; 3: Graffiti tags; 4: spawn, gate facings; 5: gate widths; 6: Skate Tag
 inline constexpr std::size_t max_corners = 16, max_points = 16, max_players = 16, max_zones = 64, max_calls = 4,
                              max_call_length = 96, max_tags = 64, max_tag_points = 6, max_line_tags = 6;
 inline constexpr std::uint32_t countdown_ms = 5000, results_ms = 12000;
@@ -62,7 +63,11 @@ bool inside(const Settings &, const Vec3 &point) noexcept;
 bool has_area(const Settings &) noexcept;
 // Where to put back a player who wandered out: the corners' average height, at their middle.
 Vec3 area_centre(const std::vector<Vec3> &corners) noexcept;
-inline constexpr float min_area_radius = 3.0f, max_area_radius = 300.0f;
+inline constexpr float min_area_radius = 3.0f, max_area_radius = 1500.0f; // up to 3 km across (Skate Tag on a whole district)
+// Skate Tag: within this far (metres, the game's adius) the one who is it tags; the one just tagged
+// cannot tag back the one who tagged them for a while; a position older than this is not trusted.
+inline constexpr float default_tag_reach = 3.0f;
+inline constexpr std::uint64_t no_tag_back_ms = 3000, position_fresh_ms = 1500;
 // A Deathrace gate's half width: its own, or the game's checkpoint radius.
 inline constexpr float min_gate_half_width = 1.5f, max_gate_half_width = 40.0f;
 float gate_half_width(const Settings &, std::size_t gate) noexcept;
@@ -100,10 +105,12 @@ struct BailSample {
 std::int32_t bail_score(const BailSample &) noexcept;
 
 // ---- wire
-enum class Event : std::uint8_t { line = 1, bail = 2, checkpoint = 3 };
+// position: where the sender is (Skate Tag), sent a few times a second to every player.
+enum class Event : std::uint8_t { line = 1, bail = 2, checkpoint = 3, position = 4 };
 struct Standing {
     std::uint64_t player{};
-    std::int32_t score{}, aux{}; // aux: best line or bail, finish time (ms), strikes
+    std::int32_t score{}, aux{}; // aux: best line or bail, finish time (ms), strikes; Skate Tag: score the
+                                 // tenths of a second spent it (fewer is better)
     bool out{}, up{};
     bool operator==(const Standing &) const = default;
 };
@@ -130,7 +137,7 @@ struct Message {
     Settings settings;                         // setup
     Phase phase = Phase::setup;                // state
     std::uint32_t remaining_ms{};              // state: the countdown, clock or turn left
-    std::uint64_t turn{};                      // state: 1-Up's player up
+    std::uint64_t turn{};                      // state: 1-Up's player up; Skate Tag's player who is it
     std::int32_t target{};                     // state: 1-Up's score to beat
     std::vector<Standing> standings;           // state, best first
     std::vector<ZoneOwner> zones;              // state: held Domination spots or Graffiti tags (by index)
@@ -190,6 +197,9 @@ class Referee {
         bool out{}, finished{};
         std::uint32_t sequence{};
         std::string name;
+        Vec3 at{};                // Skate Tag: where they last said they were
+        std::uint64_t at_time{};  // and when (0: never)
+        std::uint64_t it_ms{};    // Skate Tag: time spent it
     };
     Player *find(std::uint64_t id) noexcept;
     const Player *find(std::uint64_t id) const noexcept;
@@ -199,6 +209,9 @@ class Referee {
     void strike(Player &, std::uint64_t now_ms, std::string_view why);
     void next_turn(std::uint64_t now_ms);
     std::size_t still_in() const noexcept;
+    // Skate Tag: player is it from now on.
+    void make_it(std::uint64_t player, std::uint64_t by, std::uint64_t now_ms);
+    void try_tags(std::uint64_t now_ms);
 
     Settings settings_;
     std::uint64_t leader_{};
@@ -208,6 +221,7 @@ class Referee {
     std::vector<Player> players_;
     std::size_t turn_{};
     std::int32_t target_{};
+    std::uint64_t it_{}, tagged_by_{}, it_since_{}, it_counted_{}; // Skate Tag
     std::vector<Tag> tags_;         // Graffiti
     std::vector<ZoneOwner> owners_; // one per Domination spot or Graffiti tag (owner 0: unclaimed)
     std::vector<std::string> calls_;   // not yet taken

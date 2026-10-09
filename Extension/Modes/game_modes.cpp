@@ -93,6 +93,9 @@ struct Offer {
 struct State {
     std::optional<Game> game;
     std::vector<Offer> offers;
+    // Skate Tag: every player's last position and when it came; when ours last went out; who was it.
+    std::map<std::uint64_t, std::pair<Vec3, std::uint64_t>> positions;
+    std::uint64_t position_sent{}, last_it{};
     // The latest announcement ("X is starting Hall of Meat"): shown for a while with the join button.
     std::uint64_t invite_at{}, invite_leader{};
     std::uint32_t invite_game{};
@@ -220,7 +223,8 @@ void report(State &s, Event event, std::int32_t value, std::int32_t extra, const
     ++g.sequence;
     if (g.referee) {
         g.referee->event(self_id(s), event, value, at, g.sequence, now_ms(), tags);
-        return;
+        // Everyone draws everyone in Skate Tag: the leader's own position goes to the others too.
+        if (event != Event::position) return;
     }
     auto m = header(g, Message::Kind::event);
     m.event = event;
@@ -294,6 +298,7 @@ std::uint32_t default_duration(Mode mode) {
     switch (mode) {
     case Mode::meat: return 180;
     case Mode::race: return 300;
+    case Mode::tag: return 240;
     default: return 300;
     }
 }
@@ -527,7 +532,9 @@ void line_up(State &s) {
         else if (g.settings.has_spawn) centre = g.settings.spawn;
         else if (has_area(g.settings)) centre = area_centre(g.settings.corners);
         else return;
-        const float ring = count <= 1 ? 0.0f : 2.0f + 0.6f * count, angle = 6.2831853f * index / std::max(1.0f, count);
+        // Skate Tag spreads everyone well out, so whoever starts it has a chase on their hands.
+        const float spread = g.settings.mode == Mode::tag ? 15.0f + 2.0f * count : 2.0f + 0.6f * count;
+        const float ring = count <= 1 ? 0.0f : spread, angle = 6.2831853f * index / std::max(1.0f, count);
         spot = {centre[0] + std::cos(angle) * ring, centre[1], centre[2] + std::sin(angle) * ring};
         // Round the circle everyone faces its middle; alone, the way the leader set it up.
         teleport_to(spot, ring > 0 ? heading_towards(spot, centre) : s.heading);
@@ -643,6 +650,26 @@ void track_game(State &s, std::uint64_t now) {
     auto &g = *s.game;
     const auto *me = standing(g, self_id(s));
     if (!me || me->out) return;
+    if (g.settings.mode == Mode::tag) {
+        // Where we are, to the leader and everyone (about 7 times a second), and the sounds of
+        // being tagged and of tagging.
+        s.positions[self_id(s)] = {s.position, now};
+        if (now - s.position_sent >= 150) {
+            s.position_sent = now;
+            report(s, Event::position, 0, 0, s.position);
+        }
+        const auto it = g.state ? g.state->turn : 0;
+        if (it && it != s.last_it) {
+            if (it == self_id(s)) {
+                play(Cue::missed);
+                popup(s, "YOU'RE IT! Tag someone");
+            } else if (s.last_it == self_id(s)) {
+                play(Cue::checkpoint);
+                popup(s, "Tagged " + name_of(s, it) + "! Run!");
+            }
+            s.last_it = it;
+        }
+    }
     if (g.settings.mode == Mode::race) {
         const auto count = g.settings.points.size();
         // The referee counted a gate: the chime (the finish has its own).
@@ -1036,6 +1063,9 @@ void build_hud(State &s, std::uint64_t now) {
             if (mode == Mode::one_up) {
                 const auto target = st->target > 0 ? "beat " + grouped(st->target) : std::string("set a score");
                 h.status = st->turn == self ? "YOUR TURN: " + target : name_of(s, st->turn) + " is up: " + target;
+            } else if (mode == Mode::tag && st->turn) {
+                h.status = st->turn == self ? std::string("YOU'RE IT! Get close to someone to tag them")
+                                            : name_of(s, st->turn) + " is it. Don't get tagged!";
             } else if (!me) {
                 h.status = "Watching.";
             } else {
@@ -1055,6 +1085,14 @@ void build_hud(State &s, std::uint64_t now) {
             h.banner = st->calls.back();
             h.banner_serial = st->call_serial;
         }
+        // Skate Tag: every player whose position is fresh, the one who is it marked.
+        if (mode == Mode::tag && st && (phase == Phase::playing || phase == Phase::results))
+            for (const auto &p : st->standings) {
+                const auto found = s.positions.find(p.player);
+                if (found == s.positions.end() || now - found->second.second > 3000 || p.out) continue;
+                h.players.push_back({name_of(s, p.player), found->second.first, player_colour(st, p.player), p.player == st->turn,
+                                     p.player == self});
+            }
         if (s.outside_since && phase == Phase::playing) {
             const auto left = out_of_area_ms > now - s.outside_since ? out_of_area_ms - (now - s.outside_since) : 0;
             h.warning = std::format("OUT OF THE AREA: nothing counts. Back in {} s", (left + 999) / 1000);
@@ -1083,6 +1121,7 @@ void build_hud(State &s, std::uint64_t now) {
                     break;
                 case Mode::domination: row.value = grouped(p.score) + " pts"; break;
                 case Mode::graffiti: row.value = std::format("{} zone{}", p.score, p.score == 1 ? "" : "s"); break;
+                case Mode::tag: row.value = std::format("{:.1f} s it", p.score / 10.0); break;
                 }
                 if (phase == Phase::setup) row.value = "ready";
                 h.rows.push_back(std::move(row));
@@ -1351,6 +1390,8 @@ bool receive(std::uint64_t sender, std::span<const std::uint8_t> bytes) {
         break;
     case Message::Kind::event:
         if (ours && s.game->referee) s.game->referee->event(sender, m.event, m.value, m.at, m.sequence, now, m.tags);
+        // Skate Tag: where every other player is, for the crown and the arrows.
+        if (ours && m.event == Event::position) s.positions[sender] = {m.at, now};
         break;
     case Message::Kind::tags:
         // Graffiti tag shapes from the leader, from index `first` on.
@@ -1475,6 +1516,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         g.leading = true;
         g.settings.mode = *mode;
         g.settings.duration_s = default_duration(*mode);
+        if (*mode == Mode::tag) g.settings.radius = default_tag_reach; // how close tags
         // Where it was set up: its banner's spot for the others until an area or route is placed.
         g.settings.spawn = s.position;
         g.settings.has_spawn = true;
@@ -1484,7 +1526,8 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         switch (*mode) {
         case Mode::race: next = "Open GAME MODES and press PLACE ROUTE: drop the start, the checkpoints and the finish as you skate the course."; break;
         case Mode::domination: next = "Ride to each spot and use `mode point`, then `mode start`."; break;
-        case Mode::graffiti: next = "Ride to each corner of the area and use `mode corner` (or `mode point` for tag spots), then `mode start`."; break;
+        case Mode::graffiti: next = "Open GAME MODES to set an area if you want one, then START GAME."; break;
+        case Mode::tag: next = "The whole map is the playground; PLACE CIRCLE in GAME MODES fences it in (up to 3 km across). Then START GAME."; break;
         default: next = "Optional: `mode corner` at each corner of an area. Then `mode start`."; break;
         }
         return std::format("{} set up. {}", mode_name(*mode), next);

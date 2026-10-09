@@ -748,6 +748,93 @@ void draw_invite(ImDrawList *draw, const ModesHud &h, float scale) {
     if (h.can_join) join_prompt(draw, bold, ImVec2(mid - 105.0f * scale, y + 54 * scale), scale, alpha);
 }
 
+// Skate Tag. Whoever is it wears a small neon crown floating over their head (a glowing band with
+// five points, bobbing and slowly turning), seen by everyone. Off screen, arrows at the edge point
+// the way: for the one who is it, to every other player; for everyone else, to it. Being it, the
+// screen's edges glow faintly pink.
+void draw_tag_players(ImDrawList *draw, const ModesHud &h, float scale) {
+    if (h.players.empty()) return;
+    const auto view = world_camera(h);
+    if (!view) return;
+    const auto &cam = *view;
+    auto &s = state();
+    auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
+    const auto display = ImGui::GetIO().DisplaySize;
+    const float time = static_cast<float>(ImGui::GetTime());
+    constexpr ImU32 neon = IM_COL32(255, 60, 200, 255);
+    bool me_it = false;
+    for (const auto &p : h.players)
+        if (p.self && p.it) me_it = true;
+    if (me_it) {
+        const float pulse = 0.55f + 0.45f * std::sin(time * 3.0f), edge = 120.0f * scale;
+        const ImU32 glow = with_alpha(neon, 0.16f * pulse), none = with_alpha(neon, 0.0f);
+        draw->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(display.x, edge), glow, glow, none, none);
+        draw->AddRectFilledMultiColor(ImVec2(0, display.y - edge), display, none, none, glow, glow);
+        draw->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(edge, display.y), glow, none, none, glow);
+        draw->AddRectFilledMultiColor(ImVec2(display.x - edge, 0), display, none, glow, glow, none);
+    }
+    for (const auto &p : h.players) {
+        if (!p.it) continue;
+        // The crown, a little over the head.
+        const float bob = std::sin(time * 2.4f) * 0.05f, turn = time * 1.2f, r = 0.17f;
+        const Vec3 c{p.at[0], p.at[1] + 2.15f + bob, p.at[2]};
+        const auto ring = [&](float up) {
+            std::vector<Vec3> points;
+            for (int k = 0; k <= 24; ++k) {
+                const float a = turn + 6.2831853f * k / 24;
+                points.push_back({c[0] + std::cos(a) * r, c[1] + up, c[2] + std::sin(a) * r});
+            }
+            return points;
+        };
+        glow_path(draw, cam, ring(0.0f), neon, 0.02f, 1.0f);
+        glow_path(draw, cam, ring(0.045f), neon, 0.012f, 0.8f);
+        std::vector<Vec3> points;
+        for (int k = 0; k <= 10; ++k) {
+            const float a = turn + 6.2831853f * k / 10, up = k % 2 == 0 ? 0.19f : 0.045f;
+            points.push_back({c[0] + std::cos(a) * r, c[1] + up, c[2] + std::sin(a) * r});
+        }
+        glow_path(draw, cam, points, neon, 0.016f, 1.0f);
+        for (std::size_t k = 0; k < 10; k += 2) // a bright jewel on each point
+            if (const auto tip = cam.project(points[k])) {
+                const float size = std::clamp(0.025f * cam.focal / std::max(cam.distance(points[k]), 0.5f), 1.5f, 6.0f);
+                draw->AddCircleFilled(*tip, size, IM_COL32(255, 230, 250, 255), 10);
+            }
+        // Far away, the crown is small: "IT" and how far, over it.
+        const float d = cam.distance(c);
+        if (!p.self && d > 20.0f)
+            if (const auto label = cam.project({c[0], c[1] + 0.5f, c[2]})) {
+                const std::string text = std::format("IT  {:.0f} m", d);
+                const float size = 16.0f * scale, w = text_width(bold, size, text);
+                soft_text(draw, bold, size, ImVec2(label->x - w * 0.5f, label->y - size), neon, text);
+            }
+    }
+    // Arrows at the screen's edge to those who matter and are out of sight.
+    const float inset = 70.0f * scale;
+    const ImVec2 centre(display.x * 0.5f, display.y * 0.5f), half(display.x * 0.5f - inset, display.y * 0.5f - inset);
+    for (const auto &p : h.players) {
+        if (p.self || (me_it ? p.it : !p.it)) continue;
+        const Vec3 chest{p.at[0], p.at[1] + 1.2f, p.at[2]};
+        if (const auto on = cam.project(chest); on && std::abs(on->x - centre.x) < half.x && std::abs(on->y - centre.y) < half.y) continue;
+        const auto v = cam.view(chest);
+        float dx = v.side, dy = -v.height;
+        if (std::abs(dx) < 0.01f && std::abs(dy) < 0.01f) dy = 1;
+        const float length = std::max(1e-4f, std::sqrt(dx * dx + dy * dy));
+        dx /= length;
+        dy /= length;
+        const float t = std::min(std::abs(dx) > 1e-4f ? half.x / std::abs(dx) : 1e9f, std::abs(dy) > 1e-4f ? half.y / std::abs(dy) : 1e9f);
+        const ImVec2 at(centre.x + dx * t, centre.y + dy * t);
+        const ImU32 colour = p.it ? neon : IM_COL32(255, 255, 255, 230);
+        const float size = 16.0f * scale;
+        const ImVec2 tip(at.x + dx * size, at.y + dy * size), left(at.x - dy * size * 0.6f, at.y + dx * size * 0.6f),
+            right(at.x + dy * size * 0.6f, at.y - dx * size * 0.6f);
+        draw->AddTriangleFilled(tip, right, left, IM_COL32(0, 0, 0, 140));
+        draw->AddTriangleFilled(ImVec2(tip.x - dx * 2, tip.y - dy * 2), right, left, colour);
+        const std::string text = std::format("{}  {:.0f} m", p.it ? std::string("IT") : p.name, cam.distance(p.at));
+        const float text_size = 15.0f * scale, w = text_width(bold, text_size, text);
+        soft_text(draw, bold, text_size, ImVec2(at.x - dx * size * 1.6f - w * 0.5f, at.y - dy * size * 1.6f - text_size * 0.5f), colour, text);
+    }
+}
+
 // A gold crown: a band with three points, a jewel on each point.
 void crown(ImDrawList *draw, ImVec2 centre, float size, ImU32 gold) {
     const float w = size, h = size * 0.62f, x = centre.x - w * 0.5f, y = centre.y - h * 0.5f;
@@ -838,6 +925,7 @@ void draw_modes_hud() {
     draw_invite(draw, h.hud, scale);
     if (!h.hud.active) return;
     draw_world(draw, h.hud, scale);
+    draw_tag_players(draw, h.hud, scale);
     if (h.hud.results) {
         draw_results(draw, h.hud, scale);
         return;
