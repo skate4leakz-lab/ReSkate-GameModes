@@ -393,6 +393,10 @@ void feed_tap(std::uint64_t handle, std::uintptr_t type, const void *value) noex
         std::uint64_t first{};
         if (!memory::peek_bytes(reinterpret_cast<std::uintptr_t>(value), &first, sizeof first)) return;
         auto text = text_at(static_cast<std::uintptr_t>(first));
+        // A name skate. gives as a short code rather than text (one grind wrote 0x42532030): the code
+        // itself, the same on every player's game, so it can still be set and copied. A pointer whose
+        // text could not be read is not one: it differs from game to game.
+        if (text.empty() && member == trick_name_member && first && first < 0x100000000ull) text = std::format("Trick #{:x}", first);
         if (text.empty()) return;
         char kind = 'n';
         if (member == trick_side_member) {
@@ -1371,6 +1375,9 @@ void build_hud(State &s, std::uint64_t now) {
                 h.players.push_back({name_of(s, p.player), found->second.first, player_colour(st, p.player), p.player == st->turn,
                                      p.player == self});
             }
+        // S.K.A.T.E. reads trick names through Hall of Meat's UI hook: without it no attempt can count.
+        if (mode == Mode::skate && me && !hall_of_meat::available())
+            h.warning = "This game version can't read trick names: S.K.A.T.E. won't see your tricks.";
         if (s.outside_since && phase == Phase::playing) {
             const auto left = out_of_area_ms > now - s.outside_since ? out_of_area_ms - (now - s.outside_since) : 0;
             h.warning = std::format("OUT OF THE AREA: nothing counts. Back in {} s", (left + 999) / 1000);
@@ -1400,7 +1407,9 @@ void build_hud(State &s, std::uint64_t now) {
                 case Mode::domination: row.value = grouped(p.score) + " pts"; break;
                 case Mode::graffiti: row.value = std::format("{} zone{}", p.score, p.score == 1 ? "" : "s"); break;
                 case Mode::tag: row.value = std::format("{:.1f} s it", p.score / 10.0); break;
-                case Mode::skate: row.value = p.out ? "OUT" : p.aux > 0 ? skate_letters(static_cast<unsigned>(p.aux), g.settings.strikes) : "-"; break;
+                case Mode::skate:
+                    row.value = p.out ? "OUT" : p.aux > 0 ? skate_letters(static_cast<unsigned>(p.aux), g.settings.strikes) : "no letters";
+                    break;
                 }
                 if (phase == Phase::setup) row.value = "ready";
                 h.rows.push_back(std::move(row));
