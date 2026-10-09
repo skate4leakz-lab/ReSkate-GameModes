@@ -303,11 +303,13 @@ void trainer_push_speed(std::uintptr_t core) noexcept {
         }
     } catch (...) {}
 }
-// Hall of Meat bounce (set_bail_bounce). During a ragdoll wipeout the 26 skeleton bodies fall
-// and tumble on their own. Each physics step their average vertical speed is compared with the
-// last: falling at 3 m/s or more and then losing most of it in one step is a hit, and every
-// skeleton body is sent back up with `restitution` of the hit's speed (capped at 11 m/s, each
-// further bounce in the same wipeout weaker, at most five, 120 ms apart). The board is left alone.
+// Hall of Meat bounce (set_bail_bounce). In a ragdoll wipeout (300-399) or off the board
+// (500-599) the skeleton bodies' average vertical speed is followed each physics step, keeping the
+// fastest fall lately (fading): once the body has all but stopped after falling 6 m/s or more (3
+// for a later bounce), it is sent back up with `restitution` of that speed (capped at 11 m/s, 9 on
+// foot; each further bounce in the same bail weaker, at most five). The bodies get the speed, and
+// on foot, where the game's own movement drives them, that movement gets it too. The board is
+// left alone.
 struct BailBounce {
     std::atomic<float> restitution{};
     std::atomic<ULONGLONG> expires{};
@@ -321,7 +323,7 @@ struct BailBounce {
     std::mutex why_mutex;
     std::string why;
     // Physics thread only.
-    float falling{};
+    float falling{}; // the fastest fall lately (m/s, positive), fading
     int bounces{};
     ULONGLONG last{};
 };
@@ -335,11 +337,14 @@ void apply_bail_bounce(std::uintptr_t core) noexcept {
     const bool ragdoll = watch.valid && watch.state >= 300 && watch.state < 400;
     const bool on_foot = watch.valid && watch.state >= 500 && watch.state < 600;
     if (restitution > 0 && now < b.expires.load(std::memory_order_acquire)) b.steps.fetch_add(1, std::memory_order_relaxed);
-    if (!(ragdoll || on_foot) || restitution <= 0 || now >= b.expires.load(std::memory_order_acquire)) {
+    if (restitution <= 0 || now >= b.expires.load(std::memory_order_acquire)) {
         b.falling = 0;
         b.bounces = 0;
         return;
     }
+    // Other states (a landing's own animation, a moment on the board) neither bounce nor forget the
+    // fall: the landing may pass through one.
+    if (!(ragdoll || on_foot)) return;
     // A new fall gets its full bounces again (on foot the state never changes between slams).
     if (b.bounces && now - b.last > 3000) b.bounces = 0;
     b.eligible.fetch_add(1, std::memory_order_relaxed);
@@ -370,19 +375,25 @@ void apply_bail_bounce(std::uintptr_t core) noexcept {
             sum += velocities[i][1];
         }
         reader.verify();
-        const float vertical = sum / static_cast<float>(count - first), previous = b.falling;
-        b.falling = vertical;
+        const float vertical = sum / static_cast<float>(count - first);
         if (-vertical > b.fastest.load(std::memory_order_relaxed)) b.fastest.store(-vertical, std::memory_order_relaxed);
-        // A hit: falling fast last step, most of it gone now. On foot only a real fall (6 m/s, about a
-        // 2 m drop) bounces, so landing an ordinary jump stays a landing.
-        const float fast = ragdoll || b.bounces > 0 ? -3.0f : -6.0f; // later bounces fall less far
-        if (!(previous <= fast) || vertical < previous * 0.4f || b.bounces >= 5 || now - b.last < 120) return;
-        const float up = std::min(11.0f, -previous * restitution * std::pow(0.7f, static_cast<float>(b.bounces)));
+        // The fastest fall lately, fading at 20 m/s each second: a landing takes several steps to
+        // stop a body, so the hit is the fall it had before, met once it has (all but) stopped.
+        b.falling = std::max(b.falling - 20.0f * bodies.seconds, -vertical);
+        // On foot only a real fall (6 m/s, about a 2 m drop) bounces, so an ordinary jump's landing
+        // stays a landing; later bounces in the same bail fall less far.
+        const float fast = ragdoll || b.bounces > 0 ? 3.0f : 6.0f;
+        if (vertical < -1.5f || b.falling < fast || b.bounces >= 5 || now - b.last < 150) return;
+        const float hit = b.falling;
+        const float up = std::min(on_foot ? 9.0f : 11.0f, hit * restitution * std::pow(0.7f, static_cast<float>(b.bounces)));
+        b.falling = 0;
         if (up < 1.0f) return;
         ++b.bounces;
         b.last = now;
-        b.falling = 0;
+        float along_x = 0, along_z = 0;
         for (std::size_t i = first; i < count; ++i) {
+            along_x += velocities[i][0];
+            along_z += velocities[i][2];
             velocities[i][1] = std::max(velocities[i][1], up);
             // Some of the speed along the ground goes too, as a body skips off concrete.
             velocities[i][0] *= 0.85f;
@@ -390,8 +401,16 @@ void apply_bail_bounce(std::uintptr_t core) noexcept {
             body_write(bodies.parts[i] + 0x70, velocities[i]);
             body_write(bodies.parts[i] + 0x60, flags[i] | 8u);
         }
+        // On foot the game's own movement drives the skeleton and overwrites those next step: the
+        // bounce goes to it too, as noclip flight and the trainer's jump height do.
+        if (bodies.offboard) {
+            const float n = static_cast<float>(count - first);
+            const std::array<float, 3> launch{along_x / n * 0.85f, up, along_z / n * 0.85f};
+            if (!sync_offboard_flight_velocity(state.trial.base, core, bodies.context, bodies.rig_wrapper, launch))
+                note("the on-foot movement refused the bounce");
+        }
         b.given.fetch_add(1, std::memory_order_relaxed);
-        if (-previous > b.hardest.load(std::memory_order_relaxed)) b.hardest.store(-previous, std::memory_order_relaxed);
+        if (hit > b.hardest.load(std::memory_order_relaxed)) b.hardest.store(hit, std::memory_order_relaxed);
     } catch (const SourceGuard& issue) { note(issue.message ? issue.message : "skater physics check failed"); }
       catch (...) { note("skater physics error"); }
 }
