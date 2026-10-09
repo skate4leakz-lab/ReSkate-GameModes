@@ -284,6 +284,15 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
         if (watches[w].joint == joint::hips && s.have_position && usable)
             hips_vertical = (s.joints[joint::hips].position[1] - s.position[w][1]) / seconds;
     const bool body_stopped = hips_vertical > -2.5f;
+    // How fast the body as a whole was going (the hips' carried speeds): no part of it hits harder
+    // than that, give or take. An arm swung down in a handplant, a foot on a stair, a jump on the
+    // spot move a limb fast while the body barely moves, and none of them is a fall.
+    float body_down = 0, body_side = 0;
+    for (std::size_t w = 0; w < watch_count; ++w)
+        if (watches[w].joint == joint::hips) {
+            body_down = s.carry_down[w];
+            body_side = s.carry_side[w];
+        }
     if (s.have_position && usable) {
         s.hips_vy = hips_vertical;
         if (s.armed) s.fell = std::min(s.fell, hips_vertical); // the fastest fall since the bail began
@@ -324,8 +333,8 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
             if (injuring && s.have_velocity && touching) {
                 // The speed it carried into the ground and lost, plus some of the speed along it
                 // lost (a scrape or a wall).
-                const float into = std::max(0.0f, s.carry_down[w] - down);
-                const float sideways = std::max(0.0f, s.carry_side[w] - side);
+                const float into = std::min(std::max(0.0f, s.carry_down[w] - down), body_down + 2.0f);
+                const float sideways = std::min(std::max(0.0f, s.carry_side[w] - side), body_side + 2.0f);
                 const float impact = into + 0.35f * sideways;
                 // The preview shows the skeleton alone: nothing cracks or breaks in it.
                 if (!s.preview) {

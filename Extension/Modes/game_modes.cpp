@@ -325,10 +325,15 @@ void track_bail(State &s, std::uint32_t physics, float vertical, std::uint64_t n
     const bool reset = physics == 700 || s.previous_state == 700;
     if (reset) s.fall_peak = 0;
     s.fall_peak = std::min(s.fall_peak, vertical);
-    const bool on_foot = !reset && ((physics >= offboard_states_first && physics < 700) || in(s.previous_state, offboard_states_first));
+    // Off the board: 500-599. Not 600-699, the plants and other on-foot tricks (a handplant is not
+    // a fall).
+    const bool on_foot = !reset && (in(physics, offboard_states_first) || in(s.previous_state, offboard_states_first));
     // The body stopping dead off the board (a pole, a wall, the ground); on the board the game's
-    // own wipeout states say when a landing went wrong.
-    if (bone_cam_slam() && on_foot) {
+    // own wipeout states say when a landing went wrong. Only when the game itself had the skater
+    // going fast (7 m/s and more): the pose's own speed jumps about on stairs, in a jump on the
+    // spot and through tricks, and alone it is no proof of anything.
+    const bool slam = bone_cam_slam();
+    if (slam && on_foot && s.recent_speed >= 7.0f) {
         logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: on-foot slam (the body stopped dead).");
         bailed = true;
     }
