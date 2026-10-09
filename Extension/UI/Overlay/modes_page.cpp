@@ -184,6 +184,9 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
     int when = m.bone_cam == "on" ? 1 : m.bone_cam == "off" ? 2 : 0;
     if (choice(menu, "modes-bonecam-when", when, {"HALL OF MEAT", "EVERY BAIL", "OFF"}))
         command(menu, callbacks, std::string("bonecam ") + (when == 1 ? "on" : when == 2 ? "off" : "meat"));
+    field(menu, "Concussion ringing");
+    int ringing = m.bone_cam_ringing ? 0 : 1;
+    if (choice(menu, "modes-bonecam-ring", ringing, {"ON", "MUTED"})) command(menu, callbacks, ringing == 0 ? "bonecam ring on" : "bonecam ring off");
     note("The preview shows your skeleton. In a real bail the bones that take a hard hit crack or break.");
     note("Skeleton: BodyParts3D, (c) The Database Center for Life Science, licensed under CC Attribution 4.0 International.");
     if (small_button(menu, "PREVIEW BONE CAM")) command(menu, callbacks, "bonecam test");

@@ -11,6 +11,8 @@
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <algorithm>
 #include <cmath>
 #include <atomic>
@@ -108,6 +110,7 @@ enum class Setting { meat, on, off };
 struct State {
     Setting setting = Setting::meat;
     bool effects = true;
+    bool ringing = true; // a concussion's ringing in the ears (it can be muted)
     std::uint64_t effects_until{};
     // A bail heard while still in the air: measured from now on, shown once the body lands.
     bool armed{};
@@ -421,7 +424,7 @@ void publish_effects(State &s, std::uint64_t now, overlay::BoneCam &cam) {
             cam.daze = (0.35f + 0.65f * grade) * (1.0f - static_cast<float>(into) / c->lasts_ms);
             if (!s.rang) {
                 s.rang = true;
-                ring(grade);
+                if (s.ringing) ring(grade);
             }
         }
     }
@@ -472,9 +475,14 @@ void publish(State &s, std::uint64_t now, bool bones = true) {
 }
 } // namespace
 
+namespace {
+void load_settings() noexcept; // the player's saved Bone Cam choices (below)
+}
 void tick_bone_cam(std::uintptr_t base, std::uintptr_t client, bool playing) noexcept {
     try {
         auto &s = state();
+        static const bool loaded = (load_settings(), true); // the player's saved choices, once
+        (void)loaded;
         const auto now = now_ms();
         // Only a lasting loss of play ends it: a slam can briefly take the game out of play.
         if (!playing) {
@@ -539,19 +547,67 @@ std::string bone_cam_setting() {
     default: return "meat";
     }
 }
+bool bone_cam_ringing() noexcept { return state().ringing; }
+
+namespace {
+// The player's Bone Cam choices, kept between launches: %LOCALAPPDATA%\ReSkate\bone_cam.txt, one
+// `name=value` per line. A missing or unreadable file leaves the defaults.
+std::filesystem::path settings_file() {
+    std::array<wchar_t, 32768> local{};
+    const auto length = GetEnvironmentVariableW(L"LOCALAPPDATA", local.data(), static_cast<DWORD>(local.size()));
+    if (!length || length >= local.size()) return {};
+    return std::filesystem::path(std::wstring(local.data(), length)) / L"ReSkate" / L"bone_cam.txt";
+}
+void save_settings(const State &s) {
+    try {
+        const auto path = settings_file();
+        if (path.empty()) return;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream out(path, std::ios::trunc);
+        out << "show=" << (s.setting == Setting::on ? "on" : s.setting == Setting::off ? "off" : "meat") << '\n'
+            << "effects=" << (s.effects ? "on" : "off") << '\n'
+            << "ringing=" << (s.ringing ? "on" : "off") << '\n';
+    } catch (...) {}
+}
+void load_settings() noexcept {
+    try {
+        auto &s = state();
+        const auto path = settings_file();
+        if (path.empty()) return;
+        std::ifstream in(path);
+        for (std::string line; std::getline(in, line);) {
+            const auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            const auto name = line.substr(0, eq), value = line.substr(eq + 1);
+            if (name == "show") s.setting = value == "on" ? Setting::on : value == "off" ? Setting::off : Setting::meat;
+            else if (name == "effects") s.effects = value != "off";
+            else if (name == "ringing") s.ringing = value != "off";
+        }
+    } catch (...) {}
+}
+} // namespace
 
 std::string bone_cam_command(const std::vector<std::string> &arguments) {
     auto &s = state();
     const auto word = arguments.empty() ? std::string() : arguments[0];
     if (word.empty())
-        return "Bone Cam: " + bone_cam_setting() + ", slam effects " + (s.effects ? "on" : "off") +
-               " (mode bonecam meat|on|off|test, mode bonecam effects on|off).";
+        return "Bone Cam: " + bone_cam_setting() + ", slam effects " + (s.effects ? "on" : "off") + ", ringing " +
+               (s.ringing ? "on" : "off") + " (mode bonecam meat|on|off|test, mode bonecam effects on|off, mode bonecam ring on|off).";
     if (word == "effects") {
         const auto value = arguments.size() > 1 ? arguments[1] : std::string();
         if (value != "on" && value != "off") return "error: usage: mode bonecam effects on|off";
         s.effects = value == "on";
         if (!s.effects) s.hit = 0;
+        save_settings(s);
         return s.effects ? "Slam effects on: the hit flash and a concussion's after-effects." : "Slam effects off.";
+    }
+    if (word == "ring") {
+        const auto value = arguments.size() > 1 ? arguments[1] : std::string();
+        if (value != "on" && value != "off") return "error: usage: mode bonecam ring on|off";
+        s.ringing = value == "on";
+        if (!s.ringing) PlaySoundW(nullptr, nullptr, 0); // and quiet one already ringing
+        save_settings(s);
+        return s.ringing ? "Concussion ringing on." : "Concussion ringing muted.";
     }
     if (word == "meat") s.setting = Setting::meat;
     else if (word == "on") s.setting = Setting::on;
@@ -564,6 +620,7 @@ std::string bone_cam_command(const std::vector<std::string> &arguments) {
         return "Bone Cam preview for a few seconds.";    } else {
         return "error: usage: mode bonecam meat|on|off|test";
     }
+    save_settings(s);
     return word == "meat" ? "Bone Cam shows in Hall of Meat games." : word == "on" ? "Bone Cam shows on every bail." : "Bone Cam off.";
 }
 

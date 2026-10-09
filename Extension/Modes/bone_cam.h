@@ -15,6 +15,7 @@ void tick_bone_cam(std::uintptr_t base, std::uintptr_t client, bool playing) noe
 // `mode bonecam [meat|on|off|test]` (game thread).
 std::string bone_cam_command(const std::vector<std::string> &arguments);
 std::string bone_cam_setting(); // "meat", "on" or "off"
+bool bone_cam_ringing() noexcept; // a concussion's ringing is on (not muted)
 // The local skater just bailed (game_modes.cpp finds bails; any thread).
 void bone_cam_bail() noexcept;
 // Whether the skater's body stopped dead (lost 7 m/s within a third of a second) since the last

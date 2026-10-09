@@ -430,6 +430,7 @@ struct ModesMenu {
     float radius{};
     std::string missing;          // what `mode start` still needs
     std::string bone_cam;         // "meat", "on" or "off"
+    bool bone_cam_ringing = true; // a concussion's ringing is on (not muted)
     float area_radius{};          // > 0: the area is a circle
     std::string placing;          // "circle", "corners", "points" while placing on the skater; else empty
     std::vector<ModesHudOffer> offers; // other players' games, to join from the menu

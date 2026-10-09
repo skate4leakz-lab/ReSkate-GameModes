@@ -1166,6 +1166,7 @@ void build_hud(State &s, std::uint64_t now) {
     // What the Game Modes page of the ReSkate menu shows and offers.
     overlay::ModesMenu m;
     m.bone_cam = bone_cam_setting();
+    m.bone_cam_ringing = bone_cam_ringing();
     if (s.game) {
         const auto &g = *s.game;
         m.in_game = true;
