@@ -325,12 +325,16 @@ void apply_bail_bounce(std::uintptr_t core) noexcept {
     const float restitution = b.restitution.load(std::memory_order_relaxed);
     const auto now = GetTickCount64();
     const auto watch = watched_physics_state();
+    // A wipeout's ragdoll (300-399), or off the board (500-599: a fall on foot ends in a slam too).
     const bool ragdoll = watch.valid && watch.state >= 300 && watch.state < 400;
-    if (!ragdoll || restitution <= 0 || now >= b.expires.load(std::memory_order_acquire)) {
+    const bool on_foot = watch.valid && watch.state >= 500 && watch.state < 600;
+    if (!(ragdoll || on_foot) || restitution <= 0 || now >= b.expires.load(std::memory_order_acquire)) {
         b.falling = 0;
         b.bounces = 0;
         return;
     }
+    // A new fall gets its full bounces again (on foot the state never changes between slams).
+    if (b.bounces && now - b.last > 3000) b.bounces = 0;
     SourceLastError error;
     auto& state = source_state();
     if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) return;
@@ -352,8 +356,10 @@ void apply_bail_bounce(std::uintptr_t core) noexcept {
         reader.verify();
         const float vertical = sum / static_cast<float>(count - first), previous = b.falling;
         b.falling = vertical;
-        // A hit: falling fast last step, most of it gone now.
-        if (!(previous <= -3.0f) || vertical < previous * 0.4f || b.bounces >= 5 || now - b.last < 120) return;
+        // A hit: falling fast last step, most of it gone now. On foot only a real fall (6 m/s, about a
+        // 2 m drop) bounces, so landing an ordinary jump stays a landing.
+        const float fast = ragdoll || b.bounces > 0 ? -3.0f : -6.0f; // later bounces fall less far
+        if (!(previous <= fast) || vertical < previous * 0.4f || b.bounces >= 5 || now - b.last < 120) return;
         const float up = std::min(11.0f, -previous * restitution * std::pow(0.7f, static_cast<float>(b.bounces)));
         if (up < 1.0f) return;
         ++b.bounces;

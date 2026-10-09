@@ -23,9 +23,8 @@ namespace {
 using Vec3 = std::array<float, 3>;
 using Quat = std::array<float, 4>;
 constexpr std::uint64_t duration_ms = 4200, fade_in_ms = 150, fade_out_ms = 600, settle_ms = 150;
-// Marks on the ground fade after half a minute, a hit flashes briefly.
+// After-effects (a concussion's) last up to half a minute, a hit flashes briefly.
 constexpr std::uint64_t mark_ms = 30000, hit_ms = 450;
-constexpr std::size_t max_marks = 24, max_mark_points = 64;
 constexpr std::uint16_t head_up = 0xffff; // the skull points along the head's own up axis
 
 // The animation pose is parent-local {scale, Hamilton quaternion, translation} per joint, and the
@@ -106,17 +105,15 @@ constexpr Concussion concussions[]{
 constexpr std::size_t watch_count = std::size(watches);
 
 enum class Setting { meat, on, off };
-struct Mark {
-    std::vector<Vec3> path;
-    std::uint64_t born{}, last{};
-    std::size_t watch{};
-    bool skid{};
-};
 struct State {
     Setting setting = Setting::meat;
     bool effects = true;
     std::uint64_t effects_until{};
-    std::vector<Mark> marks;
+    // A bail heard while still in the air: measured from now on, shown once the body lands.
+    bool armed{};
+    std::uint64_t armed_at{};
+    float hips_vy{}; // the hips' vertical speed (m/s, up positive) at the last tick
+    float fell{};    // the fastest the hips fell since the bail began (negative)
     float hit{};
     std::uint64_t hit_time{};
     Vec3 hit_at{};
@@ -186,8 +183,9 @@ void ring(float strength) {
 std::uint64_t now_ms() { return GetTickCount64(); }
 
 
-void start(State &s, std::uint64_t now) {
-    s.active = true;
+// A bail begins: its injuries start from nothing, and from now on hits count (they need the body
+// to have landed, so nothing hurts while it is still in the air).
+void begin_bail(State &s, std::uint64_t now) {
     // Joint speeds tracked up to now carry over, so the hit that set off the bail still counts.
     if (now - s.last_tick > 100) {
         s.have_position = s.have_velocity = false;
@@ -195,7 +193,9 @@ void start(State &s, std::uint64_t now) {
         s.carry_side.fill(0);
         s.last_tick = now;
     }
-    s.started = now;
+    s.armed = true;
+    s.armed_at = now;
+    s.fell = std::min(0.0f, s.hips_vy);
     ++s.serial;
     s.head_hit = 0;
     s.rang = false;
@@ -204,35 +204,27 @@ void start(State &s, std::uint64_t now) {
     s.preview = false;
     s.pose_reported = false;
     s.posed = false;
+}
+// The X-ray comes up: when the body lands (or hits a wall), not while it is still flying.
+void show(State &s, std::uint64_t now) {
+    s.armed = false;
+    s.active = true;
+    s.started = now;
     s.effects_until = now + mark_ms;
     logging::log(logging::Level::info, logging::Channel::runtime, "Bone Cam: started.");
+}
+void start(State &s, std::uint64_t now) {
+    begin_bail(s, now);
+    show(s, now);
 }
 // Ends the X-ray and everything the slams left behind.
 void stop(State &s) {
     s.active = false;
+    s.armed = false;
     s.effects_until = 0;
-    s.marks.clear();
     s.hit = 0;
     std::lock_guard lock(s.mutex);
     s.shown = {};
-}
-// A joint sliding along the ground leaves a mark: its own one, carried on while it keeps sliding.
-void leave_mark(State &s, std::size_t w, const Vec3 &at, std::uint64_t now) {
-    Mark *mark{};
-    for (auto &m : s.marks)
-        if (m.watch == w && now - m.last <= 250) mark = &m;
-    if (!mark) {
-        if (s.marks.size() >= max_marks) s.marks.erase(s.marks.begin());
-        const auto j = watches[w].joint;
-        s.marks.push_back({{}, now, now, w, j == joint::hips || j == joint::spine2});
-        mark = &s.marks.back();
-    }
-    mark->last = now;
-    if (!mark->path.empty()) {
-        const auto &end = mark->path.back();
-        if (std::hypot(at[0] - end[0], at[2] - end[2]) < 0.12f) return;
-    }
-    if (mark->path.size() < max_mark_points) mark->path.push_back(at);
 }
 // The skater's pose this tick, composed into world space. Empty while it can be read, else why not.
 std::string read_pose(State &s, std::uintptr_t base, std::uintptr_t client) {
@@ -289,6 +281,10 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
         if (watches[w].joint == joint::hips && s.have_position && usable)
             hips_vertical = (s.joints[joint::hips].position[1] - s.position[w][1]) / seconds;
     const bool body_stopped = hips_vertical > -2.5f;
+    if (s.have_position && usable) {
+        s.hips_vy = hips_vertical;
+        if (s.armed) s.fell = std::min(s.fell, hips_vertical); // the fastest fall since the bail began
+    }
     for (std::size_t w = 0; w < watch_count; ++w) {
         const auto &p = s.joints[watches[w].joint].position;
         if (s.have_position && usable) {
@@ -306,7 +302,10 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
                 float fastest = 0;
                 for (const auto &[at, was] : s.hips_speeds)
                     if (at && now - at <= 330) fastest = std::max(fastest, was);
-                if (fastest - speed >= 7.0f) {
+                // Fast (8 m/s or more) a moment ago, all but stopped now, and not still falling:
+                // the body hit something. Once in a while at most: on foot the measured speed
+                // jitters, and one slam must not be counted thirty times.
+                if (fastest >= 8.0f && speed < 2.5f && body_stopped && now - s.slam_time > 1500) {
                     s.slam_seen.store(true);
                     s.slam_time = now;
                 }
@@ -351,9 +350,6 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
                     }
                 }
             }
-            // Sliding along the ground: marks under the joint (joint centres sit about 0.1 m in the body).
-            if (injuring && s.effects && !s.preview && p[1] - lowest <= 0.15f && now - s.started >= settle_ms && side > 1.5f)
-                leave_mark(s, w, {p[0], lowest - 0.08f, p[2]}, now);
             s.carry_down[w] = std::max(s.carry_down[w] * decay, down);
             s.carry_side[w] = std::max(s.carry_side[w] * decay, side);
             s.velocity[w] = v;
@@ -411,12 +407,6 @@ overlay::BoneCamPose pose_of(const State &s) {
 // The marks and hit as they look now: marks fade over their last 8 s.
 void publish_effects(State &s, std::uint64_t now, overlay::BoneCam &cam) {
     if (!s.effects || s.preview) return;
-    std::erase_if(s.marks, [&](const Mark &m) { return now - m.born >= mark_ms; });
-    for (const auto &m : s.marks) {
-        if (m.path.size() < 2) continue;
-        const float age = static_cast<float>(now - m.born);
-        cam.marks.push_back({m.path, std::clamp((mark_ms - age) / 8000.0f, 0.0f, 1.0f), m.skid});
-    }
     const float since = static_cast<float>(now - s.hit_time) / hit_ms;
     if (s.hit > 0 && since < 1) {
         cam.hit = s.hit * (1 - since) * (1 - since);
@@ -435,7 +425,7 @@ void publish_effects(State &s, std::uint64_t now, overlay::BoneCam &cam) {
             }
         }
     }
-    cam.effects = !cam.marks.empty() || cam.hit > 0 || cam.daze > 0;
+    cam.effects = cam.hit > 0 || cam.daze > 0;
 }
 void publish(State &s, std::uint64_t now, bool bones = true) {
     overlay::BoneCam cam;
@@ -495,8 +485,15 @@ void tick_bone_cam(std::uintptr_t base, std::uintptr_t client, bool playing) noe
         s.unready_since = 0;
         // Bails are found by the game modes (game_modes.cpp), which know every wipeout state.
         const bool wanted = s.setting == Setting::on || (s.setting == Setting::meat && local_meat_game());
-        if (s.bail_pending.exchange(false) && wanted && !s.active) start(s, now);
-        // The X-ray ends after a few seconds; the marks stay a while longer.
+        if (s.bail_pending.exchange(false) && wanted && !s.active && !s.armed) begin_bail(s, now);
+        // The X-ray comes up when the body lands: it was falling and has stopped. A bail with no
+        // fall in it (the body already down) shows at once; one that never lands, after 6 s.
+        if (s.armed) {
+            const bool landed = s.fell < -3.0f && s.hips_vy > -2.5f;
+            const bool never_fell = s.fell >= -3.0f && s.hips_vy > -2.5f && now - s.armed_at > 400;
+            if (landed || never_fell || now - s.armed_at > 6000) show(s, now);
+        }
+        // The X-ray ends after a few seconds; a concussion's after-effects last a while longer.
         if (s.active && now - s.started >= duration_ms) s.active = false;
         const bool showing = s.active || (s.effects && now < s.effects_until);
         if (!showing) {
@@ -507,7 +504,8 @@ void tick_bone_cam(std::uintptr_t base, std::uintptr_t client, bool playing) noe
             // Between bails the joints are still followed, so the hit that sets off a bail counts.
             // Hall of Meat needs them with the Bone Cam off too: its on-foot slams (bone_cam_slam)
             // come from here.
-            if ((wanted || local_meat_game()) && read_pose(s, base, client).empty()) find_impacts(s, now, false);
+            // While a bail is armed (in the air) its hits are measured already.
+            if ((wanted || local_meat_game()) && read_pose(s, base, client).empty()) find_impacts(s, now, s.armed);
             return;
         }
         if (const auto why = read_pose(s, base, client); !why.empty()) {
@@ -525,7 +523,7 @@ void tick_bone_cam(std::uintptr_t base, std::uintptr_t client, bool playing) noe
             s.pose_reported = true;
             logging::log(logging::Level::info, logging::Channel::runtime, "Bone Cam: reading the skater's {} joints.", skater_joint_count);
         }
-        find_impacts(s, now, s.active);
+        find_impacts(s, now, s.active || s.armed);
         publish(s, now);
     } catch (...) {}
 }
@@ -552,11 +550,8 @@ std::string bone_cam_command(const std::vector<std::string> &arguments) {
         const auto value = arguments.size() > 1 ? arguments[1] : std::string();
         if (value != "on" && value != "off") return "error: usage: mode bonecam effects on|off";
         s.effects = value == "on";
-        if (!s.effects) {
-            s.marks.clear();
-            s.hit = 0;
-        }
-        return s.effects ? "Slam effects on: skid marks, scrapes and the hit flash." : "Slam effects off.";
+        if (!s.effects) s.hit = 0;
+        return s.effects ? "Slam effects on: the hit flash and a concussion's after-effects." : "Slam effects off.";
     }
     if (word == "meat") s.setting = Setting::meat;
     else if (word == "on") s.setting = Setting::on;
