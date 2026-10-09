@@ -910,56 +910,181 @@ void crown(ImDrawList *draw, ImVec2 centre, float size, ImU32 gold) {
     for (const auto &tip : {outline[1], outline[3], outline[5]}) draw->AddCircleFilled(tip, size * 0.08f, IM_COL32(255, 70, 90, 255), 12);
 }
 
-// The end of a game: a podium with the winner crowned in the middle, second and third beside,
-// everyone else listed under it.
+// "1ST", "2ND", "3RD", "4TH" ... "11TH", "21ST".
+std::string ordinal(std::size_t n) {
+    const auto tens = n % 100, ones = n % 10;
+    const char *end = tens >= 11 && tens <= 13 ? "TH" : ones == 1 ? "ST" : ones == 2 ? "ND" : ones == 3 ? "RD" : "TH";
+    return std::to_string(n) + end;
+}
+
+ImU32 mix(ImU32 c, ImU32 to, float t) {
+    const auto ch = [&](int shift) {
+        const float a = static_cast<float>((c >> shift) & 0xff), b = static_cast<float>((to >> shift) & 0xff);
+        return static_cast<ImU32>(std::clamp(a + (b - a) * t, 0.0f, 255.0f)) << shift;
+    };
+    return ch(IM_COL32_R_SHIFT) | ch(IM_COL32_G_SHIFT) | ch(IM_COL32_B_SHIFT) | ch(IM_COL32_A_SHIFT);
+}
+// A podium place as a polished metal plate: slanted ends, shaded like metal from a bright top to a
+// dark band and a lit lower edge, a rim, a glint sweeping across every few seconds, the place stamped
+// in, and (gold only) a sparkle twinkling at its corner.
+void shiny_badge(ImDrawList *draw, ImVec2 a, ImVec2 b, ImU32 metal, ImFont *font, float size, const std::string &text, float alpha,
+                 float time, float offset, bool sparkle) {
+    const float slant = (b.y - a.y) * 0.28f, h = b.y - a.y;
+    const ImU32 white = IM_COL32(255, 255, 255, 255), black = IM_COL32(0, 0, 0, 255);
+    // Left and right edges of the plate at height y.
+    const auto lx = [&](float y) { return a.x + slant * (1.0f - (y - a.y) / h); };
+    const auto rx = [&](float y) { return b.x - slant * ((y - a.y) / h); };
+    // The metal's shading down the plate: highlight, body, the dark band, the lit lower edge.
+    constexpr int strips = 16;
+    const auto tone = [&](float t) {
+        if (t < 0.18f) return mix(metal, white, 0.75f - t * 2.2f);
+        if (t < 0.55f) return mix(metal, white, 0.12f * (0.55f - t) / 0.37f);
+        if (t < 0.82f) return mix(metal, black, 0.38f * (t - 0.55f) / 0.27f);
+        return mix(mix(metal, black, 0.38f), white, (t - 0.82f) * 1.6f);
+    };
+    for (int k = 0; k < strips; ++k) {
+        const float y0 = a.y + h * k / strips, y1 = a.y + h * (k + 1) / strips;
+        const ImU32 top = with_alpha(tone(static_cast<float>(k) / strips), alpha), bottom = with_alpha(tone(static_cast<float>(k + 1) / strips), alpha);
+        draw->AddRectFilledMultiColor(ImVec2(lx(y1), y0), ImVec2(rx(y0), y1), top, top, bottom, bottom);
+        // The slanted ends: a triangle each side of the strip's rectangle.
+        draw->AddTriangleFilled(ImVec2(lx(y0), y0), ImVec2(lx(y1), y0), ImVec2(lx(y1), y1), top);
+        draw->AddTriangleFilled(ImVec2(rx(y0), y0), ImVec2(rx(y1), y1), ImVec2(rx(y0), y1), bottom);
+    }
+    // The glint: a slanted band of light crossing the plate every few seconds.
+    const float period = 3.2f, sweep = std::fmod(time + offset, period) / 0.9f;
+    if (sweep < 1.0f) {
+        const float w = b.x - a.x, cx = a.x - w * 0.3f + sweep * w * 1.6f, band_w = w * 0.12f;
+        draw->PushClipRect(a, b, true);
+        for (int k = 0; k < strips; ++k) {
+            const float y0 = a.y + h * k / strips, y1 = a.y + h * (k + 1) / strips;
+            const float l = std::max(cx - band_w - (y0 - a.y) * 0.6f, lx(y0)), r = std::min(cx + band_w - (y0 - a.y) * 0.6f, rx(y0));
+            if (r > l) {
+                const float m = (l + r) * 0.5f;
+                const ImU32 lit = IM_COL32(255, 255, 255, static_cast<int>(150 * alpha)), clear = IM_COL32(255, 255, 255, 0);
+                draw->AddRectFilledMultiColor(ImVec2(l, y0), ImVec2(m, y1), clear, lit, lit, clear);
+                draw->AddRectFilledMultiColor(ImVec2(m, y0), ImVec2(r, y1), lit, clear, clear, lit);
+            }
+        }
+        draw->PopClipRect();
+    }
+    // The rim: dark outside, a bright line just inside the top.
+    const ImVec2 outline[]{ImVec2(a.x + slant, a.y), ImVec2(b.x, a.y), ImVec2(b.x - slant, b.y), ImVec2(a.x, b.y)};
+    draw->AddPolyline(outline, 4, with_alpha(mix(metal, black, 0.55f), alpha), ImDrawFlags_Closed, std::max(1.0f, h * 0.045f));
+    draw->AddLine(ImVec2(a.x + slant * 0.92f + 2.0f, a.y + h * 0.07f), ImVec2(b.x - 3.0f, a.y + h * 0.07f), with_alpha(white, 0.75f * alpha),
+                  std::max(1.0f, h * 0.035f));
+    // The place, stamped in: a light edge under dark lettering.
+    const float tw = text_width(font, size, text);
+    const ImVec2 at((a.x + b.x) * 0.5f - tw * 0.5f, a.y + (h - size) * 0.5f);
+    draw->AddText(font, size, ImVec2(at.x, at.y + std::max(1.0f, size * 0.05f)), with_alpha(mix(metal, white, 0.7f), alpha), text.c_str());
+    draw->AddText(font, size, at, with_alpha(mix(metal, black, 0.72f), alpha), text.c_str());
+    // A four-pointed sparkle at the top corner, twinkling.
+    if (sparkle) {
+        const float tw2 = 0.5f + 0.5f * std::sin((time + offset) * 3.1f);
+        const float r = h * (0.18f + 0.16f * tw2);
+        const ImVec2 c(b.x - slant * 0.2f - h * 0.08f, a.y + h * 0.1f);
+        const ImU32 star = with_alpha(white, alpha * (0.5f + 0.5f * tw2));
+        draw->AddQuadFilled(ImVec2(c.x, c.y - r), ImVec2(c.x + r * 0.22f, c.y), ImVec2(c.x, c.y + r), ImVec2(c.x - r * 0.22f, c.y), star);
+        draw->AddQuadFilled(ImVec2(c.x - r, c.y), ImVec2(c.x, c.y - r * 0.22f), ImVec2(c.x + r, c.y), ImVec2(c.x, c.y + r * 0.22f), star);
+    }
+}
+
+// The end of a game, the way skate. shows a challenge's results: a column down the left of the
+// screen on dark bands fading out to the right, leaving the middle clear. The winner first, crowned
+// in gold; second in silver and third in bronze under them; everyone else smaller below. Each row
+// slides in after the one above it; the local player's is underlined in the accent.
 void draw_results(ImDrawList *draw, const ModesHud &h, float scale) {
     auto &s = state();
     auto *title = s.menu.title ? s.menu.title : ImGui::GetFont();
     auto *heading = s.menu.heading ? s.menu.heading : ImGui::GetFont();
     auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
     const auto display = ImGui::GetIO().DisplaySize;
-    draw->AddRectFilled(ImVec2(0, 0), display, IM_COL32(0, 0, 0, 110));
-    const float mid = display.x * 0.5f, width = 720.0f * scale, left = mid - width * 0.5f;
-    const std::size_t others = h.rows.size() > 3 ? std::min<std::size_t>(h.rows.size() - 3, 5) : 0;
-    const float card_h = (470.0f + others * 36.0f) * scale, top = display.y * 0.5f - card_h * 0.5f;
-    theme::rough_rect(draw, ImVec2(left, top), ImVec2(left + width, top + card_h), with_alpha(theme::tile, 0.94f), 113u, scale);
-    draw->AddRectFilled(ImVec2(left, top), ImVec2(left + width, top + 5.0f * scale), theme::bar);
-    centred(draw, title, 46.0f * scale, mid, top + 16.0f * scale, theme::white, "RESULTS");
-    centred(draw, bold, 18.0f * scale, mid, top + 70.0f * scale, theme::grey_text, h.title);
-    // The podium: 2nd on the left, 1st in the middle (tallest), 3rd on the right.
-    constexpr ImU32 metal[]{IM_COL32(255, 196, 40, 255), IM_COL32(200, 205, 215, 255), IM_COL32(205, 127, 60, 255)};
-    const float base = top + 400.0f * scale, step_w = 190.0f * scale;
-    const float heights[]{150.0f * scale, 105.0f * scale, 75.0f * scale};
-    const float centres[]{mid, mid - step_w - 14.0f * scale, mid + step_w + 14.0f * scale};
-    for (std::size_t place = 0; place < 3 && place < h.rows.size(); ++place) {
-        const auto &row = h.rows[place];
-        const float cx = centres[place], step_top = base - heights[place];
-        const ImVec2 a(cx - step_w * 0.5f, step_top), b(cx + step_w * 0.5f, base);
-        draw->AddRectFilled(a, b, with_alpha(metal[place], 0.9f), 4.0f * scale);
-        draw->AddRectFilled(a, ImVec2(b.x, a.y + 6.0f * scale), with_alpha(theme::white, 0.5f), 4.0f * scale);
-        centred(draw, title, (place == 0 ? 64.0f : 48.0f) * scale, cx, step_top + 12.0f * scale, IM_COL32(30, 30, 30, 230),
-                std::to_string(place + 1));
-        // Name and score above the step, in the player's colour; the winner wears the crown.
-        const float name_size = (place == 0 ? 30.0f : 22.0f) * scale;
-        const float name_y = step_top - (place == 0 ? 74.0f : 62.0f) * scale;
-        centred(draw, heading, name_size, cx, name_y, row.color, row.name);
-        centred(draw, bold, (place == 0 ? 20.0f : 16.0f) * scale, cx, name_y + name_size + 4.0f * scale, theme::white, row.value);
-        if (place == 0) crown(draw, ImVec2(cx, name_y - 34.0f * scale), 62.0f * scale, metal[0]);
-        if (row.self) draw->AddRect(a, b, theme::white, 4.0f * scale, 0, std::max(1.5f, 2.5f * scale));
+    // When these results came up: a gap in drawing them means a new game's.
+    static double shown_at = 0, last_drawn = -10;
+    const double now = ImGui::GetTime();
+    if (now - last_drawn > 0.5) shown_at = now;
+    last_drawn = now;
+    const float age = static_cast<float>(now - shown_at);
+    const auto appear = [&](float delay) { // 0..1, eased, from `delay` seconds in
+        const float t = std::clamp((age - delay) / 0.35f, 0.0f, 1.0f);
+        return 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+    };
+    constexpr ImU32 metal[]{IM_COL32(255, 196, 40, 255), IM_COL32(205, 212, 222, 255), IM_COL32(214, 132, 62, 255)};
+    const ImU32 white = IM_COL32(255, 255, 255, 255), grey = IM_COL32(170, 175, 185, 255);
+
+    // The left of the screen darkened a little, so the column reads over any scene.
+    const float shade = appear(0.0f);
+    draw->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(display.x * 0.55f, display.y), IM_COL32(0, 0, 0, static_cast<int>(150 * shade)),
+                                  IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, static_cast<int>(150 * shade)));
+
+    const float x = 64.0f * scale, width = 500.0f * scale, right = x + width;
+    float y = display.y * 0.17f;
+    // The header: the mode in the accent, RESULTS large, an accent line fading out.
+    {
+        const float a = appear(0.0f), slide = (1.0f - a) * -40.0f * scale;
+        std::string mode = h.title;
+        for (auto &c : mode) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        diamond(draw, ImVec2(x + slide + 7.0f * scale, y + 11.0f * scale), 6.0f * scale, with_alpha(accent, a));
+        soft_text(draw, heading, 18.0f * scale, ImVec2(x + slide + 22.0f * scale, y), with_alpha(accent, a), mode);
+        soft_text(draw, title, 56.0f * scale, ImVec2(x + slide, y + 22.0f * scale), with_alpha(white, a), "RESULTS");
+        draw->AddRectFilledMultiColor(ImVec2(x + slide, y + 86.0f * scale), ImVec2(right + slide, y + 89.0f * scale), with_alpha(accent, a),
+                                      with_alpha(accent, 0.0f), with_alpha(accent, 0.0f), with_alpha(accent, a));
+        y += 104.0f * scale;
     }
-    // Everyone else.
-    float y = base + 18.0f * scale;
-    for (std::size_t place = 3; place < h.rows.size() && place < 8; ++place, y += 36.0f * scale) {
-        const auto &row = h.rows[place];
-        const ImVec2 a(left + 60.0f * scale, y), b(left + width - 60.0f * scale, y + 30.0f * scale);
-        draw->AddRectFilled(a, b, with_alpha(row.self ? theme::tile_light : theme::tile_grey, 0.9f), 3.0f * scale);
-        draw->AddRectFilled(a, ImVec2(a.x + 6.0f * scale, b.y), row.color);
-        shadowed(draw, bold, 17.0f * scale, ImVec2(a.x + 18.0f * scale, a.y + 5.0f * scale), theme::white, std::format("{}. {}", place + 1, row.name));
-        const auto extent = bold->CalcTextSizeA(17.0f * scale, FLT_MAX, 0.0f, row.value.c_str());
-        shadowed(draw, bold, 17.0f * scale, ImVec2(b.x - 12.0f * scale - extent.x, a.y + 5.0f * scale), theme::white, row.value);
+
+    const std::size_t shown = std::min<std::size_t>(h.rows.size(), 8);
+    std::size_t self_place = 0;
+    for (std::size_t i = 0; i < h.rows.size(); ++i)
+        if (h.rows[i].self) self_place = i + 1;
+    for (std::size_t i = 0; i < shown; ++i) {
+        const auto &row = h.rows[i];
+        const bool podium = i < 3;
+        const float tall = (i == 0 ? 104.0f : podium ? 68.0f : 40.0f) * scale;
+        const float a = appear(0.25f + 0.12f * static_cast<float>(i)), slide = (1.0f - a) * -60.0f * scale;
+        const float left = x + slide, end = right + slide;
+        const ImU32 badge = podium ? metal[i] : grey;
+        // The band, darker for the podium, and a stripe in the place's metal at its edge.
+        band(draw, ImVec2(0, y), ImVec2(end + 120.0f * scale, y + tall), (podium ? 0.72f : 0.55f) * a, 1);
+        draw->AddRectFilled(ImVec2(left - 18.0f * scale, y), ImVec2(left - 12.0f * scale, y + tall), with_alpha(badge, a));
+        // The place: shiny plates for the podium ("1ST" gold under the winner's crown, "2ND" silver,
+        // "3RD" bronze), plain grey text for the rest.
+        const std::string place = ordinal(i + 1);
+        const float place_size = (i == 0 ? 34.0f : podium ? 26.0f : 19.0f) * scale;
+        const float place_w = (i == 0 ? 112.0f : podium ? 92.0f : 58.0f) * scale;
+        const float t = static_cast<float>(now);
+        if (i == 0) {
+            crown(draw, ImVec2(left + place_w * 0.5f, y + 2.0f * scale), 40.0f * scale, with_alpha(metal[0], a));
+            shiny_badge(draw, ImVec2(left, y + 44.0f * scale), ImVec2(left + place_w - 6.0f * scale, y + tall - 6.0f * scale), metal[0], heading,
+                        place_size, place, a, t, 0.0f, true);
+        } else if (podium) {
+            shiny_badge(draw, ImVec2(left, y + 9.0f * scale), ImVec2(left + place_w - 8.0f * scale, y + tall - 9.0f * scale), badge, heading,
+                        place_size, place, a, t, 0.35f * static_cast<float>(i), false);
+        } else {
+            soft_text(draw, heading, place_size, ImVec2(left, y + (tall - place_size) * 0.5f), with_alpha(badge, a), place);
+        }
+        // The player's colour, their name and their score.
+        const float name_size = (i == 0 ? 34.0f : podium ? 25.0f : 18.0f) * scale;
+        const float name_x = left + place_w + 8.0f * scale;
+        const float name_y = y + (tall - name_size) * 0.5f - (i == 0 ? 2.0f * scale : 0.0f);
+        draw->AddRectFilled(ImVec2(name_x, name_y + name_size * 0.15f), ImVec2(name_x + 5.0f * scale, name_y + name_size * 0.95f), with_alpha(row.color, a));
+        soft_text(draw, i == 0 ? heading : bold, name_size, ImVec2(name_x + 14.0f * scale, name_y), with_alpha(white, a), row.name);
+        const float value_size = (i == 0 ? 26.0f : podium ? 21.0f : 17.0f) * scale;
+        soft_text(draw, heading, value_size, ImVec2(end - text_width(heading, value_size, row.value), y + (tall - value_size) * 0.5f),
+                  with_alpha(i == 0 ? metal[0] : white, a), row.value);
+        if (row.self) {
+            draw->AddRectFilledMultiColor(ImVec2(left - 12.0f * scale, y + tall - 3.0f * scale), ImVec2(end + 60.0f * scale, y + tall),
+                                          with_alpha(accent, a), with_alpha(accent, 0.0f), with_alpha(accent, 0.0f), with_alpha(accent, a));
+            const float you_x = name_x + 14.0f * scale + text_width(i == 0 ? heading : bold, name_size, row.name) + 10.0f * scale;
+            soft_text(draw, bold, 13.0f * scale, ImVec2(you_x, name_y + name_size - 15.0f * scale), with_alpha(accent, a), "YOU");
+        }
+        y += tall + (podium ? 8.0f : 4.0f) * scale;
     }
-    centred(draw, bold, 16.0f * scale, mid, top + card_h - 30.0f * scale, theme::grey_text,
-            std::format("Closing in {} s", (h.closing_ms + 999) / 1000));
+    // Where the local player finished, when it was off the podium, and when it all closes.
+    const float a = appear(0.4f + 0.12f * static_cast<float>(shown));
+    y += 10.0f * scale;
+    if (self_place > 3)
+        soft_text(draw, heading, 20.0f * scale, ImVec2(x, y), with_alpha(white, a), "YOU FINISHED " + ordinal(self_place));
+    if (self_place > 3) y += 30.0f * scale;
+    soft_text(draw, bold, 15.0f * scale, ImVec2(x, y), with_alpha(grey, a), std::format("Closing in {} s", (h.closing_ms + 999) / 1000));
 }
 } // namespace
 

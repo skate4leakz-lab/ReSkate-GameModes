@@ -149,6 +149,7 @@ struct State {
     std::uint64_t placing_tick{};
     // `mode debug states on`: every physics state change goes to the log (finding grinds and manuals).
     bool log_states{};
+    std::uint64_t results_preview_until{}; // `mode results`: a sample results screen until then
     std::uint32_t logged_state{};
     std::mutex hud_mutex;
     overlay::ModesHud hud;
@@ -1220,6 +1221,25 @@ void build_hud(State &s, std::uint64_t now) {
             h.tags.clear();
         }
     }
+    // `mode results`: the results screen with made-up players, to see it without playing a game.
+    if (!h.active && now < s.results_preview_until) {
+        h.active = h.results = true;
+        h.title = "Hall of Meat";
+        const std::pair<const char *, std::uint32_t> sample[]{{"Huntredbanzzz", 0xff3c8cffU}, {"skate4leakz", 0xff50d26eU}, {"DingoShen", 0xffff6ad2U},
+                                                              {"kickflipkid", 0xff3cd2ffU},   {"bailmaster", 0xffb48cffU}};
+        const char *values[]{"48,210", "41,885", "39,402", "22,760", "12,915"};
+        for (std::size_t i = 0; i < std::size(sample); ++i) {
+            overlay::ModesHudRow row;
+            row.name = i == 1 ? name_of(s, self_id(s)) : sample[i].first;
+            row.color = sample[i].second;
+            row.value = values[i];
+            row.self = i == 1;
+            h.rows.push_back(std::move(row));
+        }
+        h.winner = h.rows.front().name;
+        h.winner_value = h.rows.front().value;
+        h.closing_ms = static_cast<std::uint32_t>(s.results_preview_until - now);
+    }
     // What the Game Modes page of the ReSkate menu shows and offers.
     overlay::ModesMenu m;
     m.bone_cam = bone_cam_setting();
@@ -1489,6 +1509,10 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         if (!pick) return s.offers.empty() ? "error: there is no game to join." : "error: which one? mode games lists them.";
         const auto offer = *pick;
         return join_offer(s, offer, now);
+    }
+    if (v == "results") {
+        s.results_preview_until = now + 12000;
+        return "Showing a sample results screen for 12 seconds.";
     }
     if (v == "bounce") {
         const auto describe = [&] {
