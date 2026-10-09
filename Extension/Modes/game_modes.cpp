@@ -484,7 +484,9 @@ void track_bail(State &s, std::uint32_t physics, float vertical, std::uint64_t n
     if (bailed && !s.bail.active) {
         logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: bail (state {} -> {}) at {:.1f} m/s.",
                      s.previous_state, physics, s.recent_speed);
-        if (!official_meat()) bone_cam_bail();
+        // ReSkate's own Hall of Meat replaces the Bone Cam wherever it runs (its switch, or a Hall of
+        // Meat game holding it on); the Bone Cam stands in only on a game build it does not know.
+        if (!hall_of_meat::available()) bone_cam_bail();
         if (s.line.tricks) popup(s, "Line lost!");
         s.line = {};
         // The drop counts from the highest the skater was in the last few seconds: a fall is often
@@ -1369,6 +1371,8 @@ void build_hud(State &s, std::uint64_t now) {
     overlay::ModesMenu m;
     m.bone_cam = bone_cam_setting();
     m.bone_cam_ringing = bone_cam_ringing();
+    m.official_meat = hall_of_meat::available();
+    m.meat_every_bail = hall_of_meat::switched_on();
     if (s.game) {
         const auto &g = *s.game;
         m.in_game = true;
@@ -1613,7 +1617,17 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
     const auto now = now_ms();
     const std::string v(verb);
     if (v.empty() || v == "help" || v == "list") return help();
-    if (v == "bonecam") return bone_cam_command(arguments);
+    if (v == "bonecam") {
+        // With ReSkate's own Hall of Meat, `on` / `off` / `meat` are its switch (every bail, or Hall of
+        // Meat games only); the Bone Cam keeps the choice for a game build without it.
+        const auto word = arguments.empty() ? std::string() : arguments[0];
+        if (hall_of_meat::available() && (word == "on" || word == "off" || word == "meat")) {
+            (void)bone_cam_command(arguments);
+            hall_of_meat::set_enabled(word == "on");
+            return word == "on" ? "Hall of Meat shows on every bail." : "Hall of Meat shows in Hall of Meat games.";
+        }
+        return bone_cam_command(arguments);
+    }
     if (v == "games") {
         if (s.offers.empty()) return "No other games right now.";
         std::string text = "Open games (mode join <n>):";

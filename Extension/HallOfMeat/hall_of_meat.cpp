@@ -189,6 +189,8 @@ bool enabled() noexcept {
     return available() && (state().on.load(std::memory_order_acquire) || state().forced.load(std::memory_order_acquire));
 }
 
+bool switched_on() noexcept { return available() && state().on.load(std::memory_order_acquire); }
+
 namespace {
 // The switch or the game mode changed: No Bail's hook follows whether it is on now (off, the physics
 // step pays nothing for it), and switching it off ends any bail.

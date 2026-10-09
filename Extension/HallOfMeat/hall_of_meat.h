@@ -39,6 +39,7 @@ void set_enabled(bool enabled) noexcept;
 // overlay's model (overlay::HallOfMeatModel), the console directly.
 bool available() noexcept;
 bool enabled() noexcept; // the switch, or a game mode holding it on
+bool switched_on() noexcept; // the player's own switch alone
 
 // Game Modes' Hall of Meat game: on while one is played, whatever the switch says, and not saved.
 void set_forced(bool forced) noexcept;

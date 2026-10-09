@@ -29,7 +29,7 @@ struct ModeInfo {
 constexpr std::array<ModeInfo, 7> mode_info{{
     {"jam", "SPOT JAM", "Land lines inside the area. Every line adds to your score; highest total wins.", nullptr},
     {"1up", "1-UP", "Take turns. Beat the last score or take a strike; last one standing wins.", nullptr},
-    {"meat", "HALL OF MEAT", "Bail as hard as you can. Speed, drops and tumbling score; most meat wins. Bone Cam included.", nullptr},
+    {"meat", "HALL OF MEAT", "Bail as hard as you can. Every bail scores its Meat; most meat wins. Your bones show through your skater.", nullptr},
     {"race", "DEATHRACE", "Skate 3 style: everyone lines up at the start, races through every gate in order, first over the finish wins.", "ROUTE"},
     {"domination", "DOMINATION", "Take spots with your best line there. Every second you hold one scores.", "SPOTS"},
     {"graffiti", "GRAFFITI", "Grind it, gap it: what you skate takes your colour. A bigger line steals it. Most tags wins.", nullptr},
@@ -187,6 +187,17 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
         end_card();
     }
 
+    if (m.official_meat) {
+        // ReSkate's own Hall of Meat: the skeleton through your skater, the Meat card, slow motion on a break.
+        begin_card(menu, "modes-bonecam", "HALL OF MEAT", "Your bones show through your skater when you bail, with the bail's Meat card.");
+        int every = m.meat_every_bail ? 1 : 0;
+        if (choice(menu, "modes-meat-when", every, {"HALL OF MEAT GAMES", "EVERY BAIL"}))
+            command(menu, callbacks, every == 1 ? "bonecam on" : "bonecam meat");
+        note("Hall of Meat games always show it. EVERY BAIL shows it in free skate too (the same switch as Custom Stuff > Player > Hall of Meat).");
+        end_card();
+        ImGui::EndChild();
+        return;
+    }
     begin_card(menu, "modes-bonecam", "BONE CAM", "Skate 2's X-ray bail view: your bones, and the ones you broke.");
     int when = m.bone_cam == "on" ? 1 : m.bone_cam == "off" ? 2 : 0;
     if (choice(menu, "modes-bonecam-when", when, {"HALL OF MEAT", "EVERY BAIL", "OFF"}))

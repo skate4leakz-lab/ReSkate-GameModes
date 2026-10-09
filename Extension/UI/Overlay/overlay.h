@@ -460,6 +460,9 @@ struct ModesMenu {
     std::string missing;          // what `mode start` still needs
     std::string bone_cam;         // "meat", "on" or "off"
     bool bone_cam_ringing = true; // a concussion's ringing is on (not muted)
+    // ReSkate's own Hall of Meat (Extension/HallOfMeat) runs on this game build: it replaces the Bone
+    // Cam, and `meat_every_bail` is its switch (on: every bail in free skate too).
+    bool official_meat{}, meat_every_bail{};
     float area_radius{};          // > 0: the area is a circle
     std::string placing;          // "circle", "corners", "points" while placing on the skater; else empty
     std::vector<ModesHudOffer> offers; // other players' games, to join from the menu
