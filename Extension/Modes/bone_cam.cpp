@@ -71,7 +71,8 @@ constexpr Span spans[]{
 };
 // A joint that stops dead hurts the bone beside it: cracked (or sprained, torn...) past `crack`
 // m/s of speed lost into what it hit, broken past `snap`. Each bone has its own limits, roughly as
-// bodies go: ankles, wrists and collarbones give first; the femur and pelvis take the most.
+// bodies go: ankles, wrists and collarbones give first; the femur and pelvis take the most. A drop
+// of about 2.5 m (7 m/s) onto one part is where it starts to hurt; a normal jump hurts nothing.
 struct Watch {
     std::uint16_t joint;
     BoneSprite sprite;
@@ -79,19 +80,19 @@ struct Watch {
     float crack, snap;
 };
 constexpr Watch watches[]{
-    {joint::head, BoneSprite::skull, "SKULL", "CONCUSSION", "SKULL", "FRACTURED", 4.0f, 7.5f},
-    {joint::right_hand, BoneSprite::forearm_r, "RIGHT WRIST", "SPRAINED", "RIGHT RADIUS", "SNAPPED", 4.5f, 7.5f},
-    {joint::left_hand, BoneSprite::forearm_l, "LEFT WRIST", "SPRAINED", "LEFT RADIUS", "SNAPPED", 4.5f, 7.5f},
-    {joint::right_fore_arm, BoneSprite::humerus_r, "RIGHT ELBOW", "DISLOCATED", "RIGHT HUMERUS", "FRACTURED", 5.5f, 9.0f},
-    {joint::left_fore_arm, BoneSprite::humerus_l, "LEFT ELBOW", "DISLOCATED", "LEFT HUMERUS", "FRACTURED", 5.5f, 9.0f},
-    {joint::right_arm, BoneSprite::torso, "RIGHT COLLARBONE", "CRACKED", "RIGHT COLLARBONE", "BROKEN", 5.0f, 8.0f},
-    {joint::left_arm, BoneSprite::torso, "LEFT COLLARBONE", "CRACKED", "LEFT COLLARBONE", "BROKEN", 5.0f, 8.0f},
-    {joint::spine2, BoneSprite::torso, "RIBS", "CRACKED", "RIBS", "BROKEN", 6.0f, 9.5f},
-    {joint::hips, BoneSprite::torso, "PELVIS", "BRUISED", "PELVIS", "FRACTURED", 7.0f, 11.0f},
-    {joint::right_leg, BoneSprite::femur_r, "RIGHT KNEE", "TORN", "RIGHT FEMUR", "FRACTURED", 6.5f, 10.5f},
-    {joint::left_leg, BoneSprite::femur_l, "LEFT KNEE", "TORN", "LEFT FEMUR", "FRACTURED", 6.5f, 10.5f},
-    {joint::right_foot, BoneSprite::shin_r, "RIGHT ANKLE", "SPRAINED", "RIGHT TIBIA", "SNAPPED", 5.0f, 8.0f},
-    {joint::left_foot, BoneSprite::shin_l, "LEFT ANKLE", "SPRAINED", "LEFT TIBIA", "SNAPPED", 5.0f, 8.0f},
+    {joint::head, BoneSprite::skull, "SKULL", "CONCUSSION", "SKULL", "FRACTURED", 5.5f, 9.5f},
+    {joint::right_hand, BoneSprite::forearm_r, "RIGHT WRIST", "SPRAINED", "RIGHT RADIUS", "SNAPPED", 6.5f, 9.5f},
+    {joint::left_hand, BoneSprite::forearm_l, "LEFT WRIST", "SPRAINED", "LEFT RADIUS", "SNAPPED", 6.5f, 9.5f},
+    {joint::right_fore_arm, BoneSprite::humerus_r, "RIGHT ELBOW", "DISLOCATED", "RIGHT HUMERUS", "FRACTURED", 7.5f, 11.0f},
+    {joint::left_fore_arm, BoneSprite::humerus_l, "LEFT ELBOW", "DISLOCATED", "LEFT HUMERUS", "FRACTURED", 7.5f, 11.0f},
+    {joint::right_arm, BoneSprite::torso, "RIGHT COLLARBONE", "CRACKED", "RIGHT COLLARBONE", "BROKEN", 7.0f, 10.0f},
+    {joint::left_arm, BoneSprite::torso, "LEFT COLLARBONE", "CRACKED", "LEFT COLLARBONE", "BROKEN", 7.0f, 10.0f},
+    {joint::spine2, BoneSprite::torso, "RIBS", "CRACKED", "RIBS", "BROKEN", 8.0f, 11.5f},
+    {joint::hips, BoneSprite::torso, "PELVIS", "BRUISED", "PELVIS", "FRACTURED", 9.0f, 13.0f},
+    {joint::right_leg, BoneSprite::femur_r, "RIGHT KNEE", "TORN", "RIGHT FEMUR", "FRACTURED", 8.5f, 12.5f},
+    {joint::left_leg, BoneSprite::femur_l, "LEFT KNEE", "TORN", "LEFT FEMUR", "FRACTURED", 8.5f, 12.5f},
+    {joint::right_foot, BoneSprite::shin_r, "RIGHT ANKLE", "SPRAINED", "RIGHT TIBIA", "SNAPPED", 7.0f, 10.0f},
+    {joint::left_foot, BoneSprite::shin_l, "LEFT ANKLE", "SPRAINED", "LEFT TIBIA", "SNAPPED", 7.0f, 10.0f},
 };
 // A concussion's grade from the hardest hit the head took (m/s lost), and how long its after-
 // effects last. Below the first, no concussion.
@@ -101,7 +102,7 @@ struct Concussion {
     std::uint64_t lasts_ms;
 };
 constexpr Concussion concussions[]{
-    {4.0f, "MILD CONCUSSION", 4000}, {5.5f, "CONCUSSION", 7000}, {7.0f, "SEVERE CONCUSSION", 10000}, {8.5f, "KNOCKED OUT", 12000}};
+    {5.5f, "MILD CONCUSSION", 4000}, {7.0f, "CONCUSSION", 7000}, {8.5f, "SEVERE CONCUSSION", 10000}, {10.0f, "KNOCKED OUT", 12000}};
 constexpr std::size_t watch_count = std::size(watches);
 
 enum class Setting { meat, on, off };
@@ -281,6 +282,13 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
     for (const auto &w : watches) lowest = std::min(lowest, s.joints[w.joint].position[1]);
     auto broken = static_cast<std::size_t>(std::count(s.level.begin(), s.level.end(), std::uint8_t{2}));
     const float decay = usable ? std::exp(-seconds / 0.33f) : 0.0f;
+    // Whether the body as a whole has stopped falling: the hips' vertical speed. In the air the
+    // whole body drops together and nothing has hit anything, however the limbs swing.
+    float hips_vertical = 0;
+    for (std::size_t w = 0; w < watch_count; ++w)
+        if (watches[w].joint == joint::hips && s.have_position && usable)
+            hips_vertical = (s.joints[joint::hips].position[1] - s.position[w][1]) / seconds;
+    const bool body_stopped = hips_vertical > -2.5f;
     for (std::size_t w = 0; w < watch_count; ++w) {
         const auto &p = s.joints[watches[w].joint].position;
         if (s.have_position && usable) {
@@ -304,8 +312,13 @@ void find_impacts(State &s, std::uint64_t now, bool injuring = true) {
                 }
                 s.hips_speeds[s.hips_next++ % s.hips_speeds.size()] = {now, speed};
             }
-            // Joints touching the ground, or any joint while the whole body stops dead (a pole, a wall).
-            const bool touching = p[1] - lowest <= 0.3f || (s.slam_time && now - s.slam_time <= 150);
+            // On the ground: among the body's lowest joints, the body no longer falling, and this
+            // joint itself stopped (not just swinging past the others). Or against a wall or pole:
+            // the whole body stopping dead, this joint with it.
+            const bool stopped = std::abs(v[1]) < 2.5f;
+            const bool on_ground = p[1] - lowest <= 0.3f && body_stopped && stopped;
+            const bool against = s.slam_time && now - s.slam_time <= 150 && std::hypot(side, v[1]) < 3.0f;
+            const bool touching = on_ground || against;
             if (injuring && s.have_velocity && touching) {
                 // The speed it carried into the ground and lost, plus some of the speed along it
                 // lost (a scrape or a wall).
@@ -414,7 +427,7 @@ void publish_effects(State &s, std::uint64_t now, overlay::BoneCam &cam) {
     if (const auto *c = concussion_of(s.head_hit); c && now >= s.started + duration_ms) {
         const auto into = now - (s.started + duration_ms);
         if (into < c->lasts_ms) {
-            const float grade = std::clamp((s.head_hit - 4.0f) / 5.0f, 0.0f, 1.0f);
+            const float grade = std::clamp((s.head_hit - 5.5f) / 5.0f, 0.0f, 1.0f);
             cam.daze = (0.35f + 0.65f * grade) * (1.0f - static_cast<float>(into) / c->lasts_ms);
             if (!s.rang) {
                 s.rang = true;
@@ -462,7 +475,7 @@ void publish(State &s, std::uint64_t now, bool bones = true) {
     }
     // The head: a fractured skull, and the concussion graded by how hard it hit.
     if (s.level[0] == 2) cam.injuries.push_back({"SKULL", "FRACTURED", true});
-    if (const auto *c = concussion_of(s.head_hit)) cam.injuries.push_back({"HEAD", c->what, c->from >= 7.0f});
+    if (const auto *c = concussion_of(s.head_hit)) cam.injuries.push_back({"HEAD", c->what, c->from >= 8.5f});
     std::stable_sort(cam.injuries.begin(), cam.injuries.end(), [](const auto &a, const auto &b) { return a.severe > b.severe; });
     std::lock_guard lock(s.mutex);
     s.shown = std::move(cam);
