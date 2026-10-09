@@ -422,6 +422,14 @@ void skate_flow() {
     setup.game = 8;
     setup.settings = s;
     check(decode(encode(setup)) == setup, "the trick kinds go with the setup");
+    Message hello;
+    hello.kind = Message::Kind::hello;
+    hello.leader = b;
+    hello.game = 1;
+    check(decode(encode(hello)) == hello, "a hello round trips");
+    auto other = encode(hello);
+    other[1] = static_cast<std::uint8_t>(wire_version - 1);
+    check(!decode(other) && message_version(other) == wire_version - 1, "another version's hello is told apart, not read");
 }
 } // namespace
 

@@ -130,6 +130,12 @@ struct State {
     std::string popup;
     std::uint64_t popup_at{};
     bool version_noticed{};
+    // Who in the session has game modes: heard from (a hello or anything else) and when, and the
+    // version of those whose messages this game cannot read; each told about once.
+    std::map<std::uint64_t, std::uint64_t> modded;
+    std::map<std::uint64_t, std::uint8_t> other_version;
+    std::set<std::uint64_t> version_told;
+    std::uint64_t hello_sent{};
     std::vector<std::string> notices;
     std::vector<std::vector<std::uint8_t>> outbox;
     // Placing the area or the points on the skater, the way skate. sets up a jam session: skate
@@ -1570,6 +1576,13 @@ void build_hud(State &s, std::uint64_t now) {
     m.bone_cam = bone_cam_setting();
     m.bone_cam_ringing = bone_cam_ringing();
     m.spectate = s.spectate;
+    m.in_session = s.session;
+    for (const auto id : s.present) {
+        const auto heard = s.modded.find(id);
+        if (heard == s.modded.end() || now - heard->second > 20000) ++m.lobby_without;
+        else if (s.other_version.contains(id)) m.lobby_outdated.push_back(name_of(s, id));
+        else m.lobby_modded.push_back(name_of(s, id));
+    }
     m.goofy = s.goofy;
     m.official_meat = hall_of_meat::available();
     m.meat_every_bail = hall_of_meat::switched_on();
@@ -1699,6 +1712,16 @@ std::vector<std::vector<std::uint8_t>> tick(const SessionInput &input) {
         // S.K.A.T.E. and the trick logger read skate.'s trick list through Hall of Meat's UI model
         // write hook, which the tap keeps on while it is set.
         run_skate(s, now);
+        // Everyone with game modes says so every few seconds: the menu lists them, and a game of
+        // another version that cannot read it tells its player to update.
+        if (s.session && now - s.hello_sent >= 5000) {
+            Message hello;
+            hello.kind = Message::Kind::hello;
+            hello.leader = self_id(s);
+            hello.game = 1;
+            if (hello.leader) send(s, hello);
+            s.hello_sent = now;
+        }
         const bool tap = trick_log().on.load(std::memory_order_acquire) || trick_feed().on.load(std::memory_order_acquire);
         static bool tapped = false;
         if (tap != tapped) {
@@ -1723,14 +1746,28 @@ bool receive(std::uint64_t sender, std::span<const std::uint8_t> bytes) {
     auto &s = state();
     const auto decoded = decode(bytes);
     if (!decoded) {
-        if (message_version(bytes) != wire_version && !s.version_noticed) {
-            s.version_noticed = true;
-            notice(s, name_of(s, sender) + " has a different version of ReSkate game modes: update to play together.");
+        // Another version's message (a hello, every few seconds, at the least): say whose, and which of
+        // the two has to restart to update.
+        if (const auto version = message_version(bytes); version && version != wire_version) {
+            s.other_version[sender] = version;
+            s.modded[sender] = now_ms();
+            if (s.version_told.insert(sender).second) {
+                notice(s, version > wire_version
+                              ? name_of(s, sender) + " has a newer ReSkate game modes: restart your game so it updates, then you can play together."
+                              : name_of(s, sender) + " has an older ReSkate game modes: they need to restart their game so it updates.");
+                logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: player {:#x} speaks version {} (this game {}).", sender,
+                             version, wire_version);
+            }
         }
         return true;
     }
     const auto &m = *decoded;
     const auto now = now_ms();
+    if (!s.modded.contains(sender))
+        logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: player {:#x} has game modes (version {}).", sender, wire_version);
+    s.modded[sender] = now;
+    s.other_version.erase(sender);
+    if (m.kind == Message::Kind::hello) return true;
     const bool ours = s.game && s.game->leader == m.leader && s.game->id == m.game;
     switch (m.kind) {
     case Message::Kind::setup: {

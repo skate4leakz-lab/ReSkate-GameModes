@@ -141,7 +141,9 @@ struct Message {
         leave = 4, // a player: out of the game
         end = 5,   // leader: the game is over or cancelled
         join = 6,  // a player with game modes saw the setup and plays (only they are added)
-        tags = 7   // leader: Graffiti tag shapes, from index `first` (state messages carry only their owners)
+        tags = 7,  // leader: Graffiti tag shapes, from index `first` (state messages carry only their owners)
+        hello = 8  // anyone with game modes, every few seconds: who has them, and (by the version byte) which
+                   // (`leader` is the sender, `game` 1). A game of another version that cannot read it says so.
     };
     Kind kind = Kind::setup;
     std::uint8_t version = wire_version;

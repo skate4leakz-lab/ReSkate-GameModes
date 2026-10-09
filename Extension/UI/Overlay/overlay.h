@@ -476,6 +476,11 @@ struct ModesMenu {
     std::uint8_t trick_kinds{0x0f}; // S.K.A.T.E.: the kinds of trick that may be set (1 flips, 2 grabs, 4 grinds, 8 manuals)
     bool spectate = true;           // S.K.A.T.E.: the camera follows whoever is up
     bool goofy{};                   // S.K.A.T.E.: flick diagrams for a goofy stance
+    // The other players in the session: who has game modes (this version), who has another one
+    // and has to update, and how many have none (they cannot see or join a game).
+    bool in_session{};
+    std::vector<std::string> lobby_modded, lobby_outdated;
+    int lobby_without{};
     float area_radius{};          // > 0: the area is a circle
     std::string placing;          // "circle", "corners", "points" while placing on the skater; else empty
     std::vector<ModesHudOffer> offers; // other players' games, to join from the menu

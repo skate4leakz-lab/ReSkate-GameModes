@@ -422,7 +422,8 @@ std::vector<std::uint8_t> encode(const Message &m) {
         break;
     case Message::Kind::leave:
     case Message::Kind::end:
-    case Message::Kind::join: break;
+    case Message::Kind::join:
+    case Message::Kind::hello: break;
     default: throw std::invalid_argument("unknown game mode message");
     }
     return w.bytes;
@@ -440,7 +441,7 @@ std::optional<Message> decode(std::span<const std::uint8_t> bytes) noexcept {
         m.version = static_cast<std::uint8_t>(r.integer(1));
         if (m.version != wire_version) return std::nullopt;
         const auto kind = r.integer(1);
-        if (kind < 1 || kind > 7) return std::nullopt;
+        if (kind < 1 || kind > 8) return std::nullopt;
         m.kind = static_cast<Message::Kind>(kind);
         m.leader = r.integer(8);
         m.game = static_cast<std::uint32_t>(r.integer(4));
@@ -535,7 +536,8 @@ std::optional<Message> decode(std::span<const std::uint8_t> bytes) noexcept {
             break;
         case Message::Kind::leave:
         case Message::Kind::end:
-        case Message::Kind::join: break;
+        case Message::Kind::join:
+        case Message::Kind::hello: break;
         default: return std::nullopt;
         }
         if (!r.ok || r.at != bytes.size()) return std::nullopt;

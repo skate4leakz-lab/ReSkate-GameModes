@@ -90,6 +90,22 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
         }
         end_card();
     }
+    // Who in the lobby can play: game modes only reach players who have them, in the same version.
+    if (m.in_session) {
+        begin_card(menu, "modes-lobby", "PLAYERS HERE", "Only players with ReSkate game modes (the same version) see and join games.");
+        const auto list = [](const std::vector<std::string> &names) {
+            std::string text;
+            for (const auto &name : names) text += (text.empty() ? "" : ", ") + name;
+            return text;
+        };
+        info(menu, "Can play", m.lobby_modded.empty() ? std::string("nobody yet") : list(m.lobby_modded));
+        if (!m.lobby_outdated.empty()) {
+            info(menu, "Need to update", list(m.lobby_outdated));
+            warn("Players on another version: close skate. and start it again with ReSkateLauncher.exe to update (whoever is older).");
+        }
+        if (m.lobby_without > 0) info(menu, "No game modes", std::to_string(m.lobby_without) + (m.lobby_without == 1 ? " player" : " players"));
+        end_card();
+    }
     if (!m.in_game) {
         begin_card(menu, "modes-new", "START A GAME", "Pick a Skate 3 online mode. Everyone in your lobby with game modes gets an invite.");
         choice(menu, "modes-pick-a", p.pick, {"SPOT JAM", "1-UP", "HALL OF MEAT"});
