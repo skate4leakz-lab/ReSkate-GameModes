@@ -292,13 +292,16 @@ void load_skate_fonts(SkateMenu& menu) {
     static const ImWchar ranges[]{0x0020, 0x024F, 0x0400, 0x052F, 0x2000, 0x206F, 0x20A0, 0x20CF, 0x2190, 0x21FF, 0};
     std::array<char, MAX_PATH> windows{};
     const auto length = GetWindowsDirectoryA(windows.data(), static_cast<UINT>(windows.size()));
-    const auto font = [&](const wchar_t* resource, const char* filename, float size) -> ImFont* {
+    // Large text (the game modes HUD) is numbers, capitals and short words: printable ASCII keeps
+    // the big bakes small in the atlas.
+    static const ImWchar ascii[]{0x0020, 0x007E, 0};
+    const auto font = [&](const wchar_t* resource, const char* filename, float size, const ImWchar* glyphs = ranges) -> ImFont* {
         if (resource)
-            if (auto* loaded = embedded_font(resource, size, ranges)) return loaded;
+            if (auto* loaded = embedded_font(resource, size, glyphs)) return loaded;
         if (length && length < windows.size()) {
             const auto path = std::string(windows.data()) + "\\Fonts\\" + filename;
             if (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES)
-                if (auto* loaded = atlas->AddFontFromFileTTF(path.c_str(), size)) return loaded;
+                if (auto* loaded = atlas->AddFontFromFileTTF(path.c_str(), size, nullptr, glyphs)) return loaded;
         }
         ImFontConfig config;
         config.SizePixels = size;
@@ -311,6 +314,8 @@ void load_skate_fonts(SkateMenu& menu) {
     menu.heading = font(L"FONT_HEADING", "arialbd.ttf", 22);
     menu.title = font(L"FONT_BRUSH", "arialbi.ttf", 44);
     menu.mono = font(nullptr, "consola.ttf", 15);
+    menu.title_large = font(L"FONT_BRUSH", "arialbi.ttf", 128, ascii);
+    menu.heading_large = font(L"FONT_HEADING", "arialbd.ttf", 64, ascii);
 }
 
 void draw_skate_menu(SkateMenu& menu, const Model& model, const CallbacksV3& callbacks,

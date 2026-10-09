@@ -104,6 +104,10 @@ struct SkateMenu {
     ImFont* title = nullptr;    // brushed page titles
     ImFont* heading = nullptr;  // tile and section headers
     ImFont* mono = nullptr;
+    // The same faces baked large (printable ASCII only), for text drawn far past the sizes above
+    // (the game modes HUD's countdown, callouts and results), which would show the atlas's pixels.
+    ImFont* title_large = nullptr;   // the brush, 128 px
+    ImFont* heading_large = nullptr; // the heading face, 64 px
 };
 void load_skate_fonts(SkateMenu& menu);
 void draw_skate_menu(SkateMenu& menu, const Model& model, const CallbacksV3& callbacks,

@@ -40,7 +40,18 @@ ImU32 with_alpha(ImU32 colour, float alpha) {
     return (colour & ~IM_COL32_A_MASK) | (a << IM_COL32_A_SHIFT);
 }
 float seconds_since(Clock::time_point at) { return std::chrono::duration<float>(Clock::now() - at).count(); }
+// The face to draw `text` with at `size`: the large bake of the title or heading face once the text is
+// drawn well past their menu sizes (a stretched small bake shows its pixels), when the text is
+// plain ASCII (all the large bakes hold).
+ImFont *crisp(ImFont *font, float size, const std::string &text) {
+    const auto &menu = state().menu;
+    if (std::any_of(text.begin(), text.end(), [](char c) { return static_cast<unsigned char>(c) >= 0x80; })) return font;
+    if (font == menu.title && menu.title_large && size > 52.0f) return menu.title_large;
+    if ((font == menu.heading || font == menu.bold) && menu.heading_large && size > 27.0f) return menu.heading_large;
+    return font;
+}
 void shadowed(ImDrawList *draw, ImFont *font, float size, ImVec2 at, ImU32 colour, const std::string &text) {
+    font = crisp(font, size, text);
     const float offset = std::max(1.0f, size / 16.0f);
     const auto alpha = static_cast<float>((colour >> IM_COL32_A_SHIFT) & 0xff) / 255.0f;
     draw->AddText(font, size, ImVec2(at.x + offset, at.y + offset), with_alpha(IM_COL32(0, 0, 0, 255), alpha * 0.7f),
@@ -48,7 +59,7 @@ void shadowed(ImDrawList *draw, ImFont *font, float size, ImVec2 at, ImU32 colou
     draw->AddText(font, size, at, colour, text.c_str());
 }
 void centred(ImDrawList *draw, ImFont *font, float size, float x, float y, ImU32 colour, const std::string &text) {
-    const auto extent = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str());
+    const auto extent = crisp(font, size, text)->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str());
     shadowed(draw, font, size, ImVec2(x - extent.x * 0.5f, y), colour, text);
 }
 
@@ -318,6 +329,7 @@ void draw_tag(ImDrawList *draw, const Camera &cam, const ModesHudTag &tag) {
 constexpr ImU32 accent = IM_COL32(255, 168, 0, 255), start_blue = IM_COL32(1, 131, 255, 255);
 
 void soft_text(ImDrawList *draw, ImFont *font, float size, ImVec2 at, ImU32 colour, const std::string &text) {
+    font = crisp(font, size, text);
     const auto alpha = static_cast<float>((colour >> IM_COL32_A_SHIFT) & 0xff) / 255.0f;
     const float blur = std::max(1.0f, size / 14.0f);
     for (const auto &[dx, dy] : {std::pair{-blur, 0.0f}, {blur, 0.0f}, {0.0f, -blur}, {0.0f, blur}})
@@ -325,7 +337,9 @@ void soft_text(ImDrawList *draw, ImFont *font, float size, ImVec2 at, ImU32 colo
     draw->AddText(font, size, ImVec2(at.x, at.y + blur * 0.8f), with_alpha(IM_COL32(0, 0, 0, 255), alpha * 0.55f), text.c_str());
     draw->AddText(font, size, at, colour, text.c_str());
 }
-float text_width(ImFont *font, float size, const std::string &text) { return font->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str()).x; }
+float text_width(ImFont *font, float size, const std::string &text) {
+    return crisp(font, size, text)->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str()).x;
+}
 // A dark band fading out to one side, or both (the game's location plate and toasts).
 void band(ImDrawList *draw, ImVec2 a, ImVec2 b, float alpha, int fade) { // fade: -1 to the left, 1 to the right, 0 both ways
     const ImU32 dark = IM_COL32(8, 10, 14, static_cast<int>(255 * alpha)), clear = IM_COL32(8, 10, 14, 0);
@@ -344,6 +358,56 @@ void diamond(ImDrawList *draw, ImVec2 c, float r, ImU32 colour) {
     draw->AddQuadFilled(ImVec2(c.x, c.y - r), ImVec2(c.x + r, c.y), ImVec2(c.x, c.y + r), ImVec2(c.x - r, c.y), colour);
     draw->AddQuad(ImVec2(c.x, c.y - r), ImVec2(c.x + r, c.y), ImVec2(c.x, c.y + r), ImVec2(c.x - r, c.y), IM_COL32(255, 255, 255, 200), std::max(1.0f, r * 0.14f));
 }
+// ---- neon, for the countdown and GO!: clean lines of light, a soft wide glow, a bright body and a
+// hot white core, the way a neon tube looks.
+constexpr ImU32 neon_blue = IM_COL32(0, 229, 255, 255), neon_go = IM_COL32(110, 255, 140, 255);
+ImU32 whiten(ImU32 colour, float t) {
+    const auto c = ImGui::ColorConvertU32ToFloat4(colour);
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(c.x + (1 - c.x) * t, c.y + (1 - c.y) * t, c.z + (1 - c.z) * t, c.w));
+}
+float alpha_of(ImU32 colour) { return static_cast<float>((colour >> IM_COL32_A_SHIFT) & 0xff) / 255.0f; }
+struct NeonLayer {
+    float width, alpha, white;
+};
+constexpr NeonLayer neon_layers[]{{7.0f, 0.05f, 0.0f}, {3.8f, 0.10f, 0.0f}, {2.0f, 0.38f, 0.05f}, {1.0f, 0.95f, 0.30f}, {0.45f, 0.95f, 0.85f}};
+void neon_arc(ImDrawList *draw, ImVec2 c, float r, float from, float to, ImU32 colour, float line) {
+    for (const auto &layer : neon_layers) {
+        draw->PathArcTo(c, r, from, to, 96);
+        draw->PathStroke(with_alpha(whiten(colour, layer.white), layer.alpha * alpha_of(colour)), ImDrawFlags_None, line * layer.width);
+    }
+}
+void neon_dot(ImDrawList *draw, ImVec2 at, float r, ImU32 colour) {
+    const float a = alpha_of(colour);
+    draw->AddCircleFilled(at, r * 3.2f, with_alpha(colour, 0.06f * a), 24);
+    draw->AddCircleFilled(at, r * 1.9f, with_alpha(colour, 0.20f * a), 24);
+    draw->AddCircleFilled(at, r, with_alpha(whiten(colour, 0.3f), a), 20);
+    draw->AddCircleFilled(at, r * 0.5f, with_alpha(IM_COL32(255, 255, 255, 255), a), 16);
+}
+// Text lit like a sign: rings of faint colour round it for the glow, then the letters near white.
+void neon_text(ImDrawList *draw, ImFont *font, float size, ImVec2 at, ImU32 colour, const std::string &text) {
+    font = crisp(font, size, text);
+    const float a = alpha_of(colour);
+    for (const auto &[spread, strength] : {std::pair{0.085f, 0.035f}, std::pair{0.05f, 0.06f}, std::pair{0.022f, 0.12f}})
+        for (int k = 0; k < 12; ++k) {
+            const float angle = 6.2831853f * static_cast<float>(k) / 12.0f;
+            draw->AddText(font, size, ImVec2(at.x + std::cos(angle) * size * spread, at.y + std::sin(angle) * size * spread),
+                          with_alpha(colour, strength * a), text.c_str());
+        }
+    draw->AddText(font, size, at, with_alpha(whiten(colour, 0.82f), a), text.c_str());
+}
+// A short label with its letters spread out, centred on x.
+void spaced_text(ImDrawList *draw, ImFont *font, float size, float x, float y, ImU32 colour, const std::string &text, float spacing) {
+    float total = 0;
+    for (const char ch : text) total += text_width(font, size, std::string(1, ch)) + spacing;
+    total -= spacing;
+    float at = x - total * 0.5f;
+    for (const char ch : text) {
+        const std::string letter(1, ch);
+        soft_text(draw, font, size, ImVec2(at, y), colour, letter);
+        at += text_width(font, size, letter) + spacing;
+    }
+}
+
 // A D-pad as the game draws its prompts, the direction to press lit.
 void dpad_glyph(ImDrawList *draw, ImVec2 c, float size, char lit) {
     const float arm = size * 0.5f, thick = size * 0.34f;
@@ -424,11 +488,21 @@ void draw_centre(ImDrawList *draw, HudState &st, float scale) {
     const auto display = ImGui::GetIO().DisplaySize;
     const float mid = display.x * 0.5f;
     // Countdown: each number pops in.
+    // Neon: a clean ring that drains with each second, a white number with a neon glow, popping in.
     if (h.clock.size() == 1) {
         const float t = static_cast<float>(std::fmod(ImGui::GetTime(), 1.0));
-        const float grow = 1.0f + 0.35f * std::max(0.0f, 1.0f - t * 4.0f), size = 150.0f * scale * grow;
-        soft_text(draw, title, size, ImVec2(mid - text_width(title, size, h.clock) * 0.5f, display.y * 0.30f - (grow - 1.0f) * 60.0f * scale),
-                  accent, h.clock);
+        const float pop = std::max(0.0f, 1.0f - t * 5.0f), grow = 1.0f + 0.18f * pop * pop;
+        const ImVec2 c(mid, display.y * 0.32f);
+        const float r = 74.0f * scale, line = std::max(2.0f, 3.5f * scale);
+        draw->AddCircle(c, r, IM_COL32(255, 255, 255, 22), 96, std::max(1.0f, 1.5f * scale)); // the track, barely there
+        const float left = 1.0f - t, start = -1.5707963f, end = start + 6.2831853f * left;
+        if (left > 0.01f) {
+            neon_arc(draw, c, r, start, end, neon_blue, line);
+            neon_dot(draw, ImVec2(c.x + std::cos(end) * r, c.y + std::sin(end) * r), line * 1.6f, neon_blue);
+        }
+        const float size = 104.0f * scale * grow;
+        neon_text(draw, title, size, ImVec2(c.x - text_width(title, size, h.clock) * 0.5f, c.y - size * 0.56f), neon_blue, h.clock);
+        spaced_text(draw, heading, 15.0f * scale, c.x, c.y - r - 34.0f * scale, with_alpha(neon_blue, 0.9f), "GET READY", 4.0f * scale);
     }
     // The latest callout: a toast under the location plate, sliding in and fading out.
     if (h.banner_serial != st.banner_serial) {
@@ -439,11 +513,18 @@ void draw_centre(ImDrawList *draw, HudState &st, float scale) {
     if (!h.banner.empty() && age < 3.6f) {
         const float in = std::min(1.0f, age / 0.18f), out = age < 3.0f ? 1.0f : (3.6f - age) / 0.6f, alpha = in * out;
         const bool go = h.banner == "GO!";
-        const float size = (go ? 72.0f : 26.0f) * scale, w = text_width(go ? title : heading, size, h.banner);
+        if (go) { // GO! in neon where the countdown was, growing out as it fades
+            const float size = 110.0f * scale * (1.0f + 0.25f * (1.0f - out));
+            neon_text(draw, title, size, ImVec2(mid - text_width(title, size, h.banner) * 0.5f, display.y * 0.32f - size * 0.56f),
+                      with_alpha(neon_go, alpha), h.banner);
+        }
+        const float size = 26.0f * scale, w = text_width(heading, size, h.banner);
         const float y = 178.0f * scale - (1.0f - in) * 14.0f * scale;
+        if (!go) {
         band(draw, ImVec2(mid - w * 0.5f - 160.0f * scale, y - 8.0f * scale), ImVec2(mid + w * 0.5f + 160.0f * scale, y + size + 10.0f * scale), 0.6f * alpha, 0);
-        if (!go) diamond(draw, ImVec2(mid - w * 0.5f - 22.0f * scale, y + size * 0.55f), 9.0f * scale, with_alpha(accent, alpha));
-        soft_text(draw, go ? title : heading, size, ImVec2(mid - w * 0.5f, y), with_alpha(go ? accent : IM_COL32(255, 255, 255, 255), alpha), h.banner);
+        diamond(draw, ImVec2(mid - w * 0.5f - 22.0f * scale, y + size * 0.55f), 9.0f * scale, with_alpha(accent, alpha));
+        soft_text(draw, heading, size, ImVec2(mid - w * 0.5f, y), with_alpha(IM_COL32(255, 255, 255, 255), alpha), h.banner);
+        }
     }
     float bottom = display.y - 175.0f * scale;
     // The placing controls, the game's way: a D-pad glyph lit in its direction, then the action.
@@ -731,8 +812,9 @@ void draw_flag(ImDrawList *draw, const Camera &cam, const Vec3 &p, ImU32 colour,
         if (!name.empty() && size >= 8.0f) {
             const float w = text_width(font, size, name);
             const ImVec2 at(c->x - w * 0.5f, c->y - size * 0.55f);
-            draw->AddText(font, size, ImVec2(at.x + size * 0.06f, at.y + size * 0.06f), IM_COL32(0, 0, 0, 110), name.c_str());
-            draw->AddText(font, size, at, IM_COL32(255, 255, 255, 245), name.c_str());
+            auto *face = crisp(font, size, name);
+            draw->AddText(face, size, ImVec2(at.x + size * 0.06f, at.y + size * 0.06f), IM_COL32(0, 0, 0, 110), name.c_str());
+            draw->AddText(face, size, at, IM_COL32(255, 255, 255, 245), name.c_str());
         } else if (px * 0.4f >= 3.0f) {
             diamond(draw, *c, px * 0.4f, IM_COL32(255, 255, 255, 235));
         }
