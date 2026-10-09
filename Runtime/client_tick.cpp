@@ -232,9 +232,8 @@ void apply_throwdown_modes() {
         // EnableAdvancedParameters adds the host's Customize button and the
         // parameter panel (players, timer, privacy, scored actions) to the
         // throwdown details page; it also ships off.
-        // EnableRace: the race throwdown retail never shipped (game modes' Deathrace research).
         for (const auto* name : {"DingoThrowdowns.EnableSpotBattle", "DingoThrowdowns.EnableSKATE",
-                                 "DingoThrowdowns.EnableAdvancedParameters", "DingoThrowdowns.EnableRace"}) {
+                                 "DingoThrowdowns.EnableAdvancedParameters"}) {
             const auto result = dingosdk::change_named_setting(name, "1", false);
             pending = pending || result.starts_with("error: ");
             results += (results.empty() ? "" : " | ") + result;

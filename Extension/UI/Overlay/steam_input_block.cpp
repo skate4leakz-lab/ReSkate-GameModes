@@ -175,7 +175,7 @@ void put_on_top(std::size_t index, void *exported, void *detour, const char *nam
     logging::printf(logging::Level::info, logging::Channel::input, "XInput: put the D-pad mask back on top of %s (it had been hooked over).", name);
 }
 
-void stay_on_top_of_xinput() noexcept {
+[[maybe_unused]] void stay_on_top_of_xinput() noexcept {
     try {
         const auto module = GetModuleHandleW(L"xinput1_4.dll");
         if (!module) return;
@@ -212,8 +212,10 @@ void hold_game_buttons(std::uint16_t held) noexcept {
     const auto now = GetTickCount64();
     install_steam_blocks(now);
     const bool keeping = hidden_game_buttons.load(std::memory_order_relaxed) != 0;
-    // Before the first press reaches the game: as soon as game modes keep the D-pad.
-    if (keeping) stay_on_top_of_xinput();
+    // XInput is no longer re-patched here (stay_on_top_of_xinput): rewriting a jump in xinput1_4's
+    // exports while the game's threads may be running it could send one to a torn address, and
+    // ReSkate 2.0's input capture already masks XInput and the PlayStation reports while game modes
+    // pause the game's input.
     // What the game asked Steam for while game modes kept the pad, for the log.
     static bool was_keeping = false;
     if (keeping && !was_keeping)

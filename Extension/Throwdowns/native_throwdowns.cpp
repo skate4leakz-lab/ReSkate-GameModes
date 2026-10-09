@@ -16,9 +16,7 @@
 #include <atomic>
 #include <cstring>
 #include <format>
-#include <mutex>
 #include <set>
-#include <string>
 #include <string_view>
 
 // Offline adapters for throwdowns. Each one stands in for a single backend or
@@ -100,19 +98,7 @@ bool mode_available_hook(const char* const* mode) {
         for (std::size_t i = 0; i + 1 < id.size(); ++i)
             if (!memory::peek(text + i, id[i]) || !id[i]) break;
         const std::string_view name(id.data());
-        // Race never shipped (DingoThrowdowns.EnableRace, game modes): its id is not known for
-        // certain, so anything the menu asks about that names a race counts as it.
-        const bool race = name.find("Race") != std::string_view::npos || name.find("race") != std::string_view::npos;
-        const bool known = name == "JamSession" || name == "SpotBattle" || name == "ThrowdownSkate" || race;
-        // Every other mode the menu asks about, once each, to find what else the game has.
-        static std::mutex seen_mutex;
-        static std::set<std::string, std::less<>> seen;
-        {
-            std::lock_guard lock(seen_mutex);
-            if (seen.size() < 32 && seen.insert(std::string(name)).second)
-                logging::log(logging::Level::info, logging::Channel::progression, "Throwdown menu asks about mode \"{}\"{}.", name,
-                             known ? "" : " (not offered)");
-        }
+        const bool known = name == "JamSession" || name == "SpotBattle" || name == "ThrowdownSkate";
         static std::atomic<unsigned> logged{};
         if (known && logged.fetch_add(1) < 3)
             logging::log(logging::Level::info, logging::Channel::progression,
