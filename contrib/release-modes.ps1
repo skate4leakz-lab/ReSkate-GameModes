@@ -122,6 +122,9 @@ $title = if ($Title) { $Title } else { "ReSkate Game Modes $Version" }
 if (-not $Notes) { $Notes = "ReSkate with game modes $Version. First install: see INSTALL.txt in the zip. The launcher updates itself after that." }
 # Tagged on the commit this was built from, which must already be on GitHub (git push).
 $commit = (& git -C $root rev-parse HEAD).Trim()
-& $gh release create "v$Version" --repo $Repo --target $commit --title $title --notes $Notes --latest $json $dll $launcher $zip
+# The notes go through a file: Windows PowerShell 5.1 mangles quotes inside a native argument.
+$notesFile = Join-Path $out 'notes.md'
+[IO.File]::WriteAllText($notesFile, $Notes, (New-Object Text.UTF8Encoding($false)))
+& $gh release create "v$Version" --repo $Repo --target $commit --title $title --notes-file $notesFile --latest $json $dll $launcher $zip
 if ($LASTEXITCODE) { throw 'gh release create failed' }
 Write-Host "Published: https://github.com/$Repo/releases/tag/v$Version" -ForegroundColor Green
