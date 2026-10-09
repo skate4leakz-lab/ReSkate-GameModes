@@ -79,8 +79,8 @@ $config = [ordered]@{
     depot_downloader = $officialJson.depot_downloader
 }
 $json = Join-Path $out 'launcher.json'
-$config | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8NoBOM -Path $json -ErrorAction SilentlyContinue
-if (-not (Test-Path $json)) { [IO.File]::WriteAllText($json, ($config | ConvertTo-Json -Depth 6)) }
+# UTF-8 without a byte-order mark, on Windows PowerShell 5.1 as well as 7.
+[IO.File]::WriteAllText($json, ($config | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
 
 # 4. A zip for a first install.
 Step 'Packaging'
@@ -115,6 +115,8 @@ if (-not (Test-Path $gh)) { throw 'The GitHub CLI is not installed (winget insta
 if ($LASTEXITCODE) { throw 'The GitHub CLI is not signed in (gh auth login)' }
 $title = "ReSkate with game modes $Version"
 if (-not $Notes) { $Notes = "ReSkate with game modes $Version. First install: see INSTALL.txt in the zip. The launcher updates itself after that." }
-& $gh release create "v$Version" --repo $Repo --title $title --notes $Notes --latest $json $dll $launcher $zip
+# Tagged on the commit this was built from, which must already be on GitHub (git push).
+$commit = (& git -C $root rev-parse HEAD).Trim()
+& $gh release create "v$Version" --repo $Repo --target $commit --title $title --notes $Notes --latest $json $dll $launcher $zip
 if ($LASTEXITCODE) { throw 'gh release create failed' }
 Write-Host "Published: https://github.com/$Repo/releases/tag/v$Version" -ForegroundColor Green
