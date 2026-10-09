@@ -26,16 +26,21 @@ JumpScaleResult take_jump_scale_result() noexcept;
 // expires after 500 ms.
 void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, float stock, float cruise) noexcept;
 // Hall of Meat bounce, Skate 3 style: while the local skater is in a ragdoll wipeout (physics
-// states 300-399), each time the body hits something and stops falling it is sent back up with
-// `restitution` of the speed it hit with (a little less each bounce in the same bail). 0 is off.
-// Publish every tick (game modes): it expires after 500 ms.
+// states 300-399) or off the board (500-599), each time the body hits something and stops falling
+// it is sent back up with `restitution` of the speed it hit with (a little less each bounce in the
+// same bail). 0 is off. Publish every tick (game modes): it expires after 500 ms.
 void set_bail_bounce(float restitution) noexcept;
 // The skater the bounce acts on, from the trainer's client tick (as set_push_speed).
 void set_bail_bounce_skater(std::uintptr_t client, std::uintptr_t entity) noexcept;
-// Bounces given since the last call, and the hardest hit they answered (m/s), for the log.
+// Since the last call, for the log: bounces given and the hardest hit they answered (m/s); physics
+// steps seen with the bounce on, those in a state it acts in, those where it read the skater's
+// bodies; the fastest fall (m/s) it saw; and why it last could not read them ("" if it could).
 struct BailBounces {
     int count{};
     float hardest{};
+    int steps{}, eligible{}, read{};
+    float fastest{};
+    std::string why;
 };
 BailBounces take_bail_bounces() noexcept;
 // Engine-thread-only interactive controls. Presentation callbacks only queue requests.

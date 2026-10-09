@@ -375,6 +375,10 @@ void track_bail(State &s, std::uint32_t physics, float vertical, std::uint64_t n
             logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: bail scored {} ({:.1f} m/s, {:.1f} m drop, {:.1f} s, {} bounce{}{}).",
                          score, s.bail.speed, s.bail.start_y - s.bail.min_y, s.bail.tumble, bounces.count, bounces.count == 1 ? "" : "s",
                          bounces.count ? std::format(", hardest hit {:.1f} m/s", bounces.hardest) : std::string());
+            // What the bounce saw since the last bail, to tell why it did or did not bounce.
+            logging::log(logging::Level::info, logging::Channel::runtime,
+                         "Game modes: bounce check: {} physics steps with it on, {} in a state it acts in, {} reading the body, fastest fall {:.1f} m/s{}{}.",
+                         bounces.steps, bounces.eligible, bounces.read, bounces.fastest, bounces.why.empty() ? "" : ", last problem: ", bounces.why);
             report(s, Event::bail, score, 0, s.bail.at);
             if (s.game && s.game->settings.mode == Mode::meat) popup(s, "Meat: " + grouped(score));
         }

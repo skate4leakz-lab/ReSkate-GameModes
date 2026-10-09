@@ -314,6 +314,12 @@ struct BailBounce {
     std::atomic<std::uintptr_t> client{}, entity{};
     std::atomic<int> given{};
     std::atomic<float> hardest{};
+    // For the log (take_bail_bounces): physics steps seen at all, steps it could act in, the fastest
+    // fall it saw, and why it last could not reach the skater's bodies.
+    std::atomic<int> steps{}, eligible{}, read{};
+    std::atomic<float> fastest{};
+    std::mutex why_mutex;
+    std::string why;
     // Physics thread only.
     float falling{};
     int bounces{};
@@ -328,6 +334,7 @@ void apply_bail_bounce(std::uintptr_t core) noexcept {
     // A wipeout's ragdoll (300-399), or off the board (500-599: a fall on foot ends in a slam too).
     const bool ragdoll = watch.valid && watch.state >= 300 && watch.state < 400;
     const bool on_foot = watch.valid && watch.state >= 500 && watch.state < 600;
+    if (restitution > 0 && now < b.expires.load(std::memory_order_acquire)) b.steps.fetch_add(1, std::memory_order_relaxed);
     if (!(ragdoll || on_foot) || restitution <= 0 || now >= b.expires.load(std::memory_order_acquire)) {
         b.falling = 0;
         b.bounces = 0;
@@ -335,13 +342,22 @@ void apply_bail_bounce(std::uintptr_t core) noexcept {
     }
     // A new fall gets its full bounces again (on foot the state never changes between slams).
     if (b.bounces && now - b.last > 3000) b.bounces = 0;
+    b.eligible.fetch_add(1, std::memory_order_relaxed);
+    const auto note = [&](const char* why) {
+        std::lock_guard lock(b.why_mutex);
+        b.why = why;
+    };
     SourceLastError error;
     auto& state = source_state();
-    if (!state.initialized.load(std::memory_order_acquire) || state.busy.test_and_set(std::memory_order_acquire)) return;
+    if (!state.initialized.load(std::memory_order_acquire)) { note("skater physics not ready"); return; }
+    if (state.busy.test_and_set(std::memory_order_acquire)) return;
     SourceBusyScope scope{state.busy};
     try {
+        if (!b.client.load() || !b.entity.load()) { note("no skater from the trainer"); return; }
         const auto bodies = debug_noclip_bodies(state.trial.base, b.client.load(), b.entity.load());
-        if (bodies.core != core || bodies.seconds == 0) return;
+        if (bodies.core != core) { note("another physics core"); return; }
+        if (bodies.seconds == 0) return;
+        b.read.fetch_add(1, std::memory_order_relaxed);
         SourceReader reader;
         constexpr std::size_t first = 9; // after the board's nine bodies: the skeleton's velocity parts
         std::array<std::array<float, 3>, 32> velocities{};
@@ -356,6 +372,7 @@ void apply_bail_bounce(std::uintptr_t core) noexcept {
         reader.verify();
         const float vertical = sum / static_cast<float>(count - first), previous = b.falling;
         b.falling = vertical;
+        if (-vertical > b.fastest.load(std::memory_order_relaxed)) b.fastest.store(-vertical, std::memory_order_relaxed);
         // A hit: falling fast last step, most of it gone now. On foot only a real fall (6 m/s, about a
         // 2 m drop) bounces, so landing an ordinary jump stays a landing.
         const float fast = ragdoll || b.bounces > 0 ? -3.0f : -6.0f; // later bounces fall less far
@@ -375,7 +392,8 @@ void apply_bail_bounce(std::uintptr_t core) noexcept {
         }
         b.given.fetch_add(1, std::memory_order_relaxed);
         if (-previous > b.hardest.load(std::memory_order_relaxed)) b.hardest.store(-previous, std::memory_order_relaxed);
-    } catch (...) {}
+    } catch (const SourceGuard& issue) { note(issue.message ? issue.message : "skater physics check failed"); }
+      catch (...) { note("skater physics error"); }
 }
 void noclip_physics_update(std::uintptr_t core) {
     const auto original = source_state().velocity_update_original.load(std::memory_order_acquire);
@@ -476,7 +494,16 @@ void set_bail_bounce_skater(std::uintptr_t client, std::uintptr_t entity) noexce
 }
 BailBounces take_bail_bounces() noexcept {
     auto& b = bail_bounce();
-    return {b.given.exchange(0), b.hardest.exchange(0)};
+    BailBounces result{b.given.exchange(0), b.hardest.exchange(0)};
+    result.steps = b.steps.exchange(0);
+    result.eligible = b.eligible.exchange(0);
+    result.read = b.read.exchange(0);
+    result.fastest = b.fastest.exchange(0);
+    try {
+        std::lock_guard lock(b.why_mutex);
+        result.why = std::exchange(b.why, std::string());
+    } catch (...) {}
+    return result;
 }
 void set_push_speed(std::uintptr_t client, std::uintptr_t entity, float factor, float stock, float cruise) noexcept {
     auto& p = push_speed();
