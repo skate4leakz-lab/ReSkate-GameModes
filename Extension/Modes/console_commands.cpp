@@ -30,6 +30,8 @@ void register_mode_commands(Commands &registry) {
         {"bonecam", "When the X-ray Bone Cam shows, or a preview of it", "[meat|on|off|test]"},
         {"bounce", "How much a ragdoll bounces off the ground in Hall of Meat (0 to 1)", "[0-1|off|meat|always]"},
         {"debug", "Diagnostics for building game modes", "states on|off"},
+        {"results", "A sample results screen for 12 seconds", nullptr},
+        {"tricklog", "Log the trick names skate. shows (for building S.K.A.T.E.)", "on|off"},
     };
     for (const auto &verb : verbs) {
         std::vector<Argument> arguments;
