@@ -1291,8 +1291,15 @@ void run_skate(State &s, std::uint64_t now) {
         popup(s, landed ? "Landed: " + trick : trick.empty() ? std::string("Missed") : "Missed: " + trick);
         t.sent = true;
     };
+    // Reverts count for nothing: a kickflip landed into a revert is a kickflip, and copies one landed without.
+    const auto revert = [](const std::string &name) {
+        std::string text;
+        for (const char c : name) text += static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+        return text.find("revert") != std::string::npos;
+    };
     for (const auto &note : notes) {
         if (note.kind == 'n') {
+            if (revert(note.text)) continue;
             if (t.parts.size() < 8) t.parts.push_back({note.entry, note.text});
         } else if (note.kind == 's') {
             t.sides[note.entry] = note.text == "ID_TRICK_FS" ? "FS" : note.text == "ID_TRICK_BS" ? "BS" : std::string();
