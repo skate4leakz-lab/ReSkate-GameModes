@@ -1,0 +1,9 @@
+The Bone Cam's 3D skeleton (Extension/Modes/bone_meshes.h) is made from BodyParts3D:
+
+    BodyParts3D, (c) The Database Center for Life Science licensed under CC Attribution 4.0 International
+    https://dbarchive.biosciencedbc.jp/en/bodyparts3d/lic.html
+    https://creativecommons.org/licenses/by/4.0/
+
+Changes: 215 bones from the "partof" OBJ set (BodyParts3D 4.0, 99% reduced) were simplified further
+(vertex clustering), converted from millimetres to metres, and stored relative to the body part each
+follows, by Extension/Modes/Tools/bake_bone_meshes.py.
