@@ -17,6 +17,7 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+')][string]$Version,
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')][string]$Repo,
     [string]$Notes = '',
+    [string]$Title = '',
     [switch]$Publish
 )
 $ErrorActionPreference = 'Stop'
@@ -24,6 +25,8 @@ $root = Split-Path $PSScriptRoot -Parent
 $buildDir = Join-Path $root 'build\release-modes'
 $out = Join-Path $root "build\release-out\$Version"
 $gh = 'C:\Program Files\GitHub CLI\gh.exe'
+# GitHub's runners have gh on the path rather than in Program Files.
+if (-not (Test-Path $gh) -and (Get-Command gh -ErrorAction SilentlyContinue)) { $gh = (Get-Command gh).Source }
 
 function Step($text) { Write-Host "== $text" -ForegroundColor Cyan }
 function Sha256($path) { (Get-FileHash -Algorithm SHA256 $path).Hash.ToLowerInvariant() }
@@ -65,6 +68,8 @@ $game = [ordered]@{
     skate_sha256 = Pin 'game_sha256\s*=\s*"([0-9a-f]{64})"'
 }
 $headers = @{ 'User-Agent' = 'reskate-modes-release' }
+# Signed requests on GitHub's runners, whose shared addresses run out of anonymous ones.
+if ($env:GH_TOKEN) { $headers['Authorization'] = "Bearer $env:GH_TOKEN" }
 $official = Invoke-RestMethod 'https://api.github.com/repos/Dingo-Shenanigans/ReSkate/releases/latest' -Headers $headers
 $officialJson = Invoke-RestMethod ($official.assets | Where-Object name -eq 'launcher.json').browser_download_url -Headers $headers
 if ($officialJson.game.build_id -ne $game.build_id) {
@@ -113,7 +118,7 @@ Step "Publishing v$Version to $Repo"
 if (-not (Test-Path $gh)) { throw 'The GitHub CLI is not installed (winget install GitHub.cli)' }
 & $gh auth status | Out-Null
 if ($LASTEXITCODE) { throw 'The GitHub CLI is not signed in (gh auth login)' }
-$title = "ReSkate with game modes $Version"
+$title = if ($Title) { $Title } else { "ReSkate Game Modes $Version" }
 if (-not $Notes) { $Notes = "ReSkate with game modes $Version. First install: see INSTALL.txt in the zip. The launcher updates itself after that." }
 # Tagged on the commit this was built from, which must already be on GitHub (git push).
 $commit = (& git -C $root rev-parse HEAD).Trim()
