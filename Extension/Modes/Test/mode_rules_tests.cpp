@@ -347,6 +347,82 @@ void graffiti_flow() {
     check(decode(encode(shown)) == shown, "a real state round trips");
     check(r.state(countdown_ms).standings.size() == 3, "everyone is on the board");
 }
+
+void skate_flow() {
+    check(trick_kinds_of("Kickflip") == trick_flips && trick_kinds_of("BS 50-50 Grind") == trick_grinds, "flips and grinds are told apart");
+    check(trick_kinds_of("Heelflip + Seatbelt") == (trick_flips | trick_grabs) && trick_kinds_of("Manual") == trick_manuals,
+          "a combo is every kind its parts are");
+    check(trick_kinds_of("Rocket Air") == trick_grabs && trick_kinds_of("FS Powerslide") == trick_grinds, "grabs and slides");
+    check(skate_letters(3, 5) == "S.K.A" && skate_letters(0, 5).empty(), "letters spell S.K.A.T.E.");
+    Settings s;
+    s.mode = Mode::skate;
+    s.strikes = 2;
+    s.trick_kinds = trick_flips | trick_grinds; // no grabs, no manuals
+    check(trick_allowed(s, "Kickflip") && !trick_allowed(s, "Heelflip + Seatbelt") && !trick_allowed(s, "Manual"), "the leader's kinds");
+    Referee r(s, a, 8);
+    r.add_player(a);
+    r.add_player(b);
+    r.add_player(c);
+    r.start(0);
+    r.tick(countdown_ms);
+    std::uint64_t t = countdown_ms;
+    std::uint32_t sa = 0, sb = 0, sc = 0;
+    const Vec3 here{};
+    auto st = r.state(t);
+    check(st.turn == a && st.setter == a && st.trick.empty(), "a sets first");
+    r.event(b, Event::trick, 1, here, ++sb, t, {}, "Kickflip");
+    check(r.state(t).trick.empty(), "only the player up counts");
+    r.event(a, Event::trick, 1, here, ++sa, t, {}, "Heelflip + Seatbelt");
+    st = r.state(t);
+    check(st.setter == b && st.turn == b && st.trick.empty(), "a set a grab in a game without grabs: b sets");
+    r.event(b, Event::trick, 1, here, ++sb, t, {}, "Kickflip");
+    st = r.state(t);
+    check(st.trick == "Kickflip" && st.turn == c, "b set the kickflip; c copies");
+    r.event(c, Event::trick, 1, here, ++sc, t, {}, "kickflip");
+    check(r.state(t).turn == a, "c landed it (any case); a copies");
+    r.event(a, Event::trick, 1, here, ++sa, t, {}, "Heelflip");
+    st = r.state(t);
+    check(st.turn == b && st.trick.empty(), "round over: b sets again");
+    check(std::find_if(st.standings.begin(), st.standings.end(), [](const Standing &x) { return x.player == a; })->aux == 1,
+          "a did the wrong trick: S");
+    r.event(b, Event::trick, 1, here, ++sb, t, {}, "Kickflip");
+    st = r.state(t);
+    check(st.setter == c && st.turn == c, "a trick set already cannot be set again: c sets");
+    r.event(c, Event::trick, 0, here, ++sc, t, {}, "");
+    check(r.state(t).setter == a, "a missed set passes it on, no letter");
+    r.event(a, Event::trick, 1, here, ++sa, t, {}, "BS 50-50 Grind");
+    r.event(b, Event::trick, 1, here, ++sb, t, {}, "BS 50-50 Grind");
+    t += s.turn_s * 1000ull; // c never tries
+    r.tick(t);
+    st = r.state(t);
+    check(std::find_if(st.standings.begin(), st.standings.end(), [](const Standing &x) { return x.player == c; })->aux == 1,
+          "running out of time is a letter");
+    check(st.turn == a && st.setter == a, "back to the setter");
+    r.event(a, Event::trick, 1, here, ++sa, t, {}, "Varial Kickflip");
+    r.event(b, Event::trick, 0, here, ++sb, t, {}, "");
+    r.event(c, Event::trick, 0, here, ++sc, t, {}, "");
+    check(r.phase() == Phase::playing && r.state(t).turn == a, "c spelled S.K. (two letters) and is out; b has an S");
+    r.event(a, Event::trick, 1, here, ++sa, t, {}, "Hardflip");
+    r.event(b, Event::trick, 1, here, ++sb, t, {}, "Kickflip");
+    check(r.phase() == Phase::results, "b missed the hardflip: S.K., out, a wins");
+    st = r.state(t);
+    check(st.standings.front().player == a, "a is first");
+    check(decode(encode(st)) == st, "a S.K.A.T.E. state round trips");
+    Message attempt;
+    attempt.kind = Message::Kind::event;
+    attempt.leader = a;
+    attempt.game = 8;
+    attempt.event = Event::trick;
+    attempt.value = 1;
+    attempt.trick = "Heelflip + Seatbelt";
+    check(decode(encode(attempt)) == attempt, "an attempt round trips");
+    Message setup;
+    setup.kind = Message::Kind::setup;
+    setup.leader = a;
+    setup.game = 8;
+    setup.settings = s;
+    check(decode(encode(setup)) == setup, "the trick kinds go with the setup");
+}
 } // namespace
 
 int main() {
@@ -362,7 +438,8 @@ int main() {
         domination_flow();
         tag_flow();
         graffiti_flow();
-        std::cout << "Game modes: area, scoring, wire, Spot Jam, 1-Up, Deathrace, Domination, tag and Graffiti flows passed.\n";
+        skate_flow();
+        std::cout << "Game modes: area, scoring, wire, Spot Jam, 1-Up, Deathrace, Domination, tag, Graffiti and S.K.A.T.E. flows passed.\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

@@ -26,7 +26,7 @@ namespace {
 struct ModeInfo {
     const char *key, *name, *summary, *points; // points: what `mode point` places here, or null
 };
-constexpr std::array<ModeInfo, 7> mode_info{{
+constexpr std::array<ModeInfo, 8> mode_info{{
     {"jam", "SPOT JAM", "Land lines inside the area. Every line adds to your score; highest total wins.", nullptr},
     {"1up", "1-UP", "Take turns. Beat the last score or take a strike; last one standing wins.", nullptr},
     {"meat", "HALL OF MEAT", "Bail as hard as you can. Every bail scores its Meat; most meat wins. Your bones show through your skater.", nullptr},
@@ -34,6 +34,7 @@ constexpr std::array<ModeInfo, 7> mode_info{{
     {"domination", "DOMINATION", "Take spots with your best line there. Every second you hold one scores.", "SPOTS"},
     {"graffiti", "GRAFFITI", "Grind it, gap it: what you skate takes your colour. A bigger line steals it. Most tags wins.", nullptr},
     {"tag", "SKATE TAG", "One player is it and wears the crown: get close to tag someone else. No tag-backs. Least time spent it wins.", nullptr},
+    {"skate", "S.K.A.T.E.", "Set a trick, everyone copies it or takes a letter. Spell S.K.A.T.E. and you're out; last one standing wins. You pick the tricks that count.", nullptr},
 }};
 struct Page {
     int pick{};
@@ -95,7 +96,7 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
         int second = p.pick - 3;
         if (choice(menu, "modes-pick-b", second, {"DEATHRACE", "DOMINATION", "GRAFFITI"})) p.pick = second + 3;
         int third = p.pick - 6;
-        if (choice(menu, "modes-pick-c", third, {"SKATE TAG"})) p.pick = third + 6;
+        if (choice(menu, "modes-pick-c", third, {"SKATE TAG", "S.K.A.T.E."})) p.pick = third + 6;
         p.pick = std::clamp(p.pick, 0, static_cast<int>(mode_info.size()) - 1);
         note(mode_info[static_cast<std::size_t>(p.pick)].summary);
         if (primary_button(menu, std::format("SET UP {}", mode_info[static_cast<std::size_t>(p.pick)].name).c_str()))
@@ -153,7 +154,34 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
         }
 
         begin_card(menu, "modes-rules", "RULES");
-        if (m.mode == "1up") {
+        if (m.mode == "skate") {
+            // The kinds of trick that may be set: at least one stays on.
+            field(menu, "Tricks that count");
+            struct Kind {
+                unsigned bit;
+                const char *label, *word;
+            };
+            constexpr Kind kinds[]{{1, "FLIP TRICKS", "flips"}, {2, "GRABS", "grabs"}, {4, "GRINDS & SLIDES", "grinds"}, {8, "MANUALS", "manuals"}};
+            for (const auto &kind : kinds) {
+                bool on = (m.trick_kinds & kind.bit) != 0;
+                if (ImGui::Checkbox(kind.label, &on)) {
+                    const unsigned next = on ? m.trick_kinds | kind.bit : m.trick_kinds & ~kind.bit;
+                    if (next) {
+                        std::string words;
+                        for (const auto &k : kinds)
+                            if (next & k.bit) words += std::string(" ") + k.word;
+                        command(menu, callbacks, "tricks" + words);
+                    }
+                }
+                ImGui::SameLine();
+            }
+            ImGui::NewLine();
+            note("A combo counts as every kind in it: a kickflip into a grab needs both FLIP TRICKS and GRABS.");
+            setting(menu, callbacks, "Letters (5 spells S.K.A.T.E.)", "##letters", p.strikes, m.strikes,
+                    [](const char *id, int *v) { return ImGui::SliderInt(id, v, 1, 5); }, "strikes");
+            setting(menu, callbacks, "Turn (seconds)", "##turn", p.turn, static_cast<int>(m.turn),
+                    [](const char *id, int *v) { return ImGui::SliderInt(id, v, 10, 120); }, "turn");
+        } else if (m.mode == "1up") {
             setting(menu, callbacks, "Turn (seconds)", "##turn", p.turn, static_cast<int>(m.turn),
                     [](const char *id, int *v) { return ImGui::SliderInt(id, v, 10, 120); }, "turn");
             setting(menu, callbacks, "Strikes", "##strikes", p.strikes, m.strikes,
@@ -178,6 +206,11 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
         begin_card(menu, "modes-running", current ? current->name : "GAME", m.leading ? "Your game." : "You're in this game.");
         info(menu, "Now", phases[std::clamp(m.phase, 0, 4)]);
         info(menu, "Players", std::to_string(m.players));
+        if (m.mode == "skate") {
+            field(menu, "Camera on other turns");
+            int follow = m.spectate ? 0 : 1;
+            if (choice(menu, "modes-spectate", follow, {"WATCH WHO'S UP", "STAY ON ME"})) command(menu, callbacks, follow == 0 ? "spectate on" : "spectate off");
+        }
         if (current) note(current->summary);
         if (m.leading) {
             if (primary_button(menu, "STOP GAME")) command(menu, callbacks, "stop");

@@ -11,7 +11,9 @@ void register_mode_commands(Commands &registry) {
     };
     const Verb verbs[]{
         {"help", "How the game modes are played", nullptr},
-        {"new", "Set up a game you lead", "jam|1up|meat|race|domination|graffiti"},
+        {"new", "Set up a game you lead", "jam|1up|meat|race|domination|graffiti|tag|skate"},
+        {"tricks", "S.K.A.T.E.: the kinds of trick that can be set", "flips grabs grinds manuals|all"},
+        {"spectate", "S.K.A.T.E.: watch whoever is up", "on|off"},
         {"circle", "Make the play area a circle around you", "[radius in metres]"},
         {"place", "Place the area, route or spots with the free camera (mouse and keyboard, or the pad)",
          "circle|corners|points|cancel|freecam on|off"},
@@ -19,7 +21,7 @@ void register_mode_commands(Commands &registry) {
         {"point", "Place a checkpoint (Deathrace) or spot (Domination) where you stand", "[undo|clear]"},
         {"time", "How long a timed game lasts", "<seconds>"},
         {"turn", "1-Up: how long each turn is", "<seconds>"},
-        {"strikes", "1-Up: misses before a player is out", "<1-5>"},
+        {"strikes", "1-Up: misses before a player is out; S.K.A.T.E.: letters", "<1-5>"},
         {"radius", "How close counts as at a checkpoint or spot", "<metres>"},
         {"games", "Other players' games you can join", nullptr},
         {"join", "Join another player's game (the announced or nearest one, or the list's nth)", "[n]"},

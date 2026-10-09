@@ -7,6 +7,7 @@
 #include "Extension/HallOfMeat/hall_of_meat.h"
 #include "Extension/HallOfMeat/hall_of_meat_hud.h"
 #include "Engine/Core/Platform/memory.h"
+#include "Extension/Multiplayer/Hud/native_party.h"
 #include "Engine/Game/UI/game_view.h"
 #include "Engine/Core/Log/logging.h"
 #include "Extension/Console/commands.h"
@@ -154,6 +155,17 @@ struct State {
     bool log_states{};
     std::uint64_t results_preview_until{}; // `mode results`: a sample results screen until then
     std::uint32_t logged_state{};
+    // S.K.A.T.E.: the local player's attempt this turn, built from skate.'s trick list (its names, their
+    // FS / BS sides) until a landing ends it or a bail misses it, and whose turn the camera follows.
+    struct SkateTurn {
+        std::uint32_t key{};   // the turn (the state's call serial when it began): a new one starts over
+        bool mine{}, sent{};
+        std::uint64_t since{};
+        std::vector<std::pair<std::uint64_t, std::string>> parts; // trick list entry, its name
+        std::map<std::uint64_t, std::string> sides;               // entry: "FS" or "BS"
+        std::uint64_t spectating{};
+    } skate;
+    bool spectate = true; // `mode spectate on|off`: watch whoever is up in S.K.A.T.E.
     std::mutex hud_mutex;
     overlay::ModesHud hud;
     overlay::ModesMenu menu;
@@ -221,12 +233,13 @@ void end_game(State &s, std::string why) {
 }
 // The local player's own line, bail or checkpoint: straight into the referee when leading,
 // else to the leader.
-void report(State &s, Event event, std::int32_t value, std::int32_t extra, const Vec3 &at, const std::vector<Tag> &tags = {}) {
+void report(State &s, Event event, std::int32_t value, std::int32_t extra, const Vec3 &at, const std::vector<Tag> &tags = {},
+            const std::string &trick = {}) {
     if (!s.game || !playing(*s.game) || !standing(*s.game, self_id(s))) return;
     auto &g = *s.game;
     ++g.sequence;
     if (g.referee) {
-        g.referee->event(self_id(s), event, value, at, g.sequence, now_ms(), tags);
+        g.referee->event(self_id(s), event, value, at, g.sequence, now_ms(), tags, trick);
         // Everyone draws everyone in Skate Tag: the leader's own position goes to the others too.
         if (event != Event::position) return;
     }
@@ -237,6 +250,7 @@ void report(State &s, Event event, std::int32_t value, std::int32_t extra, const
     m.at = at;
     m.sequence = g.sequence;
     m.tags = tags;
+    m.trick = trick;
     send(s, m);
 }
 void popup(State &s, std::string text) {
@@ -344,7 +358,62 @@ std::string text_at(std::uintptr_t address) noexcept {
     }
     return text.size() >= 3 ? text : std::string{};
 }
+// ---- the trick feed (S.K.A.T.E.) ----------------------------------------------------------
+// skate.'s score HUD lists each trick as it is done, one entry of ScoringHUDViewModel's trick list
+// per trick, written through the UI model's write of one value (found with `mode tricklog` on
+// 2026-10-09, game build 20260929): a field's handle is its entry (upper bits) and member (low 16
+// bits). Member 0x0002 is the trick's name, a string ("Kickflip", "50-50 Grind", "Seatbelt");
+// 0x009c its side ("ID_TRICK_FS" / "ID_TRICK_BS", grinds and slides); 0x0034 how it was landed
+// ("ID_TRICK_LANDING_CLEAN"), written when the line lands. A grab or grind done in the same air as
+// a flip is its own entry before the one landing.
+constexpr std::uint32_t trick_name_member = 0x0002, trick_side_member = 0x009c, trick_landing_member = 0x0034;
+constexpr std::uintptr_t ui_string_type_rva = 0x765dcc0; // Skate.exe: the UI model's string type
+struct TrickNote {
+    std::uint64_t entry{};
+    char kind{}; // 'n' name, 's' side, 'l' landing
+    std::string text;
+};
+struct TrickFeed {
+    std::atomic<bool> on{};
+    std::mutex mutex;
+    std::vector<TrickNote> notes;
+};
+TrickFeed &trick_feed() {
+    static auto *value = new TrickFeed;
+    return *value;
+}
+void feed_tap(std::uint64_t handle, std::uintptr_t type, const void *value) noexcept {
+    auto &f = trick_feed();
+    if (!f.on.load(std::memory_order_acquire)) return;
+    const auto member = static_cast<std::uint32_t>(handle & 0xffff);
+    if (member != trick_name_member && member != trick_side_member && member != trick_landing_member) return;
+    static const auto string_type = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)) + ui_string_type_rva;
+    if (member == trick_name_member && type != string_type) return;
+    try {
+        std::uint64_t first{};
+        if (!memory::peek_bytes(reinterpret_cast<std::uintptr_t>(value), &first, sizeof first)) return;
+        auto text = text_at(static_cast<std::uintptr_t>(first));
+        if (text.empty()) return;
+        char kind = 'n';
+        if (member == trick_side_member) {
+            if (!text.starts_with("ID_TRICK_")) return;
+            kind = 's';
+        } else if (member == trick_landing_member) {
+            if (!text.starts_with("ID_TRICK_LANDING")) return;
+            kind = 'l';
+        }
+        std::lock_guard lock(f.mutex);
+        if (f.notes.size() < 256) f.notes.push_back({handle >> 16, kind, std::move(text)});
+    } catch (...) {}
+}
+std::vector<TrickNote> take_trick_notes() {
+    auto &f = trick_feed();
+    std::lock_guard lock(f.mutex);
+    return std::exchange(f.notes, {});
+}
+
 void trick_tap(std::uint64_t handle, std::uintptr_t type, const void *value) noexcept {
+    feed_tap(handle, type, value);
     auto &t = trick_log();
     if (!t.on.load(std::memory_order_acquire)) return;
     try {
@@ -402,13 +471,11 @@ std::string trick_log_command(const std::vector<std::string> &arguments) {
             t.lines.clear();
             t.logged = 0;
         }
-        hall_of_meat::set_model_write_tap(&trick_tap);
-        t.on.store(true, std::memory_order_release);
+        t.on.store(true, std::memory_order_release); // the tick puts the tap on
         logging::log(logging::Level::info, logging::Channel::runtime, "Trick log: on.");
         return "Trick log on. Do a kickflip, a heelflip, a grab, a grind and a manual (a few seconds apart), then `mode tricklog off`.";
     }
     t.on.store(false, std::memory_order_release);
-    hall_of_meat::set_model_write_tap(nullptr);
     flush_trick_log();
     std::vector<std::pair<std::uint64_t, std::uintptr_t>> counts;
     {
@@ -1160,6 +1227,76 @@ void run_player(State &s, Game &g, std::uint64_t now) {
     }
 }
 
+// S.K.A.T.E.: the local player's turn. skate.'s trick list is read from the moment it is theirs: each
+// trick's name (with its FS / BS side) joins the attempt until the line lands, which sends it, or a
+// bail, which misses it. One attempt per turn: the next turn (a new call from the referee) starts
+// over. Whoever is up is watched with the party Spectate camera, when the player wants that.
+std::string trick_kinds_text(std::uint8_t kinds) {
+    if (kinds == all_trick_kinds) return "any trick";
+    std::string text;
+    for (const auto &[bit, name] : {std::pair{trick_flips, "flip tricks"}, std::pair{trick_grabs, "grabs"},
+                                    std::pair{trick_grinds, "grinds & slides"}, std::pair{trick_manuals, "manuals"}})
+        if (kinds & bit) text += (text.empty() ? "" : ", ") + std::string(name);
+    return text;
+}
+std::string skate_trick(const State::SkateTurn &t) {
+    std::string text;
+    for (const auto &[entry, name] : t.parts) {
+        if (!text.empty()) text += " + ";
+        if (const auto side = t.sides.find(entry); side != t.sides.end()) text += side->second + " ";
+        text += name;
+    }
+    if (text.size() > max_trick_length) text.resize(max_trick_length);
+    return text;
+}
+void run_skate(State &s, std::uint64_t now) {
+    auto &t = s.skate;
+    const auto self = self_id(s);
+    const auto *st = s.game && s.game->state ? &*s.game->state : nullptr;
+    const auto *me = s.game ? standing(*s.game, self) : nullptr;
+    const bool in = st && s.game->settings.mode == Mode::skate && st->phase == Phase::playing && me && !me->out;
+    trick_feed().on.store(in, std::memory_order_release);
+    auto notes = take_trick_notes();
+    // The camera on whoever is up, not on the local player's own turn.
+    const auto watch = in && s.spectate && st->turn && st->turn != self && s.present.contains(st->turn) ? st->turn : 0;
+    if (watch || t.spectating) multiplayer::spectate_party_member(watch);
+    t.spectating = watch;
+    const bool mine = in && st->turn == self;
+    if (!mine) {
+        t = {.spectating = t.spectating};
+        return;
+    }
+    if (!t.mine || t.key != st->call_serial) { // a new turn: nothing done before it counts
+        t.mine = true;
+        t.key = st->call_serial;
+        t.sent = false;
+        t.since = now;
+        t.parts.clear();
+        t.sides.clear();
+        return;
+    }
+    if (t.sent) return;
+    const auto send_attempt = [&](bool landed) {
+        const auto trick = skate_trick(t);
+        report(s, Event::trick, landed ? 1 : 0, 0, s.position, {}, trick);
+        popup(s, landed ? "Landed: " + trick : trick.empty() ? std::string("Missed") : "Missed: " + trick);
+        t.sent = true;
+    };
+    for (const auto &note : notes) {
+        if (note.kind == 'n') {
+            if (t.parts.size() < 8) t.parts.push_back({note.entry, note.text});
+        } else if (note.kind == 's') {
+            t.sides[note.entry] = note.text == "ID_TRICK_FS" ? "FS" : note.text == "ID_TRICK_BS" ? "BS" : std::string();
+            if (t.sides[note.entry].empty()) t.sides.erase(note.entry);
+        } else if (!t.parts.empty()) { // landed
+            send_attempt(note.text.find("BAIL") == std::string::npos && note.text.find("FAIL") == std::string::npos);
+            return;
+        }
+    }
+    // A bail during the turn misses it.
+    if (s.bail.active && s.bail.started >= t.since) send_attempt(false);
+}
+
 void build_hud(State &s, std::uint64_t now) {
     overlay::ModesHud h;
     if (s.game) {
@@ -1194,6 +1331,13 @@ void build_hud(State &s, std::uint64_t now) {
             if (mode == Mode::one_up) {
                 const auto target = st->target > 0 ? "beat " + grouped(st->target) : std::string("set a score");
                 h.status = st->turn == self ? "YOUR TURN: " + target : name_of(s, st->turn) + " is up: " + target;
+            } else if (mode == Mode::skate && st->turn) {
+                const bool setting = st->trick.empty();
+                if (st->turn == self)
+                    h.status = setting ? "YOUR SET: land a trick (" + trick_kinds_text(g.settings.trick_kinds) + ")"
+                                       : "YOUR TURN: land the " + st->trick;
+                else
+                    h.status = setting ? name_of(s, st->turn) + " is setting a trick" : name_of(s, st->turn) + " is trying the " + st->trick;
             } else if (mode == Mode::tag && st->turn) {
                 h.status = st->turn == self ? std::string("YOU'RE IT! Get close to someone to tag them")
                                             : name_of(s, st->turn) + " is it. Don't get tagged!";
@@ -1208,7 +1352,10 @@ void build_hud(State &s, std::uint64_t now) {
             h.status = st && !st->standings.empty() ? name_of(s, st->standings.front().player) + " wins!" : "Game over.";
             break;
         }
-        if (s.line.tricks && me && phase == Phase::playing)
+        if (mode == Mode::skate) { // no trick lines in S.K.A.T.E.: the attempt as it is done, then how it went
+            if (phase == Phase::playing && s.skate.mine && !s.skate.sent && !s.skate.parts.empty()) h.line = skate_trick(s.skate);
+            else if (!s.popup.empty() && now - s.popup_at < popup_ms && me && phase == Phase::playing) h.line = s.popup;
+        } else if (s.line.tricks && me && phase == Phase::playing)
             h.line = std::format("{} trick line  -  {}", s.line.tricks, grouped(line_score(s.line.sum, s.line.tricks)));
         else if (!s.popup.empty() && now - s.popup_at < popup_ms && me && phase == Phase::playing)
             h.line = s.popup;
@@ -1253,6 +1400,7 @@ void build_hud(State &s, std::uint64_t now) {
                 case Mode::domination: row.value = grouped(p.score) + " pts"; break;
                 case Mode::graffiti: row.value = std::format("{} zone{}", p.score, p.score == 1 ? "" : "s"); break;
                 case Mode::tag: row.value = std::format("{:.1f} s it", p.score / 10.0); break;
+                case Mode::skate: row.value = p.out ? "OUT" : p.aux > 0 ? skate_letters(static_cast<unsigned>(p.aux), g.settings.strikes) : "-"; break;
                 }
                 if (phase == Phase::setup) row.value = "ready";
                 h.rows.push_back(std::move(row));
@@ -1371,6 +1519,7 @@ void build_hud(State &s, std::uint64_t now) {
     overlay::ModesMenu m;
     m.bone_cam = bone_cam_setting();
     m.bone_cam_ringing = bone_cam_ringing();
+    m.spectate = s.spectate;
     m.official_meat = hall_of_meat::available();
     m.meat_every_bail = hall_of_meat::switched_on();
     if (s.game) {
@@ -1385,6 +1534,7 @@ void build_hud(State &s, std::uint64_t now) {
         m.duration = g.settings.duration_s;
         m.turn = g.settings.turn_s;
         m.strikes = g.settings.strikes;
+        m.trick_kinds = g.settings.trick_kinds;
         m.radius = g.settings.radius;
         if (g.leading && !g.referee) m.missing = missing(g.settings);
         m.area_radius = g.settings.area_radius;
@@ -1494,8 +1644,16 @@ std::vector<std::vector<std::uint8_t>> tick(const SessionInput &input) {
         // Hall of Meat games: ReSkate's Hall of Meat held on while one is played (not saved; the
         // menu's switch is the player's own), and every bail that hurt a bone scored with its Meat.
         const bool official = official_meat();
-        // The trick logger listens on Hall of Meat's UI model write hook, which is on only while it is.
-        hall_of_meat::set_forced(official || trick_log().on.load(std::memory_order_acquire));
+        hall_of_meat::set_forced(official);
+        // S.K.A.T.E. and the trick logger read skate.'s trick list through Hall of Meat's UI model
+        // write hook, which the tap keeps on while it is set.
+        run_skate(s, now);
+        const bool tap = trick_log().on.load(std::memory_order_acquire) || trick_feed().on.load(std::memory_order_acquire);
+        static bool tapped = false;
+        if (tap != tapped) {
+            hall_of_meat::set_model_write_tap(tap ? &trick_tap : nullptr);
+            tapped = tap;
+        }
         flush_trick_log();
         if (const auto bail = hall_of_meat::take_finished_bail(); bail && official && bail->shown && bail->meat > 0) {
             report(s, Event::bail, bail->meat, 0, s.position);
@@ -1569,7 +1727,7 @@ bool receive(std::uint64_t sender, std::span<const std::uint8_t> bytes) {
         }
         break;
     case Message::Kind::event:
-        if (ours && s.game->referee) s.game->referee->event(sender, m.event, m.value, m.at, m.sequence, now, m.tags);
+        if (ours && s.game->referee) s.game->referee->event(sender, m.event, m.value, m.at, m.sequence, now, m.tags, m.trick);
         // Skate Tag: where every other player is, for the crown and the arrows.
         if (ours && m.event == Event::position) s.positions[sender] = {m.at, now};
         break;
@@ -1660,6 +1818,12 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         return join_offer(s, offer, now);
     }
     if (v == "tricklog") return trick_log_command(arguments);
+    if (v == "spectate") {
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off"))
+            return std::format("S.K.A.T.E. spectating is {}. Usage: mode spectate on|off", s.spectate ? "on" : "off");
+        s.spectate = arguments[0] == "on";
+        return s.spectate ? "In S.K.A.T.E. the camera follows whoever is up." : "In S.K.A.T.E. the camera stays on you.";
+    }
     if (v == "results") {
         s.results_preview_until = now + 12000;
         return "Showing a sample results screen for 12 seconds.";
@@ -1699,7 +1863,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
     }
     if (v == "new") {
         const auto mode = arguments.empty() ? std::nullopt : parse_mode(arguments[0]);
-        if (!mode) return "error: usage: mode new jam|1up|meat|race|domination|graffiti";
+        if (!mode) return "error: usage: mode new jam|1up|meat|race|domination|graffiti|tag|skate";
         if (s.barred) return "error: your mods change trick scoring, so you cannot start a game in this session.";
         if (!s.skater) return "error: get on your board in the world first.";
         if (s.game && !s.game->leading && s.game->state && s.game->state->phase != Phase::results)
@@ -1712,6 +1876,10 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         g.settings.mode = *mode;
         g.settings.duration_s = default_duration(*mode);
         if (*mode == Mode::tag) g.settings.radius = default_tag_reach; // how close tags
+        if (*mode == Mode::skate) { // S.K.A.T.E.: five letters, time to line a trick up
+            g.settings.strikes = 5;
+            g.settings.turn_s = 45;
+        }
         // Where it was set up: its banner's spot for the others until an area or route is placed.
         g.settings.spawn = s.position;
         g.settings.has_spawn = true;
@@ -1723,6 +1891,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         case Mode::domination: next = "Ride to each spot and use `mode point`, then `mode start`."; break;
         case Mode::graffiti: next = "Open GAME MODES to set an area if you want one, then START GAME."; break;
         case Mode::tag: next = "The whole map is the playground; PLACE CIRCLE in GAME MODES fences it in (up to 3 km across). Then START GAME."; break;
+        case Mode::skate: next = "Pick the tricks that count in GAME MODES (or `mode tricks flips grabs grinds manuals`), then START GAME."; break;
         default: next = "Optional: `mode corner` at each corner of an area. Then `mode start`."; break;
         }
         return std::format("{} set up. {}", mode_name(*mode), next);
@@ -1845,6 +2014,21 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
     if (v == "time") return set_number(30, 3600, [&](float x) { g.settings.duration_s = static_cast<std::uint32_t>(x); }, "Time (s)");
     if (v == "turn") return set_number(10, 120, [&](float x) { g.settings.turn_s = static_cast<std::uint32_t>(x); }, "Turn time (s)");
     if (v == "strikes") return set_number(1, 5, [&](float x) { g.settings.strikes = static_cast<std::uint8_t>(x); }, "Strikes");
+    if (v == "tricks") {
+        // S.K.A.T.E.: the kinds of trick that may be set, one or more.
+        std::uint8_t kinds = 0;
+        for (const auto &word : arguments) {
+            if (word == "flips" || word == "flip") kinds |= trick_flips;
+            else if (word == "grabs" || word == "grab") kinds |= trick_grabs;
+            else if (word == "grinds" || word == "grind" || word == "slides") kinds |= trick_grinds;
+            else if (word == "manuals" || word == "manual") kinds |= trick_manuals;
+            else if (word == "all" || word == "any") kinds = all_trick_kinds;
+            else return "error: usage: mode tricks flips|grabs|grinds|manuals|all (one or more)";
+        }
+        if (!kinds) return "error: usage: mode tricks flips|grabs|grinds|manuals|all (one or more)";
+        g.settings.trick_kinds = kinds;
+        return changed("Tricks that can be set: " + trick_kinds_text(kinds) + ".");
+    }
     if (v == "radius")
         return set_number(1, 50, [&](float x) {
             g.settings.radius = x;

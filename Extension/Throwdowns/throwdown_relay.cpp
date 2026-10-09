@@ -1158,11 +1158,14 @@ void follow_turn(Relay &r) {
     const bool watching = r.running && turn_based(r.running_series) && up && up != r.local &&
                           r.peers.contains(up) && !r.quit.contains(up);
     const auto target = watching ? up : 0;
+    const auto was = r.spectating;
     if (target != r.spectating) {
         if (target) note("following player {:#x}'s turn.", target);
         r.spectating = target;
     }
-    spectate_party_member(r.spectating);
+    // Stopped once, when it stops following: every tick would end a spectate someone else started
+    // (Game Modes' S.K.A.T.E. turns).
+    if (r.spectating || was) spectate_party_member(r.spectating);
 }
 
 // Settings the party features need (analysis/party-re): the coop party sync (the Coop button's

@@ -271,7 +271,12 @@ void hold_score(Corner& c, const menu_data::Context& context, bool held) {
 }
 } // namespace
 
-void set_model_write_tap(ModelWriteTap tap) noexcept { write_tap.store(tap, std::memory_order_release); }
+// The tap needs the hook on, with Hall of Meat or without it; switched off, it stays on (a write
+// with nothing taken passes straight through) until Hall of Meat's own switch takes it off.
+void set_model_write_tap(ModelWriteTap tap) noexcept {
+    write_tap.store(tap, std::memory_order_release);
+    if (tap) (void)hook_hud(true);
+}
 
 void start_hud(std::uintptr_t base) noexcept {
     corner_state().base = base;
@@ -282,6 +287,7 @@ bool hook_hud(bool on) noexcept {
     auto& h = hook();
     if (!h.ready) return !on; // nothing to hook
     if (h.hooked.load(std::memory_order_acquire) == on) return true;
+    if (!on && write_tap.load(std::memory_order_acquire)) return true; // Game Modes still reads through it
     const auto status = on ? hook_enable(h.target) : hook_disable(h.target);
     if (status != HookOk) {
         logging::log(logging::Level::warning, logging::Channel::ui, "Hall of Meat could not {} its UI model write hook ({}).",

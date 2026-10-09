@@ -48,6 +48,7 @@ bool valid_settings(const Settings &s) noexcept {
     if (!std::any_of(std::begin(all_modes), std::end(all_modes), [&](Mode m) { return m == s.mode; })) return false;
     if (s.duration_s < 30 || s.duration_s > 3600 || s.turn_s < 10 || s.turn_s > 120 || s.strikes < 1 || s.strikes > 5)
         return false;
+    if (s.trick_kinds == 0 || s.trick_kinds > all_trick_kinds) return false;
     if (!(s.radius >= 1.0f && s.radius <= 50.0f)) return false;
     if (s.corners.size() > max_corners || s.points.size() > max_points) return false;
     if (!s.yaws.empty() && s.yaws.size() != s.points.size()) return false;
@@ -69,6 +70,7 @@ std::string_view mode_name(Mode m) noexcept {
     case Mode::domination: return "Domination";
     case Mode::graffiti: return "Graffiti";
     case Mode::tag: return "Skate Tag";
+    case Mode::skate: return "S.K.A.T.E.";
     }
     return "Game";
 }
@@ -81,6 +83,7 @@ std::string_view mode_key(Mode m) noexcept {
     case Mode::domination: return "domination";
     case Mode::graffiti: return "graffiti";
     case Mode::tag: return "tag";
+    case Mode::skate: return "skate";
     }
     return "";
 }
@@ -93,6 +96,7 @@ std::string_view mode_summary(Mode m) noexcept {
     case Mode::domination: return "Take spots with your best line there. Every second you hold one scores.";
     case Mode::graffiti: return "Grind it, manual it, gap it: what you skate takes your colour. A bigger line steals it. Most tags wins.";
     case Mode::tag: return "One player is it: get close to tag someone else. No tag-backs. Least time spent it wins.";
+    case Mode::skate: return "Set a trick, everyone copies it or takes a letter. Spell S.K.A.T.E. and you're out; last one standing wins.";
     }
     return "";
 }
@@ -106,9 +110,65 @@ std::optional<Mode> parse_mode(std::string_view text) noexcept {
     if (key == "domination" || key == "dom") return Mode::domination;
     if (key == "graffiti" || key == "thps") return Mode::graffiti;
     if (key == "tag" || key == "skatetag" || key == "skate_tag") return Mode::tag;
+    if (key == "skate" || key == "s.k.a.t.e." || key == "s.k.a.t.e") return Mode::skate;
     return std::nullopt;
 }
-bool timed(Mode m) noexcept { return m != Mode::one_up; }
+bool timed(Mode m) noexcept { return m != Mode::one_up && m != Mode::skate; }
+
+namespace {
+std::string lower(std::string_view text) {
+    std::string out;
+    for (const char c : text) out += static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    return out;
+}
+bool has_any(const std::string &text, std::initializer_list<std::string_view> words) {
+    return std::any_of(words.begin(), words.end(), [&](std::string_view w) { return text.find(w) != std::string::npos; });
+}
+// One part of a trick ("Kickflip", "Seatbelt", "BS 50-50 Grind").
+std::uint8_t part_kinds(const std::string &part) {
+    std::uint8_t kinds = 0;
+    if (has_any(part, {"manual"})) kinds |= trick_manuals;
+    if (has_any(part, {"grind", "slide", "stall", "smith", "feeble", "crook", "blunt", "willy", "salad", "suski", "hurricane",
+                       "rock to", "rock n", "pivot", "nosepick", "5-0", "50-50"}))
+        kinds |= trick_grinds;
+    if (has_any(part, {"grab", "indy", "melon", "stalefish", "mute", "japan", "seatbelt", "benihana", "method", "madonna", "crail",
+                       "airwalk", "christ", "boned", "judo", "roast", "lien", "rocket", "stiffy", "tuck", "nuclear", "slob",
+                       "weddle", "one foot", "frontside air", "backside air"}))
+        kinds |= trick_grabs;
+    if (has_any(part, {"flip", "shuv", "varial", "impossible", "ollie", "nollie", "360", "180", "spin", "pop"})) kinds |= trick_flips;
+    return kinds ? kinds : trick_flips; // anything else done in the air off the board's pop
+}
+}
+
+std::uint8_t trick_kinds_of(std::string_view trick) noexcept {
+    try {
+        const auto text = lower(trick);
+        std::uint8_t kinds = 0;
+        std::size_t start = 0;
+        while (start <= text.size()) {
+            auto end = text.find(" + ", start);
+            if (end == std::string::npos) end = text.size();
+            if (end > start) kinds |= part_kinds(text.substr(start, end - start));
+            start = end + 3;
+        }
+        return kinds;
+    } catch (...) {
+        return 0;
+    }
+}
+bool trick_allowed(const Settings &s, std::string_view trick) noexcept {
+    const auto kinds = trick_kinds_of(trick);
+    return kinds && (kinds & ~s.trick_kinds) == 0;
+}
+std::string skate_letters(unsigned letters, unsigned of) {
+    constexpr std::string_view word = "SKATE";
+    std::string text;
+    for (unsigned i = 0; i < letters && i < of && i < word.size(); ++i) {
+        if (!text.empty()) text += '.';
+        text += word[i];
+    }
+    return text;
+}
 
 std::string missing(const Settings &s) {
     switch (s.mode) {
@@ -269,6 +329,21 @@ bool read_tags(Reader &r, std::vector<Tag> &tags, std::size_t limit) {
     }
     return r.ok;
 }
+// A trick's name: a length byte and its text (printable, at most max_trick_length).
+void write_text(Writer &w, const std::string &text) {
+    if (text.size() > max_trick_length) throw std::invalid_argument("game mode trick name too long");
+    w.integer(text.size(), 1);
+    w.bytes.insert(w.bytes.end(), text.begin(), text.end());
+}
+bool read_text(Reader &r, std::string &text) {
+    const auto length = r.integer(1);
+    if (!r.ok || length > max_trick_length || length > r.bytes.size() - r.at) return false;
+    text.assign(reinterpret_cast<const char *>(r.bytes.data() + r.at), static_cast<std::size_t>(length));
+    r.at += static_cast<std::size_t>(length);
+    for (auto &ch : text)
+        if (static_cast<unsigned char>(ch) < 0x20) ch = ' ';
+    return true;
+}
 } // namespace
 std::vector<std::uint8_t> encode(const Message &m) {
     Writer w;
@@ -297,6 +372,7 @@ std::vector<std::uint8_t> encode(const Message &m) {
         for (const auto &p : s.corners) w.vec(p);
         w.integer(s.points.size(), 1);
         for (const auto &p : s.points) w.vec(p);
+        w.integer(s.trick_kinds, 1);
         break;
     }
     case Message::Kind::state:
@@ -326,6 +402,8 @@ std::vector<std::uint8_t> encode(const Message &m) {
             w.integer(text.size(), 1);
             w.bytes.insert(w.bytes.end(), text.begin(), text.end());
         }
+        write_text(w, m.trick);
+        w.integer(m.setter, 8);
         break;
     case Message::Kind::event:
         if (!finite(m.at)) throw std::invalid_argument("invalid game mode event");
@@ -335,6 +413,7 @@ std::vector<std::uint8_t> encode(const Message &m) {
         w.vec(m.at);
         w.integer(m.sequence, 4);
         write_tags(w, m.tags, max_line_tags);
+        write_text(w, m.trick);
         break;
     case Message::Kind::tags:
         if (m.first + m.tags.size() > max_tags) throw std::invalid_argument("game mode tags out of range");
@@ -389,6 +468,7 @@ std::optional<Message> decode(std::span<const std::uint8_t> bytes) noexcept {
             const auto points = r.integer(1);
             if (points > max_points) return std::nullopt;
             for (std::uint64_t i = 0; i < points && r.ok; ++i) s.points.push_back(r.vec());
+            s.trick_kinds = static_cast<std::uint8_t>(r.integer(1));
             if (!r.ok || !valid_settings(s)) return std::nullopt;
             break;
         }
@@ -434,17 +514,19 @@ std::optional<Message> decode(std::span<const std::uint8_t> bytes) noexcept {
                     if (static_cast<unsigned char>(ch) < 0x20) ch = ' ';
                 m.calls.push_back(std::move(text));
             }
+            if (!read_text(r, m.trick)) return std::nullopt;
+            m.setter = r.integer(8);
             break;
         }
         case Message::Kind::event: {
             const auto event = r.integer(1);
-            if (event < 1 || event > 4) return std::nullopt;
+            if (event < 1 || event > 5) return std::nullopt;
             m.event = static_cast<Event>(event);
             m.value = static_cast<std::int32_t>(r.integer(4));
             m.extra = static_cast<std::int32_t>(r.integer(4));
             m.at = r.vec();
             m.sequence = static_cast<std::uint32_t>(r.integer(4));
-            if (!finite(m.at) || m.value < 0 || !read_tags(r, m.tags, max_line_tags)) return std::nullopt;
+            if (!finite(m.at) || m.value < 0 || !read_tags(r, m.tags, max_line_tags) || !read_text(r, m.trick)) return std::nullopt;
             break;
         }
         case Message::Kind::tags:
@@ -519,6 +601,11 @@ void Referee::remove_player(std::uint64_t player, std::uint64_t now_ms) {
     }
     if (settings_.mode == Mode::one_up && turn_ < players_.size() && players_[turn_].id == player) next_turn(now_ms);
     else if (settings_.mode == Mode::one_up && (still_in() == 0 || (players_.size() > 1 && still_in() <= 1))) finish(now_ms);
+    if (settings_.mode == Mode::skate) {
+        if (setter_ < players_.size() && players_[setter_].id == player) pass_set(now_ms);
+        else if (turn_ < players_.size() && players_[turn_].id == player) next_copier(now_ms);
+        else if (still_in() == 0 || (players_.size() > 1 && still_in() <= 1)) finish(now_ms);
+    }
 }
 void Referee::start(std::uint64_t now_ms) {
     if (phase_ != Phase::setup) return;
@@ -533,6 +620,12 @@ void Referee::begin_play(std::uint64_t now_ms) {
     call("GO!");
     if (settings_.mode == Mode::one_up && !players_.empty())
         call(name_of(players_[0].id) + " is up: set a score");
+    if (settings_.mode == Mode::skate && !players_.empty()) {
+        setter_ = 0;
+        set_trick_.clear();
+        done_tricks_.clear();
+        call(name_of(players_[0].id) + " sets first");
+    }
     // Skate Tag: someone starts it, picked by the game's id so every game starts differently.
     if (settings_.mode == Mode::tag && !players_.empty()) make_it(players_[game_ % players_.size()].id, 0, now_ms);
 }
@@ -591,8 +684,95 @@ void Referee::next_turn(std::uint64_t now_ms) {
     call(target_ > 0 ? std::format("{} is up: beat {}", name_of(players_[turn_].id), target_)
                                  : name_of(players_[turn_].id) + " is up: set a score");
 }
+// ---- S.K.A.T.E.
+namespace {
+bool same_trick(std::string_view a, std::string_view b) noexcept {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const auto x = a[i] >= 'A' && a[i] <= 'Z' ? a[i] - 'A' + 'a' : a[i], y = b[i] >= 'A' && b[i] <= 'Z' ? b[i] - 'A' + 'a' : b[i];
+        if (x != y) return false;
+    }
+    return true;
+}
+}
+void Referee::letter(Player &p, std::string_view why) {
+    ++p.strikes;
+    p.aux = p.strikes;
+    call(std::format("{} {}: {}", name_of(p.id), why, skate_letters(p.strikes, settings_.strikes)));
+    if (p.strikes >= settings_.strikes) {
+        p.out = true;
+        call(name_of(p.id) + " is out");
+    }
+}
+void Referee::pass_set(std::uint64_t now_ms) {
+    if (still_in() == 0 || (players_.size() > 1 && still_in() <= 1)) {
+        finish(now_ms);
+        return;
+    }
+    set_trick_.clear();
+    for (std::size_t step = 1; step <= players_.size(); ++step) {
+        const auto index = (setter_ + step) % players_.size();
+        if (!players_[index].out) {
+            setter_ = index;
+            break;
+        }
+    }
+    turn_ = setter_;
+    turn_at_ = now_ms;
+    call(name_of(players_[setter_].id) + " sets next");
+}
+void Referee::next_copier(std::uint64_t now_ms) {
+    if (still_in() == 0 || (players_.size() > 1 && still_in() <= 1)) {
+        finish(now_ms);
+        return;
+    }
+    for (std::size_t step = 1; step <= players_.size(); ++step) {
+        const auto index = (turn_ + step) % players_.size();
+        if (index == setter_) break; // everyone has had a go: the setter sets again
+        if (!players_[index].out) {
+            turn_ = index;
+            turn_at_ = now_ms;
+            call(std::format("{}: copy the {}", name_of(players_[index].id), set_trick_));
+            return;
+        }
+    }
+    if (setter_ >= players_.size() || players_[setter_].out) {
+        pass_set(now_ms);
+        return;
+    }
+    set_trick_.clear();
+    turn_ = setter_;
+    turn_at_ = now_ms;
+    call(name_of(players_[setter_].id) + " sets again");
+}
+void Referee::skate_attempt(Player &p, bool landed, std::string_view trick, std::uint64_t now_ms) {
+    const std::string name(trick.substr(0, max_trick_length));
+    if (set_trick_.empty() && turn_ == setter_) { // setting
+        if (!landed || name.empty()) {
+            call(name_of(p.id) + " missed the set");
+            pass_set(now_ms);
+        } else if (!trick_allowed(settings_, name)) {
+            call(std::format("{}: not in this game", name));
+            pass_set(now_ms);
+        } else if (std::any_of(done_tricks_.begin(), done_tricks_.end(), [&](const std::string &t) { return same_trick(t, name); })) {
+            call(std::format("{}: already set", name));
+            pass_set(now_ms);
+        } else {
+            set_trick_ = name;
+            done_tricks_.push_back(name);
+            ++p.score; // tricks set, the tiebreak
+            call(std::format("{} set the {}", name_of(p.id), name));
+            next_copier(now_ms);
+        }
+        return;
+    }
+    if (landed && same_trick(name, set_trick_)) call(name_of(p.id) + " landed it");
+    else letter(p, landed && !name.empty() ? std::format("did a {}", name) : std::string("missed"));
+    next_copier(now_ms);
+}
+
 void Referee::event(std::uint64_t player, Event event, std::int32_t value, const Vec3 &at, std::uint32_t sequence,
-                    std::uint64_t now_ms, const std::vector<Tag> &tags) {
+                    std::uint64_t now_ms, const std::vector<Tag> &tags, std::string_view trick) {
     if (phase_ != Phase::playing) return;
     auto *p = find(player);
     if (!p || p->out || p->finished || sequence <= p->sequence) return;
@@ -611,6 +791,10 @@ void Referee::event(std::uint64_t player, Event event, std::int32_t value, const
     if (settings_.mode != Mode::race && !inside(settings_, at)) return; // out of the area: nothing counts
     switch (settings_.mode) {
     case Mode::tag: return; // handled above, from positions
+    case Mode::skate:
+        if (event != Event::trick || turn_ >= players_.size() || players_[turn_].id != player) return;
+        skate_attempt(*p, value != 0, trick, now_ms);
+        break;
     case Mode::jam:
         if (event != Event::line) return;
         p->score += value;
@@ -742,6 +926,16 @@ bool Referee::tick(std::uint64_t now_ms) {
             strike(players_[turn_], now_ms, "ran out of time");
             return true;
         }
+        if (settings_.mode == Mode::skate && turn_ < players_.size() && now_ms >= turn_at_ + settings_.turn_s * 1000ull) {
+            if (set_trick_.empty() && turn_ == setter_) {
+                call(name_of(players_[turn_].id) + " ran out of time to set");
+                pass_set(now_ms);
+            } else {
+                letter(players_[turn_], "ran out of time");
+                next_copier(now_ms);
+            }
+            return true;
+        }
         return false;
     default: return false;
     }
@@ -760,7 +954,7 @@ Message Referee::state(std::uint64_t now_ms) const {
     switch (phase_) {
     case Phase::countdown: m.remaining_ms = left(countdown_ms); break;
     case Phase::playing:
-        if (settings_.mode == Mode::one_up) {
+        if (settings_.mode == Mode::one_up || settings_.mode == Mode::skate) {
             const auto turn_elapsed = now_ms >= turn_at_ ? now_ms - turn_at_ : 0;
             const auto total = settings_.turn_s * 1000ull;
             m.remaining_ms = static_cast<std::uint32_t>(total > turn_elapsed ? total - turn_elapsed : 0);
@@ -773,6 +967,11 @@ Message Referee::state(std::uint64_t now_ms) const {
     }
     if (settings_.mode == Mode::one_up && phase_ == Phase::playing && turn_ < players_.size()) m.turn = players_[turn_].id;
     if (settings_.mode == Mode::tag && (phase_ == Phase::playing || phase_ == Phase::results)) m.turn = it_;
+    if (settings_.mode == Mode::skate && phase_ == Phase::playing && turn_ < players_.size()) {
+        m.turn = players_[turn_].id;
+        m.trick = set_trick_;
+        if (setter_ < players_.size()) m.setter = players_[setter_].id;
+    }
     m.target = target_;
     for (std::size_t i = 0; i < players_.size(); ++i) {
         const auto &p = players_[i];
@@ -791,9 +990,9 @@ Message Referee::state(std::uint64_t now_ms) const {
             if (a.out != b.out) return !a.out;
             return a.score < b.score;
         }
-        if (mode == Mode::one_up) {
+        if (mode == Mode::one_up || mode == Mode::skate) {
             if (a.out != b.out) return !a.out;
-            if (a.aux != b.aux) return a.aux < b.aux; // fewer strikes
+            if (a.aux != b.aux) return a.aux < b.aux; // fewer strikes, or letters
             return a.score > b.score;
         }
         if (a.score != b.score) return a.score > b.score;

@@ -22,8 +22,8 @@
 namespace dingosdk::modes {
 using Vec3 = std::array<float, 3>;
 
-enum class Mode : std::uint8_t { jam = 1, one_up = 2, meat = 3, race = 4, domination = 5, graffiti = 6, tag = 7 };
-inline constexpr Mode all_modes[]{Mode::jam, Mode::one_up, Mode::meat, Mode::race, Mode::domination, Mode::graffiti, Mode::tag};
+enum class Mode : std::uint8_t { jam = 1, one_up = 2, meat = 3, race = 4, domination = 5, graffiti = 6, tag = 7, skate = 8 };
+inline constexpr Mode all_modes[]{Mode::jam, Mode::one_up, Mode::meat, Mode::race, Mode::domination, Mode::graffiti, Mode::tag, Mode::skate};
 std::string_view mode_name(Mode) noexcept;    // "Spot Jam"
 std::string_view mode_key(Mode) noexcept;     // "jam": what `mode new` takes
 std::string_view mode_summary(Mode) noexcept; // one line on how it is played
@@ -33,7 +33,7 @@ bool timed(Mode) noexcept; // ends when the clock runs out (1-Up ends on strikes
 enum class Phase : std::uint8_t { setup = 1, countdown = 2, playing = 3, results = 4 };
 
 inline constexpr std::uint8_t wire_magic = 0xD5; // never a throwdown message's first byte (1..15)
-inline constexpr std::uint8_t wire_version = 6; // 2: circle areas; 3: Graffiti tags; 4: spawn, gate facings; 5: gate widths; 6: Skate Tag
+inline constexpr std::uint8_t wire_version = 7; // 2: circle areas; 3: Graffiti tags; 4: spawn, gate facings; 5: gate widths; 6: Skate Tag; 7: S.K.A.T.E.
 inline constexpr std::size_t max_corners = 16, max_points = 16, max_players = 16, max_zones = 64, max_calls = 4,
                              max_call_length = 96, max_tags = 64, max_tag_points = 6, max_line_tags = 6;
 inline constexpr std::uint32_t countdown_ms = 5000, results_ms = 12000;
@@ -51,8 +51,20 @@ struct Settings {
     std::vector<float> widths;      // Deathrace: each gate's half width in metres (empty: `radius`)
     Vec3 spawn{};                   // where everyone starts when the countdown begins
     bool has_spawn{};
+    std::uint8_t trick_kinds = 0x0f; // S.K.A.T.E.: the kinds of trick that may be set (trick_* bits)
     bool operator==(const Settings &) const = default;
 };
+
+// S.K.A.T.E.: the setter lands a trick, everyone else copies it or takes a letter; a setter who misses
+// hands the set on. The tricks are skate.'s own names, as its score HUD lists them ("Kickflip",
+// "Heelflip + Seatbelt", "BS 50-50 Grind"); a trick set once cannot be set again. The leader picks the
+// kinds that may be set; a trick is of every kind any of its parts is.
+inline constexpr std::uint8_t trick_flips = 1, trick_grabs = 2, trick_grinds = 4, trick_manuals = 8, all_trick_kinds = 0x0f;
+inline constexpr std::size_t max_trick_length = 80;
+std::uint8_t trick_kinds_of(std::string_view trick) noexcept;
+bool trick_allowed(const Settings &, std::string_view trick) noexcept;
+// "S.K.A" for three letters of S.K.A.T.E.; the letters spell as many as `strikes` allows.
+std::string skate_letters(unsigned letters, unsigned of);
 // What is missing before `mode start` (empty: ready).
 std::string missing(const Settings &);
 
@@ -106,7 +118,8 @@ std::int32_t bail_score(const BailSample &) noexcept;
 
 // ---- wire
 // position: where the sender is (Skate Tag), sent a few times a second to every player.
-enum class Event : std::uint8_t { line = 1, bail = 2, checkpoint = 3, position = 4 };
+// trick: a S.K.A.T.E. attempt, `trick` its name and value 1 landed, 0 missed (a bail, or nothing landed).
+enum class Event : std::uint8_t { line = 1, bail = 2, checkpoint = 3, position = 4, trick = 5 };
 struct Standing {
     std::uint64_t player{};
     std::int32_t score{}, aux{}; // aux: best line or bail, finish time (ms), strikes; Skate Tag: score the
@@ -151,6 +164,8 @@ struct Message {
     std::uint32_t sequence{};                  // event: the sender's own count (repeats are dropped)
     std::vector<Tag> tags;                     // event: what a Graffiti line was skated on; tags: the shapes
     std::uint8_t first{};                      // tags: the index of the first shape
+    std::string trick;                         // event: a S.K.A.T.E. attempt's trick; state: the trick to copy (empty: one to set)
+    std::uint64_t setter{};                    // state: S.K.A.T.E.'s setter
     bool operator==(const Message &) const = default;
 };
 inline bool is_mode_message(std::span<const std::uint8_t> bytes) noexcept {
@@ -178,7 +193,7 @@ class Referee {
     // The leader ends the game early: straight to the results, standings as they are.
     void end_now(std::uint64_t now_ms) { if (phase_ == Phase::playing || phase_ == Phase::countdown) finish(now_ms); }
     void event(std::uint64_t player, Event event, std::int32_t value, const Vec3 &at, std::uint32_t sequence,
-               std::uint64_t now_ms, const std::vector<Tag> &tags = {});
+               std::uint64_t now_ms, const std::vector<Tag> &tags = {}, std::string_view trick = {});
     const std::vector<Tag> &tags() const noexcept { return tags_; }
     // Advances the clock; true when the state changed in a way worth sending at once.
     bool tick(std::uint64_t now_ms);
@@ -212,6 +227,14 @@ class Referee {
     // Skate Tag: player is it from now on.
     void make_it(std::uint64_t player, std::uint64_t by, std::uint64_t now_ms);
     void try_tags(std::uint64_t now_ms);
+    // S.K.A.T.E.
+    void skate_attempt(Player &, bool landed, std::string_view trick, std::uint64_t now_ms);
+    void letter(Player &, std::string_view why);
+    void pass_set(std::uint64_t now_ms);    // the setter missed: the next player still in sets
+    void next_copier(std::uint64_t now_ms); // the next player to copy, or back to the setter
+    std::size_t setter_{};
+    std::string set_trick_;                 // the trick to copy; empty while the setter sets
+    std::vector<std::string> done_tricks_;  // set already this game
 
     Settings settings_;
     std::uint64_t leader_{};
