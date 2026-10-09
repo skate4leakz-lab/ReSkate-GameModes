@@ -5,6 +5,8 @@
 #include "Extension/Skater/no_bail.h"
 #include "Extension/Skater/client_source_spawn.h"
 #include "Extension/HallOfMeat/hall_of_meat.h"
+#include "Extension/HallOfMeat/hall_of_meat_hud.h"
+#include "Engine/Core/Platform/memory.h"
 #include "Engine/Game/UI/game_view.h"
 #include "Engine/Core/Log/logging.h"
 #include "Extension/Console/commands.h"
@@ -303,6 +305,121 @@ std::uint32_t default_duration(Mode mode) {
     case Mode::tag: return 240;
     default: return 300;
     }
+}
+
+// ---- the trick logger ----------------------------------------------------------------
+// `mode tricklog on|off`, for finding where skate. names the tricks it scores: every write to its UI
+// models while on (the score HUD's trick list among them) that carries text, inline, behind a
+// pointer or two, ASCII or UTF-16, goes to the log, with the field's handle and its type. Fields
+// written rarely (as a trick's name or count would be, not a clock) also log their bytes when they
+// change. Off, it reports how many writes each type had.
+struct TrickLog {
+    std::atomic<bool> on{};
+    std::mutex mutex;
+    std::vector<std::string> lines; // waiting for the client tick
+    std::map<std::uint64_t, std::pair<unsigned, std::uint64_t>> fields; // handle: writes, last bytes
+    std::map<std::string, std::uint64_t> texts;                          // handle+text seen: no repeats
+    std::map<std::uintptr_t, std::uint64_t> types;
+    std::size_t logged{};
+};
+TrickLog &trick_log() {
+    static auto *value = new TrickLog;
+    return *value;
+}
+// Readable text at `address`: ASCII, or UTF-16 with every other byte zero; empty when not.
+std::string text_at(std::uintptr_t address) noexcept {
+    std::array<unsigned char, 96> raw{};
+    if (!memory::read_bytes(address, raw.data(), raw.size())) return {};
+    const auto printable = [](unsigned char c) { return c >= 0x20 && c < 0x7f; };
+    std::string text;
+    for (std::size_t i = 0; i < raw.size() && raw[i]; ++i) {
+        if (!printable(raw[i])) return {};
+        text += static_cast<char>(raw[i]);
+    }
+    if (text.size() >= 3) return text;
+    text.clear();
+    for (std::size_t i = 0; i + 1 < raw.size() && (raw[i] || raw[i + 1]); i += 2) {
+        if (raw[i + 1] || !printable(raw[i])) return {};
+        text += static_cast<char>(raw[i]);
+    }
+    return text.size() >= 3 ? text : std::string{};
+}
+void trick_tap(std::uint64_t handle, std::uintptr_t type, const void *value) noexcept {
+    auto &t = trick_log();
+    if (!t.on.load(std::memory_order_acquire)) return;
+    try {
+        std::array<unsigned char, 16> raw{};
+        if (!memory::peek_bytes(reinterpret_cast<std::uintptr_t>(value), raw.data(), 8)) return;
+        (void)memory::read_bytes(reinterpret_cast<std::uintptr_t>(value) + 8, raw.data() + 8, 8);
+        std::uint64_t first{}, second{};
+        std::memcpy(&first, raw.data(), 8);
+        std::memcpy(&second, raw.data() + 8, 8);
+        // The text: in the value itself, behind its first pointer, or behind the pointer that points to.
+        std::string text, where;
+        if (const auto inline_text = text_at(reinterpret_cast<std::uintptr_t>(value)); !inline_text.empty()) text = inline_text, where = "inline";
+        else if (const auto once = text_at(static_cast<std::uintptr_t>(first)); !once.empty()) text = once, where = "*value";
+        else {
+            std::uint64_t inner{};
+            if (memory::read(static_cast<std::uintptr_t>(first), inner))
+                if (const auto twice = text_at(static_cast<std::uintptr_t>(inner)); !twice.empty()) text = twice, where = "**value";
+        }
+        std::lock_guard lock(t.mutex);
+        ++t.types[type];
+        auto &field = t.fields[handle];
+        const bool changed = field.first == 0 || field.second != first;
+        ++field.first;
+        field.second = first;
+        if (t.logged >= 6000) return;
+        if (!text.empty()) {
+            if (!t.texts.emplace(std::format("{:x}|{}", handle, text), 1).second) return;
+            t.lines.push_back(std::format("Trick log: field {:x} (type {:x}) text {} \"{}\"", handle, type, where, text));
+            ++t.logged;
+        } else if (changed && field.first <= 25) {
+            t.lines.push_back(std::format("Trick log: field {:x} (type {:x}) #{} bytes {:016x} {:016x}", handle, type, field.first, first, second));
+            ++t.logged;
+        }
+    } catch (...) {}
+}
+void flush_trick_log() {
+    auto &t = trick_log();
+    std::vector<std::string> lines;
+    {
+        std::lock_guard lock(t.mutex);
+        lines.swap(t.lines);
+    }
+    for (const auto &line : lines) logging::log(logging::Level::info, logging::Channel::runtime, "{}", line);
+}
+std::string trick_log_command(const std::vector<std::string> &arguments) {
+    auto &t = trick_log();
+    const bool on = !arguments.empty() && arguments[0] == "on";
+    if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off")) return "usage: mode tricklog on|off";
+    if (on) {
+        {
+            std::lock_guard lock(t.mutex);
+            t.fields.clear();
+            t.texts.clear();
+            t.types.clear();
+            t.lines.clear();
+            t.logged = 0;
+        }
+        hall_of_meat::set_model_write_tap(&trick_tap);
+        t.on.store(true, std::memory_order_release);
+        logging::log(logging::Level::info, logging::Channel::runtime, "Trick log: on.");
+        return "Trick log on. Do a kickflip, a heelflip, a grab, a grind and a manual (a few seconds apart), then `mode tricklog off`.";
+    }
+    t.on.store(false, std::memory_order_release);
+    hall_of_meat::set_model_write_tap(nullptr);
+    flush_trick_log();
+    std::vector<std::pair<std::uint64_t, std::uintptr_t>> counts;
+    {
+        std::lock_guard lock(t.mutex);
+        for (const auto &[type, count] : t.types) counts.push_back({count, type});
+        logging::log(logging::Level::info, logging::Channel::runtime, "Trick log: off; {} fields, {} lines.", t.fields.size(), t.logged);
+    }
+    std::sort(counts.rbegin(), counts.rend());
+    for (std::size_t i = 0; i < counts.size() && i < 30; ++i)
+        logging::log(logging::Level::info, logging::Channel::runtime, "Trick log: type {:x} written {} times.", counts[i].second, counts[i].first);
+    return "Trick log off. Close the game and tell Claude.";
 }
 
 // ---- the local skater ----------------------------------------------------------------
@@ -1373,7 +1490,9 @@ std::vector<std::vector<std::uint8_t>> tick(const SessionInput &input) {
         // Hall of Meat games: ReSkate's Hall of Meat held on while one is played (not saved; the
         // menu's switch is the player's own), and every bail that hurt a bone scored with its Meat.
         const bool official = official_meat();
-        hall_of_meat::set_forced(official);
+        // The trick logger listens on Hall of Meat's UI model write hook, which is on only while it is.
+        hall_of_meat::set_forced(official || trick_log().on.load(std::memory_order_acquire));
+        flush_trick_log();
         if (const auto bail = hall_of_meat::take_finished_bail(); bail && official && bail->shown && bail->meat > 0) {
             report(s, Event::bail, bail->meat, 0, s.position);
             popup(s, "Meat: " + grouped(bail->meat));
@@ -1526,6 +1645,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         const auto offer = *pick;
         return join_offer(s, offer, now);
     }
+    if (v == "tricklog") return trick_log_command(arguments);
     if (v == "results") {
         s.results_preview_until = now + 12000;
         return "Showing a sample results screen for 12 seconds.";

@@ -21,4 +21,8 @@ bool hook_hud(bool on) noexcept;
 // Client thread, every tick: hides the corner while `hidden`, and gives the game's own back after.
 // True once nothing of ours is left in it.
 bool hide_hud(bool hidden) noexcept;
+// Game Modes' trick logger: called with every UI model write while the hook is on (any thread; it
+// must be quick and never throw). Null removes it.
+using ModelWriteTap = void (*)(std::uint64_t handle, std::uintptr_t type, const void* value) noexcept;
+void set_model_write_tap(ModelWriteTap tap) noexcept;
 }

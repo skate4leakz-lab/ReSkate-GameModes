@@ -60,9 +60,12 @@ Hook& hook() {
     return *value;
 }
 
+std::atomic<ModelWriteTap> write_tap{};
+
 // The game's write of a taken field writes ours instead and keeps the game's.
 std::uint64_t model_write(Address manager, std::uint64_t handle, Address type, const void* value, std::uint8_t flag) {
     auto& h = hook();
+    if (const auto tap = write_tap.load(std::memory_order_acquire); tap && value) tap(handle, type, value);
     if (handle && value) {
         for (std::size_t index = 0; index < score_switches.size(); ++index) {
             auto& field = h.fields[index];
@@ -267,6 +270,8 @@ void hold_score(Corner& c, const menu_data::Context& context, bool held) {
     }
 }
 } // namespace
+
+void set_model_write_tap(ModelWriteTap tap) noexcept { write_tap.store(tap, std::memory_order_release); }
 
 void start_hud(std::uintptr_t base) noexcept {
     corner_state().base = base;
