@@ -6,6 +6,7 @@
 #include "Extension/Multiplayer/developer_identity.h"
 #include "Extension/Multiplayer/Session/monotonic_clock.h"
 #include "Engine/Core/Text/word_filter.h"
+#include "Extension/Multiplayer/word_lists.h"
 #include "Engine/Game/Build/supported_build.h"
 #include "Engine/Game/World/world_names.h"
 #include "Engine/Game/World/park_randomization.h"
@@ -116,6 +117,21 @@ void Host::save() {
     } catch (const std::exception &e) {
         log_(std::string("Could not save the config: ") + e.what());
     }
+}
+// A player without the map is downloading it: the clock they are loading against starts over
+// each time they say so, for as long as map_fetch_limit_us from the first time. A slot is still
+// never held for good, and a player who stops saying it has the usual time to load.
+void Host::fetching(Guest &guest) {
+    // Only for a player who is past the password: anyone else is held to the short time a
+    // connection gets to show it belongs here.
+    if (!guest.handshaken && !guest.map_authorized) return;
+    if (!guest.fetching_since) {
+        guest.fetching_since = now_;
+        log_("[map] " + guest_name(guest) + " is downloading the map");
+    }
+    if (now_ - guest.fetching_since > map_fetch_limit_us) return;
+    if (!guest.handshaken) guest.connected_at = now_;
+    else if (guest.travel_since) guest.travel_since = now_;
 }
 std::string Host::invite() const { return format_invite({id_, secret_}); }
 std::string Host::map_name() const { return map_label(config_.map); }
@@ -678,7 +694,18 @@ void Host::send_roster() {
         if (m.party && std::none_of(p.members.begin(), p.members.end(),
                                     [&](const Member &o) { return o.party == m.party && o.party_leader; }))
             m.party_leader = true; // the first listed member of a party missing its leader
-    broadcast(p, true, false);
+    // An announcement for one player: everyone else's roster goes without it.
+    auto *only = announcement_for_ ? find(announcement_for_) : nullptr;
+    if (only && !only->handshaken) only = nullptr;
+    if (announcement_for_) {
+        const auto shown = p.announcement;
+        p.announcement = {};
+        broadcast(p, true, false, announcement_for_);
+        p.announcement = shown;
+        if (only) send_packet(*only, p, true, false);
+    } else {
+        broadcast(p, true, false);
+    }
     roster_dirty_ = false;
     last_roster_ = now_;
 }
@@ -686,6 +713,7 @@ void Host::send_world_state() {
     auto state = packet(PacketKind::world_state, now_);
     state.destination = map_destination(config_.map);
     state.map_label = wire_map_label();
+    state.map_package = map_package(config_.map);
     state.world_ready = true; // the server has nothing to load
     const auto bytes = encode_wire(state);
     for (auto &[id, guest] : guests_)
@@ -698,6 +726,27 @@ void Host::send_chat(std::string_view text, Guest *only) {
     if (message.text.empty()) return;
     if (only) send_packet(*only, message, true, false);
     else broadcast(message, true, false);
+}
+bool Host::allowed_words(Guest &guest, std::string_view text) {
+    if (!text::contains_forbidden_words(text)) return true;
+    // Never passed on. Without warnings ("word_warnings": 0) that is all that happens.
+    if (!config_.word_warnings) {
+        log_("[words] " + guest_name(guest) + " said a word that is not allowed; the message was not passed on.");
+        send_chat(multiplayer::word_blocked_notice, &guest);
+        return false;
+    }
+    const auto id = guest.member.id;
+    const auto count = ++word_warnings_[id];
+    if (count > config_.word_warnings) {
+        log_("[words] " + guest_name(guest) + " was kicked: a word that is not allowed, after " + std::to_string(config_.word_warnings) +
+             " warning(s).");
+        drop(id, std::string(multiplayer::word_kick_notice));
+        return false;
+    }
+    log_("[words] " + guest_name(guest) + " said a word that is not allowed (warning " + std::to_string(count) + " of " +
+         std::to_string(config_.word_warnings) + "); the message was not passed on.");
+    send_chat(multiplayer::word_warning(count, config_.word_warnings), &guest);
+    return false;
 }
 void Host::send_bans(Guest &admin) {
     auto list = packet(PacketKind::bans, now_);
@@ -760,6 +809,7 @@ void Host::change_map(std::string_view map) {
         g.scoring_flagged = old.scoring_flagged;
         g.world_ready = false;
         g.travel_since = g.handshaken ? now_ : 0;
+        g.fetching_since = 0;
         g.last_packet = now_;
     }
     if (++world_ == 0) throw std::runtime_error("Map transition counter exhausted.");
@@ -785,10 +835,16 @@ void Host::drop(std::uint64_t id, const std::string &reason, const std::string &
     } else {
         // Never admitted: it held a player slot meanwhile, so it shows in the log, and an ID
         // that keeps failing waits longer each time before its connection is taken again.
-        const auto failures = join_backoff_.failed(id, now_);
-        log_("[join] " + std::to_string(id) + " did not finish joining (" + reason + ")" +
-             (failures > 1 ? ", attempt " + std::to_string(failures) : std::string{}) +
-             (detail.empty() ? std::string{} : " [" + detail + "]"));
+        // Not one that was let in (past the password) and left while fetching the map: turning
+        // a download down, or stopping one, is no failed attempt, and they may come straight back.
+        if (found->second->map_authorized && found->second->fetching_since) {
+            log_("[join] " + std::to_string(id) + " left without the map (" + reason + ")");
+        } else {
+            const auto failures = join_backoff_.failed(id, now_);
+            log_("[join] " + std::to_string(id) + " did not finish joining (" + reason + ")" +
+                 (failures > 1 ? ", attempt " + std::to_string(failures) : std::string{}) +
+                 (detail.empty() ? std::string{} : " [" + detail + "]"));
+        }
     }
     guests_.erase(found);
     for (auto &[other, guest] : guests_) {
@@ -954,6 +1010,7 @@ void Host::receive(std::uint64_t peer, std::span<const std::uint8_t> bytes, std:
             return;
         link->ready_sequence = p.sequence;
         link->last_packet = now_;
+        if (p.map_fetching) fetching(*link);
         const bool arrived = p.world_ready && !link->world_ready;
         if (!p.world_ready && link->world_ready) link->loading_since = now_;
         if (arrived && config_.activity_log)
@@ -972,6 +1029,7 @@ void Host::receive(std::uint64_t peer, std::span<const std::uint8_t> bytes, std:
             return drop(peer, "Invalid map request. Update ReSkate to the server's version and join again.");
         if (link->handshaken) return;
         if (p.map && p.map != map_) return drop(peer, "The server changed maps while you were joining. Join again.");
+        if (p.map_fetching) fetching(*link);
         link->member.epoch = p.epoch;
         bool authorized = !password_;
         if (password_) {
@@ -988,6 +1046,7 @@ void Host::receive(std::uint64_t peer, std::span<const std::uint8_t> bytes, std:
             auto offer = packet(PacketKind::map_offer, now_);
             offer.destination = map_destination(config_.map);
             offer.map_label = wire_map_label();
+            offer.map_package = map_package(config_.map);
             offer.challenge = link->password_challenge;
             offer.map_authorized = authorized;
             send_required(*link, encode_wire(offer));
@@ -1088,6 +1147,7 @@ void Host::receive(std::uint64_t peer, std::span<const std::uint8_t> bytes, std:
             link->chat_rate.accept(now_, p.text, 1) != ChatRate::Verdict::accepted)
             return;
         link->last_packet = now_;
+        if (!allowed_words(*link, p.text)) return;
         // "/" starts a command (votes; any server command for admins), answered to the sender only.
         if (p.text.front() == '/') {
             log_("[command] " + guest_name(*link) + ": /" + loggable(std::string_view(p.text).substr(1)));

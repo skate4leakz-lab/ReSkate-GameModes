@@ -471,4 +471,7 @@ bool publish_texture(const Context& context, std::span<const Value> fields, std:
             if (read<Address>(context.address(field)) != assets[0]) context.set(field, assets[0]);
     });
 }
+bool publish_texture(const Context& context, Value target, std::string_view name) {
+    return with_texture_assets(context, std::array{name}, [&](const auto& assets) { context.set(target, assets[0]); });
+}
 } // namespace dingosdk::multiplayer::menu_data

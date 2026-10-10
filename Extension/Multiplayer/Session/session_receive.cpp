@@ -505,6 +505,7 @@ void networking(Session &s, const NativeFrame &local, std::uint64_t now) {
         (s.awaiting_map || !local.ready) && now - s.last_map_request >= 1000000) {
         auto request = packet(s, PacketKind::map_request, now);
         request.map = s.join_destination.empty() ? 0 : map_hash(s.join_destination);
+        request.map_fetching = s.fetching_since != 0;
         if (s.password && host->password_challenge && request.map) {
             request.challenge = host->password_challenge;
             request.proof = password_proof(*s.password, s.secret, request.map, s.host_id, request.source,
@@ -611,6 +612,9 @@ void networking(Session &s, const NativeFrame &local, std::uint64_t now) {
                 s.join_destination.clear();
                 s.map_name.clear();
                 s.map_label.clear();
+                s.map_package.clear();
+                s.fetching_since = 0;
+                fetching_map_flag.store(false, std::memory_order_relaxed);
                 s.map = 0;
                 s.map_load_submitted = false;
                 s.last_map_load_check = 0;
@@ -623,6 +627,7 @@ void networking(Session &s, const NativeFrame &local, std::uint64_t now) {
             if (!p.destination.empty()) {
                 s.join_destination = s.map_name = p.destination;
                 s.map_label = p.map_label;
+                s.map_package = p.map_package;
                 s.map = p.map;
             }
             s.host_world_ready = p.world_ready;
@@ -645,6 +650,7 @@ void networking(Session &s, const NativeFrame &local, std::uint64_t now) {
                 continue;
             link->ready_sequence = p.sequence;
             link->last_packet = now;
+            if (p.map_fetching) guest_fetching(*link, now);
             const bool arrived = p.world_ready && !link->world_ready;
             link->world_ready = p.world_ready;
             if (p.world_ready) link->travel_since = 0;
@@ -671,6 +677,7 @@ void networking(Session &s, const NativeFrame &local, std::uint64_t now) {
                 disconnect(s, message.peer, "The host changed maps while you were joining. Join again.");
                 continue;
             }
+            if (p.map_fetching) guest_fetching(*link, now);
             link->member.epoch = p.epoch;
             bool authorized = !s.password;
             if (s.password) {
@@ -691,6 +698,7 @@ void networking(Session &s, const NativeFrame &local, std::uint64_t now) {
             if (newly_authorized || !link->last_map_offer || now - link->last_map_offer >= 1000000) {
                 auto offer = packet(s, PacketKind::map_offer, now);
                 offer.destination = s.map_name;
+                offer.map_package = host_map_package(s.map_name);
                 offer.challenge = link->password_challenge;
                 offer.map_authorized = authorized;
                 send_required(s, message.peer, encode_wire(offer));
@@ -722,6 +730,7 @@ void networking(Session &s, const NativeFrame &local, std::uint64_t now) {
             link->map_authorized |= p.map_authorized;
             s.join_destination = p.destination;
             s.map_label = p.map_label;
+            s.map_package = p.map_package;
             s.world = p.world;
             s.join_map_authorized |= p.map_authorized;
             if (new_challenge)
@@ -958,6 +967,20 @@ void networking(Session &s, const NativeFrame &local, std::uint64_t now) {
             // Everyone holds everyone to the same pace, so a modified client cannot flood.
             if (!server && sender->chat_rate.accept(now, p.text, 1) != ChatRate::Verdict::accepted) continue;
             sender->last_packet = now;
+            // A word that is not allowed at all: a lobby's host does not show or pass the line on,
+            // warns the guest, and after the last warning removes them (a dedicated server
+            // does the same with its own count).
+            if (s.mode == Mode::host && text::contains_forbidden_words(p.text)) {
+                const auto count = ++s.word_warnings[sender->member.id];
+                if (count > word_warnings_default) {
+                    s.transport.disconnect(sender->member.id, word_kick_notice.data());
+                } else {
+                    auto notice = packet(s, PacketKind::admin, now);
+                    notice.text = clean_chat_text(word_warning(count, word_warnings_default));
+                    send_packet(s, sender->member.id, notice, true, false);
+                }
+                continue;
+            }
             // "/p": party chat, which a lobby's host relays to the sender's party and nobody else.
             if (s.mode == Mode::host && p.text.starts_with("/p ")) {
                 host_party_chat(s, sender->member.id, std::string_view(p.text).substr(3), now);
@@ -1094,6 +1117,7 @@ void networking(Session &s, const NativeFrame &local, std::uint64_t now) {
         if (const auto *host_peer = find_peer(s, s.host_id); host_peer && host_peer->handshaken) {
             auto ready = packet(s, PacketKind::world_ready, now);
             ready.world_ready = local.ready && !s.awaiting_map;
+            ready.map_fetching = !ready.world_ready && s.fetching_since != 0;
             send_required(s, s.host_id, encode_wire(ready));
             s.last_world_ready = now;
         }
