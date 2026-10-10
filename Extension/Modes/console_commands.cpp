@@ -38,6 +38,7 @@ void register_mode_commands(Commands &registry) {
         {"debug", "Diagnostics for building game modes", "states on|off"},
         {"results", "A sample results screen for 12 seconds", nullptr},
         {"nav", "Development: send a native screen change", "<name>"},
+        {"flagtest", "Development: as if the start flag landed where you stand", nullptr},
         {"tricklog", "Log the trick names skate. shows (for building S.K.A.T.E.)", "on|off"},
     };
     for (const auto &verb : verbs) {

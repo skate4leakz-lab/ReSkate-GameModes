@@ -1656,7 +1656,8 @@ void native_score_hud(const Context& c, const Feed& f) {
     const bool ended=f.phase==Feed::Phase::ended;
     if(!ended)s.hud_ended_at=0;else if(!s.hud_ended_at)s.hud_ended_at=now;
     // A game mode's end has its own winner screen (modes_hud_overlay.cpp): the score block goes.
-    const bool show=f.match && f.phase!=Feed::Phase::lobby && (!ended || (f.one_up && now-s.hud_ended_at<5000));
+    // Game modes draw skate.'s Throwdown HUD themselves (modes_hud_overlay.cpp): this block is 1-Up's.
+    const bool show=f.match && f.one_up && f.phase!=Feed::Phase::lobby && (!ended || now-s.hud_ended_at<5000);
     if(!show) {publish_hud_items(c,false,s.hud_countdown_visible,s.hud_intro_visible);s.hud_ready.store(false);return;}
     const bool rebuild=!s.hud_initialized || !hud_list_has_items(c,s.hud_content,3) || s.hud_player_ids.size()!=f.rows.size();
     if(rebuild) {
@@ -1693,7 +1694,8 @@ void native_score_hud(const Context& c, const Feed& f) {
             c.set(c.field(layout,0xd01f4a21),.85f);
         }
     };
-    place(s.hud_anchor,520.f,height,.95f,.82f,1.f,1.f);
+    // Top left, where skate.'s own Throwdowns put their round, objective and players.
+    place(s.hud_anchor,520.f,height,.045f,.07f,0.f,0.f);
     // A game without a clock (S.K.A.T.E. and the other turn games) shows none.
     s.hud_clock_shown=f.clock_total!=0;
     if(s.hud_clock_shown) {
@@ -1769,9 +1771,9 @@ void native_score_hud(const Context& c, const Feed& f) {
             // row, including the player's name and its stamps.
             mount_hud(c,{},asset(c,"UI/ReSkate/OneUp/EliminatedLine_Widget"),hud.strike_anchor,hud.strike_item,
                 hud_strike_id+static_cast<int>(ids.size()),false);
-            place(hud.strike_anchor,520.f,56.f,.95f,.82f,1.f,1.f);
+            place(hud.strike_anchor,520.f,56.f,.045f,.07f,0.f,0.f);
             const auto layout=c.field(hud.strike_anchor,0x185a5736);
-            const auto offset=.85f*(-height+140.f+static_cast<float>(ids.size())*64.f+56.f);
+            const auto offset=.85f*(140.f+static_cast<float>(ids.size())*64.f);
             c.set(c.field(layout,0x40bfbff4),offset);c.set(c.field(layout,0x1d233266),offset);
         }
         for(unsigned letter=0;letter<shown;++letter) {
@@ -1858,8 +1860,10 @@ void native_results_hud(const Context& c, const Feed& f) {
                 plain_label(c,c.field(row.rank,0x2718c842),std::to_string(rank+1));
                 plain_label(c,row.outcome,won?(f.one_up?std::string("WINNER"):player.value):f.one_up?(player.connected?"1 U P":"LEFT"):player.value);
             };
-            if(!row.row.handle || row.winner!=won) {
-                try { build(won); fill(); }
+            // The winner's own row (TD_WinnerProfileInline) is the suspect in the crash seen after
+            // the board first showed (2026-10-10): every row is the stock player row.
+            if(!row.row.handle) {
+                try { build(false); fill(); }
                 catch(const std::exception& e) {
                     if(!won) throw;
                     logging::log(logging::Level::warning,logging::Channel::ui,"Native results: winner row unavailable ({}); stock row used.",e.what());

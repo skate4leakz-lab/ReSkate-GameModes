@@ -971,31 +971,49 @@ void render(const Context &c) {
         const char *phase = m.phase == 1 ? "setting up" : m.phase == 2 ? "starting" : m.phase == 3 ? "in progress" : "finished";
         note("game", std::format("{} - {} - {} player{}", mode_title(m.mode), phase, m.players, m.players == 1 ? "" : "s"));
         if (m.leading && m.phase == 1) {
-            if (!m.missing.empty()) note("missing", m.missing);
             const auto mode = modes::parse_mode(m.mode);
             const bool wide = mode && modes::tag_like(*mode);
             const bool race = mode == modes::Mode::race, spots = mode == modes::Mode::domination;
-            // What is placed so far, then the free-camera placing (it closes Throwdowns first).
-            if (race)
+            const bool timed = mode && modes::timed(*mode);
+            if (!m.missing.empty()) note("missing", m.missing);
+            // The start: skate.'s own Throwdown flag (Deathrace: its start gate).
+            row(c, shown, "place-flag", race ? "PLACE START FLAG (START GATE)" : "PLACE START FLAG", "flag");
+            if (race) {
                 note("route", m.points < 2 ? std::string("Route: not placed yet")
                                            : std::format("Route: start, {} checkpoint{}, finish", m.points - 2, m.points == 3 ? "" : "s"));
-            else
+                row(c, shown, "place-route", "PLACE CHECKPOINTS AND FINISH", "place", "points");
+            }
+            if (spots) {
+                note("spots", std::format("Spots placed: {}", m.points));
+                row(c, shown, "place-spots", "PLACE SPOTS", "place", "points");
+            }
+            if (!race) {
+                // The play area: a circle round the start (sized here, or placed and sized by hand),
+                // corners, or the whole map.
                 note("area", m.area_radius > 0 ? std::format("Play area: circle {:.0f} m across", m.area_radius * 2)
                              : m.corners >= 3  ? std::format("Play area: {} corners", m.corners)
                                                : std::string("Play area: the whole map"));
-            if (spots) note("spots", std::format("Spots placed: {}", m.points));
-            action("start", "START GAME", "start");
-            // skate.'s own Throwdown flag: where everyone starts (Deathrace's start gate), with the
-            // game's waiting card and its Start for the leader.
-            row(c, shown, "place-flag", race ? "PLACE START FLAG (START GATE)" : "PLACE START FLAG", "flag");
-            if (race) row(c, shown, "place-route", "PLACE ROUTE AND CHECKPOINTS", "place", "points");
-            if (spots) row(c, shown, "place-spots", "PLACE SPOTS", "place", "points");
-            if (!race) {
-                row(c, shown, "place-circle", "PLACE PLAY AREA", "place", "circle");
-                action("circle", wide ? "PLAY AREA: 150 M AROUND ME" : "PLAY AREA: 40 M AROUND ME", wide ? "circle 150" : "circle 40");
+                static constexpr float small_sizes[]{15, 25, 40, 75, 0}, wide_sizes[]{50, 100, 200, 400, 0};
+                const auto &sizes = wide ? wide_sizes : small_sizes;
+                std::size_t at = 0;
+                for (std::size_t i = 0; i < std::size(sizes); ++i)
+                    if (std::abs(sizes[i] - m.area_radius) < 0.5f) at = i;
+                const float next = sizes[(at + 1) % std::size(sizes)];
+                action("area-size", next > 0 ? std::format("PLAY AREA SIZE: {:.0f} M  >", next * 2) : std::string("PLAY AREA SIZE: WHOLE MAP  >"),
+                       next > 0 ? std::format("circle {:.0f}", next) : std::string("corner clear"));
+                row(c, shown, "place-circle", "CUSTOM PLAY AREA (PLACE AND SIZE IT)", "place", "circle");
             }
+            if (timed) {
+                static constexpr std::uint32_t times[]{60, 120, 180, 300, 600};
+                std::size_t at = 0;
+                for (std::size_t i = 0; i < std::size(times); ++i)
+                    if (times[i] == m.duration) at = i;
+                const auto next = times[(at + 1) % std::size(times)];
+                action("time", std::format("TIME: {}:{:02}  >", next / 60, next % 60), std::format("time {}", next));
+            }
+            action("start", "START GAME", "start");
             action("stop", "CANCEL GAME", "stop");
-            footer_action(c, s.footer_confirm, "START GAME", "mode", "start");
+            footer_action(c, s.footer_confirm, "PLACE START FLAG", "flag");
         } else if (m.leading) {
             action("stop", "END GAME FOR EVERYONE", "stop");
             footer_action(c, s.footer_confirm, "END GAME", "mode", "stop");
@@ -1172,12 +1190,9 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                         // 1-Up is the native one (one_up_menu.cpp): skate.'s own setup and flag.
                         if (!open_native_one_up_setup()) s.status = "1-Up can't start right now (a game or flag is up).";
                     } else if (a.command == "card") {
-                        if (!modes::menu_view().in_game) {
-                            run.push_back({a.generation, "mode", "new " + a.argument, a.pass});
-                            s.flag_after = GetTickCount64() + 4000;
-                            s.status = "Place your start flag.";
-                        } else
-                            switch_page(c, true);
+                        // The mode's own setup page: its play area, time and route, then the start flag.
+                        if (!modes::menu_view().in_game) run.push_back({a.generation, "mode", "new " + a.argument, a.pass});
+                        switch_page(c, true);
                     }
                     else if (a.command == "back") switch_page(c, false);
                     else if (a.command == "mode") run.push_back(a);

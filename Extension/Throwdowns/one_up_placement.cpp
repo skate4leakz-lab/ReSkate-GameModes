@@ -271,10 +271,9 @@ void tick_flag_placement(const menu_data::Context& c) {
             const auto m=modes::native_match();
             const bool same=modes::flag_game()==p.mode_game || (m.active && m.key==p.mode_game);
             if(p.handed_off && p.mmid && !p.destroy_queued && same && (m.phase==2 || m.phase==3)) destroy=p.mmid;
-            if(!same || (p.handed_off && !p.mmid && p.destroyed)) {
-                if(!same) { p.step=Step::cleanup; p.cancelling=true; p.until=now+15000; }
-                else { reset(p); p.status.clear(); return; }
-            }
+            // The native waiting card can outlive its destroyed queue: it stays this game's (its
+            // name, LEAVE / END GAME) until the game is over, never Spot Battle's again.
+            if(!same) { p.step=Step::cleanup; p.cancelling=true; p.until=now+15000; }
         }
         else if(p.step==Step::waiting) {
             // Keep the native registration alive: it owns the world flag,

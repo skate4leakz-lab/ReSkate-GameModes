@@ -2304,12 +2304,15 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         return "Game stopped.";
     }
     if (g.referee) return "error: the game has started; only `mode stop` now.";
+    if (v == "flagtest") { // development: as if the native flag landed where the skater stands
+        if (!s.skater) return "error: no skater.";
+        return apply_flag(s, s.position, s.heading);
+    }
     if (v == "flag") {
         // skate.'s own Throwdown flag (Spot Battle's placement): where everyone starts.
-        s.flaggable.store(game_key(g));
-        return multiplayer::one_up::begin_mode_flag_placement(true)
-            ? std::string("Place your start flag: skate.'s flag placement is opening.")
-            : std::string("error: the flag can't be placed right now (a 1-Up or another flag is up, or no world is loaded).");
+        // Opened from the world, the Throwdowns page can crash the game: the flag is placed from
+        // the mode's own page in Throwdowns (PLACE START FLAG).
+        return "Open Throwdowns, pick this mode's card and press PLACE START FLAG.";
     }
     const auto changed = [&](std::string text) {
         settings_changed(g);
@@ -2358,7 +2361,8 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
             }
             s.placing = State::Placing::points;
             return g.settings.mode == Mode::race
-                ? std::string("Close the menu and skate the course: D-pad Right (Enter) drops the start and each checkpoint, D-pad Down (End) the finish.")
+                ? (g.settings.points.size() == 1 ? std::string("Your flag is the start. Now drop each checkpoint with D-pad Right (Enter) and the finish with D-pad Down (End).")
+                                                 : std::string("Close the menu and skate the course: D-pad Right (Enter) drops the start and each checkpoint, D-pad Down (End) the finish."))
                 : std::format("Close the menu and skate to each {}: D-pad Right (Enter) adds one, D-pad Down (End) finishes.", point_name(g));
         }
         return "error: usage: mode place circle|corners|points|cancel";
@@ -2516,9 +2520,17 @@ std::string apply_flag(State &s, const Vec3 &spot, float yaw_degrees) {
             else g.settings.yaws.front() = yaw_degrees;
         }
     }
+    // A circle play area is the flag's: centred on where the game starts.
+    if (g.settings.area_radius > 0 && g.settings.corners.size() == 1) g.settings.corners[0] = spot;
     s.flag_key = game_key(g);
     s.flag_yaw = yaw_degrees;
     settings_changed(g);
+    // Deathrace and Domination go on to the rest of their course: from the flag (the start gate),
+    // the checkpoints and the finish, or the spots, with the free-camera placer.
+    if (g.settings.mode == Mode::race || g.settings.mode == Mode::domination) {
+        const auto placing = command("place", {"points"});
+        return std::format("{} flag placed. {}", mode_name(g.settings.mode), placing);
+    }
     logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: native flag for {} at ({:.1f}, {:.1f}, {:.1f}), facing {:.0f}.",
                  mode_name(g.settings.mode), spot[0], spot[1], spot[2], yaw_degrees);
     return std::format("{} flag placed. Everyone starts here.", mode_name(g.settings.mode));
