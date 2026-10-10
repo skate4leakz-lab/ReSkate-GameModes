@@ -16,8 +16,21 @@
 namespace dingosdk::overlay {
 namespace {
 std::atomic<ModesHudFeed> modes_hud_feed{};
+// What skate.'s own widgets show (bits: 1 score, 2 countdown, 4 results), and when that was said:
+// stale after a second (the native menu stopped ticking), so nothing is ever left undrawn.
+std::atomic<unsigned> native_parts{};
+std::atomic<std::uint64_t> native_said{};
 }
 void set_modes_hud_feed(ModesHudFeed feed) noexcept { modes_hud_feed.store(feed); }
+void set_native_modes_hud(NativeModesHud parts) noexcept {
+    native_parts.store((parts.score ? 1u : 0u) | (parts.countdown ? 2u : 0u) | (parts.results ? 4u : 0u));
+    native_said.store(GetTickCount64());
+}
+NativeModesHud native_modes_hud() noexcept {
+    if (GetTickCount64() - native_said.load() > 1000) return {};
+    const auto bits = native_parts.load();
+    return {(bits & 1u) != 0, (bits & 2u) != 0, (bits & 4u) != 0};
+}
 } // namespace dingosdk::overlay
 
 using namespace dingosdk::overlay::detail;
@@ -427,9 +440,21 @@ void dpad_glyph(ImDrawList *draw, ImVec2 c, float size, char lit) {
 
 // The scoreboard on the right: the mode and clock over a thin accent line, what to do, then the
 // standings, each on a band fading in from the screen's edge.
-void draw_panel(ImDrawList *draw, HudState &st, float scale) {
+void draw_panel(ImDrawList *draw, HudState &st, float scale, bool native_score = false) {
     auto &s = state();
     const auto &h = st.hud;
+    if (native_score) {
+        // The game's own score block shows the mode, the clock and the players: only what to do now.
+        if (h.status.empty()) return;
+        auto *body = s.menu.body ? s.menu.body : ImGui::GetFont();
+        const auto display = ImGui::GetIO().DisplaySize;
+        const float right = display.x - 36.0f * scale, width = 360.0f * scale, left = right - width, y = 112.0f * scale;
+        const auto extent = body->CalcTextSizeA(15.0f * scale, FLT_MAX, width, h.status.c_str());
+        band(draw, ImVec2(left - 40.0f * scale, y - 4.0f * scale), ImVec2(display.x, y + extent.y + 6.0f * scale), 0.4f, -1);
+        draw->AddText(body, 15.0f * scale, ImVec2(left + 1, y + 1), IM_COL32(0, 0, 0, 160), h.status.c_str(), nullptr, width);
+        draw->AddText(body, 15.0f * scale, ImVec2(left, y), IM_COL32(230, 232, 236, 255), h.status.c_str(), nullptr, width);
+        return;
+    }
     auto *heading = s.menu.heading ? s.menu.heading : ImGui::GetFont();
     auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
     auto *body = s.menu.body ? s.menu.body : ImGui::GetFont();
@@ -480,7 +505,7 @@ void draw_panel(ImDrawList *draw, HudState &st, float scale) {
 
 // The middle of the screen: the countdown, the latest callout as a toast, the line being skated,
 // the placing controls as button prompts and the out-of-area warning.
-void draw_centre(ImDrawList *draw, HudState &st, float scale) {
+void draw_centre(ImDrawList *draw, HudState &st, float scale, bool native_countdown = false) {
     auto &s = state();
     const auto &h = st.hud;
     auto *title = s.menu.title ? s.menu.title : ImGui::GetFont();
@@ -490,7 +515,7 @@ void draw_centre(ImDrawList *draw, HudState &st, float scale) {
     const float mid = display.x * 0.5f;
     // Countdown: each number pops in.
     // Neon: a clean ring that drains with each second, a white number with a neon glow, popping in.
-    if (h.clock.size() == 1) {
+    if (h.clock.size() == 1 && !native_countdown) {
         const float t = static_cast<float>(std::fmod(ImGui::GetTime(), 1.0));
         const float pop = std::max(0.0f, 1.0f - t * 5.0f), grow = 1.0f + 0.18f * pop * pop;
         const ImVec2 c(mid, display.y * 0.32f);
@@ -514,7 +539,7 @@ void draw_centre(ImDrawList *draw, HudState &st, float scale) {
     if (!h.banner.empty() && age < 3.6f) {
         const float in = std::min(1.0f, age / 0.18f), out = age < 3.0f ? 1.0f : (3.6f - age) / 0.6f, alpha = in * out;
         const bool go = h.banner == "GO!";
-        if (go) { // GO! in neon where the countdown was, growing out as it fades
+        if (go && !native_countdown) { // GO! in neon where the countdown was, growing out as it fades (unless the game shows its own)
             const float size = 110.0f * scale * (1.0f + 0.25f * (1.0f - out));
             neon_text(draw, title, size, ImVec2(mid - text_width(title, size, h.banner) * 0.5f, display.y * 0.32f - size * 0.56f),
                       with_alpha(neon_go, alpha), h.banner);
@@ -1450,12 +1475,13 @@ void draw_modes_hud() {
     }
     draw_tag_players(draw, h.hud, scale);
     draw_heat(draw, h.hud, scale);
+    const auto native = native_modes_hud();
     if (h.hud.results) {
-        draw_results(draw, h.hud, scale);
+        if (!native.results) draw_results(draw, h.hud, scale);
         return;
     }
-    draw_panel(draw, h, scale);
-    draw_centre(draw, h, scale);
+    draw_panel(draw, h, scale, native.score);
+    draw_centre(draw, h, scale, native.countdown || native.score);
     draw_trick_diagram(draw, h.hud, scale);
     if (h.hud.placing && h.hud.aiming) {
         // The quick-drop reticle: white with a dot when it finds the ground, red when it does not.

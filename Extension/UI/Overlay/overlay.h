@@ -417,6 +417,13 @@ struct ModesHud {
     float vertical_fov{};
 };
 using ModesHudFeed = ModesHud (*)();
+// Which parts of the game modes HUD skate.'s own widgets show now (the native score block with its
+// clock, the 3-2-1, the results board: Extension/UI/NativeMenu/one_up_menu.cpp); those are left out
+// of the drawn HUD. Any thread.
+struct NativeModesHud {
+    bool score{}, countdown{}, results{};
+};
+void set_native_modes_hud(NativeModesHud) noexcept;
 void set_modes_hud_feed(ModesHudFeed) noexcept;
 // The Bone Cam (Extension/Modes/bone_cam.h): during a big bail the screen goes X-ray and every
 // bone of the local skater is drawn between its real joints, the ones that took a hard hit in red,

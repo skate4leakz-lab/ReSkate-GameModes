@@ -8,6 +8,8 @@
 #include "native_menu_dump.h"
 #include "native_menu_internal.h"
 #include "Extension/Throwdowns/one_up_runtime.h"
+#include "Extension/Modes/game_modes.h"
+#include "Extension/UI/Overlay/overlay.h"
 #include "Extension/Throwdowns/native_throwdowns.h"
 #include "Extension/Throwdowns/one_up_placement.h"
 #include "Extension/Throwdowns/throwdown_lab.h"
@@ -47,8 +49,8 @@ using Action = MenuAction;
 struct Descriptor { alignas(8) std::array<std::byte, 0x70> bytes{}; Address info{}; Action action; };
 struct Row { Value model, anchor, tile, selector; std::vector<Handle> choices; std::string text; Address callback{}; };
 struct Original { Value tile, category, description; std::array<float,2> tile_size{}, description_size{}; float icon_width{}, icon_height{}; };
-struct HudPlayer { Value row, background, name, stamps, strike_anchor, strike_item; std::array<Value,3> letters; bool out{}; };
-struct ResultPlayer { Value row, rank, outcome; };
+struct HudPlayer { Value row, background, name, stamps, strike_anchor, strike_item; std::array<Value,3> letters; bool out{}, stamps_row{}; };
+struct ResultPlayer { Value row, rank, outcome; bool winner{}; };
 struct State {
     // Borrowed native marker fields, restored when this match releases them.
     std::map<Handle,std::pair<Value,bool>> marker_originals;
@@ -68,10 +70,11 @@ struct State {
     std::uint32_t results_turn{};
     std::map<std::uint64_t,HudPlayer> hud_players;
     std::vector<std::uint64_t> hud_player_ids;
-    bool hud_initialized{}, hud_countdown_visible{}, hud_intro_visible{};
+    bool hud_initialized{}, hud_countdown_visible{}, hud_intro_visible{}, hud_clock_shown{}, hud_results_visible{};
+    int hud_kind=-1; // the feed the widgets were built for: 1 1-Up, 0 a game mode
     std::atomic<bool> hud_ready{};
     std::uint64_t hud_ended_at{}, hud_go_until{};
-    one_up::Token hud_countdown_token;
+    std::uint64_t hud_countdown_token{}; // the countdown on screen (Feed::token)
     std::uint64_t waiting_diagnostic{};
     std::set<Handle> waiting_widgets;
     std::set<Handle> waiting_backups;
@@ -471,7 +474,7 @@ void clear_hud_state() {
     s.hud_board={};s.hud_rows={};s.hud_players.clear();s.hud_player_ids.clear();
     s.hud_results={};s.hud_results_title={};s.hud_results_notice={};s.hud_results_rows={};
     s.hud_results_anchor={};s.hud_results_item={};s.result_players.clear();s.eliminated_at.clear();s.results_match=0;s.results_turn=0;
-    s.hud_initialized=false;s.hud_countdown_visible=false;s.hud_intro_visible=false;
+    s.hud_initialized=false;s.hud_countdown_visible=false;s.hud_intro_visible=false;s.hud_clock_shown=false;s.hud_results_visible=false;s.hud_kind=-1;
 }
 void publish_hud_items(const Context& c,bool score,bool countdown,bool intro=false,bool results=false) {
     auto& s=state();if(!s.hud_stack.handle)return;
@@ -485,7 +488,7 @@ void publish_hud_items(const Context& c,bool score,bool countdown,bool intro=fal
         std::int32_t id{};std::memcpy(&id,old.data()+i*stride+offset,4);
         if(id!=hud_score_id && id!=hud_countdown_id && id!=hud_intro_id && id!=hud_results_id && id!=hud_clock_id && !(id>=hud_strike_id && id<hud_strike_id+6))next.insert(next.end(),old.begin()+i*stride,old.begin()+(i+1)*stride);
     }
-    for(const auto item:{score?s.hud_item:Value{},score?s.hud_clock_item:Value{},countdown?s.hud_timer_item:Value{},intro?s.hud_intro_item:Value{},results?s.hud_results_item:Value{}})if(item.handle) {
+    for(const auto item:{score?s.hud_item:Value{},score && s.hud_clock_shown?s.hud_clock_item:Value{},countdown?s.hud_timer_item:Value{},intro?s.hud_intro_item:Value{},results?s.hud_results_item:Value{}})if(item.handle) {
         const auto start=next.size();next.resize(start+stride);
         require(memory::peek_bytes(c.address(item),next.data()+start,stride),"Native HUD item unavailable.");
     }
@@ -1439,17 +1442,97 @@ void mount_hud(const Context& c,Value model,Address blueprint,Value& anchor,Valu
         }
         anchor=next_anchor;item=next_item;
 }
-void native_countdown_hud(const Context& c) {
-    auto& s=state();const auto v=one_up::view();const auto now=GetTickCount64();
-    const bool countdown=v.state.match && v.state.phase==one_up::Phase::countdown && !v.positioning;
-    const one_up::Token token{v.state.match,v.state.turn,v.state.active};
-    const bool fresh_countdown=countdown && s.hud_countdown_token!=token;
-    // The first half announces the mode using the native Throwdown banner;
+// What skate.'s own HUD widgets show: a 1-Up match, or else the local player's game mode (Spot Jam,
+// Deathrace, Skate Tag...: Extension/Modes). The same native intro, 3-2-1, score block with its
+// clock, elimination stamps or scores, and results board serve both.
+struct Feed {
+    bool match{}, one_up{};
+    std::uint64_t key{};             // the match or game
+    std::uint64_t token{};           // changes for each countdown (each 1-Up turn)
+    enum class Phase { lobby, countdown, playing, ended } phase{};
+    bool positioning{}, practice_done{}, cancelled{};
+    std::uint32_t remaining{};       // the countdown's or the clock's time left
+    std::uint32_t clock_total{};     // the clock's whole length (0: no clock)
+    std::uint32_t results_after{};   // how long after the end the results board replaces the score
+    std::string title, tagline, headline, best, mine, results_notice;
+    struct Row {
+        std::uint64_t id{};
+        std::string name, value;     // value: a game mode's score (1-Up shows stamps)
+        unsigned penalties{};
+        bool out{}, self{}, focus{}, connected = true;
+    };
+    std::vector<Row> rows;           // the results board's order
+    std::uint64_t winner{}, local{};
+};
+std::string upper_text(std::string text) {
+    for (auto& ch : text) ch = static_cast<char>(ch >= 'a' && ch <= 'z' ? ch - 'a' + 'A' : ch);
+    return text;
+}
+Feed current_feed() {
+    Feed f;
+    const auto v = one_up::view();
+    if (v.state.match) {
+        f.match = f.one_up = true;
+        f.key = v.state.match;
+        f.local = v.local;
+        f.token = v.state.match * 0x9E3779B97F4A7C15ULL ^ (static_cast<std::uint64_t>(v.state.turn) << 32) ^ v.state.active;
+        switch (v.state.phase) {
+        case one_up::Phase::lobby: f.phase = Feed::Phase::lobby; break;
+        case one_up::Phase::countdown: f.phase = Feed::Phase::countdown; break;
+        case one_up::Phase::finished:
+        case one_up::Phase::cancelled: f.phase = Feed::Phase::ended; break;
+        default: f.phase = Feed::Phase::playing; break;
+        }
+        f.cancelled = v.state.phase == one_up::Phase::cancelled;
+        f.positioning = v.positioning;
+        f.remaining = v.remaining;
+        f.clock_total = v.state.config.turn_ms;
+        f.results_after = 4000;
+        f.title = "1-UP";
+        f.tagline = "Beat the target. Last skater standing wins!";
+        const auto points = [](double n) { return std::to_string(static_cast<std::uint32_t>(std::max(0.0, n))); };
+        f.best = points(v.state.target);
+        f.mine = points(v.state.best);
+        f.winner = v.state.winner;
+        f.practice_done = v.solo_test && v.state.phase == one_up::Phase::cancelled &&
+                          std::any_of(v.state.players.begin(), v.state.players.end(), [](const auto& p) { return p.penalties == 3; });
+        f.headline = f.phase == Feed::Phase::ended ? (v.state.winner ? v.name(v.state.winner) + " WINS!" : std::string("1-UP COMPLETE"))
+                                                   : "1-UP  /  " + v.name(v.state.active);
+        f.results_notice = v.state.winner ? v.name(v.state.winner) + " WINS!" : std::string("PRACTICE COMPLETE");
+        for (const auto& p : v.state.players)
+            f.rows.push_back({p.id, v.name(p.id), {}, p.penalties, !p.eligible(), p.id == v.local, false, p.connected});
+        return f;
+    }
+    const auto m = modes::native_match();
+    if (!m.active) return f;
+    f.match = true;
+    f.key = f.token = m.key;
+    f.phase = m.phase == 2 ? Feed::Phase::countdown : m.phase == 3 ? Feed::Phase::playing : m.phase == 4 ? Feed::Phase::ended : Feed::Phase::lobby;
+    f.remaining = m.remaining_ms;
+    f.clock_total = m.clock_ms;
+    f.results_after = 1200;
+    f.title = m.title;
+    f.tagline = m.tagline;
+    f.headline = f.phase == Feed::Phase::ended && !m.winner.empty() ? upper_text(m.winner) + " WINS!" : m.headline;
+    f.best = m.best;
+    f.mine = m.mine;
+    f.results_notice = m.winner.empty() ? std::string("GAME OVER") : upper_text(m.winner) + " WINS!";
+    for (const auto& r : m.rows) {
+        f.rows.push_back({r.id, r.name, r.value, 0, r.out, r.self, r.up, true});
+        if (r.self) f.local = r.id;
+    }
+    if (f.phase == Feed::Phase::ended && !m.rows.empty() && !m.winner.empty()) f.winner = m.rows.front().id;
+    return f;
+}
+void native_countdown_hud(const Context& c, const Feed& f) {
+    auto& s=state();const auto now=GetTickCount64();
+    const bool countdown=f.match && f.phase==Feed::Phase::countdown && !f.positioning;
+    const bool fresh_countdown=countdown && s.hud_countdown_token!=f.token;
+    // The first part announces the mode using the native Throwdown banner;
     // the final three seconds use TurnStartCountdownHUDRule's actual widget.
-    s.hud_intro_visible=countdown && v.remaining>3000;
+    s.hud_intro_visible=countdown && f.remaining>3000;
     if(countdown && !s.hud_intro_visible)s.hud_go_until=now+900;
-    const bool show_go=v.state.match && v.state.phase==one_up::Phase::playing &&
-        s.hud_countdown_token==token && now<s.hud_go_until;
+    const bool show_go=f.match && f.phase==Feed::Phase::playing && s.hud_countdown_token==f.token && now<s.hud_go_until;
     s.hud_countdown_visible=(countdown && !s.hud_intro_visible) || show_go;
     if(s.hud_intro_visible) {
         if(!s.hud_intro.handle) {
@@ -1458,15 +1541,18 @@ void native_countdown_hud(const Context& c) {
             const auto heading=c.field(s.hud_intro,0xcbc57608);
             const auto authored=record_model(c,"TD_Hud_ContentResources/TD_ActivityBanner_ContentWithTitle");
             c.copy(heading,c.address(authored));
-            plain_label(c,c.field(heading,0x44688629),"1-UP");
             label_styles(c,c.field(heading,0x44688629),"TextStylesList/D180-Caps_White","TextStylesList/D180-Caps_White");
-            plain_label(c,c.field(heading,0x00f3b15e),"Beat the target. Last skater standing wins!");
-            s.hud_intro_badge=make(c,texture_schema);
-            c.set(c.field(s.hud_intro_badge,0xf524c836),256.f);
-            c.set(c.field(s.hud_intro_badge,0x6fbd254e),256.f);
-            c.set(c.field(heading,content),Widget{asset(c,"UI/Foundations/Components/Media/Icons/Texture_Widget"),{0,s.hud_intro_badge.handle}});
+            if(f.one_up) {
+                s.hud_intro_badge=make(c,texture_schema);
+                c.set(c.field(s.hud_intro_badge,0xf524c836),256.f);
+                c.set(c.field(s.hud_intro_badge,0x6fbd254e),256.f);
+                c.set(c.field(heading,content),Widget{asset(c,"UI/Foundations/Components/Media/Icons/Texture_Widget"),{0,s.hud_intro_badge.handle}});
+            }
         }
-        publish_texture(c,std::array{c.field(s.hud_intro_badge,0x6e469d2a)},"UI/ReSkate/OneUp/img_OneUp_Blue_1024");
+        const auto heading=c.field(s.hud_intro,0xcbc57608);
+        plain_label(c,c.field(heading,0x44688629),f.title);
+        plain_label(c,c.field(heading,0x00f3b15e),f.tagline);
+        if(s.hud_intro_badge.handle)publish_texture(c,std::array{c.field(s.hud_intro_badge,0x6e469d2a)},"UI/ReSkate/OneUp/img_OneUp_Blue_1024");
         mount_hud(c,s.hud_intro,asset(c,"UI/Features/Activities/Blueprints/ActivityBanner_CenterFullWidth_Widget"),s.hud_intro_anchor,s.hud_intro_item,hud_intro_id,true);
         c.set(c.field(s.hud_intro_anchor,0x1cff7243),std::array<float,2>{1920.f,600.f});
     }
@@ -1475,25 +1561,24 @@ void native_countdown_hud(const Context& c) {
         // ActivityCountdownViewModel drives the stock grunge/scribble
         // transitions. CountdownViewModel belongs to the small queue timer
         // and is not the model consumed by the game's turn-start animation.
-        plain_label(c,c.field(s.hud_timer,0x58c9d354),show_go?"GO!":std::to_string(native_hud_seconds(v.remaining)));
-        c.set(c.field(s.hud_timer,1698918111U),show_go?0.f:std::clamp(static_cast<float>(v.remaining)/3000.f,0.f,1.f));
+        plain_label(c,c.field(s.hud_timer,0x58c9d354),show_go?"GO!":std::to_string(native_hud_seconds(f.remaining)));
+        c.set(c.field(s.hud_timer,1698918111U),show_go?0.f:std::clamp(static_cast<float>(f.remaining)/3000.f,0.f,1.f));
         mount_hud(c,s.hud_timer,asset(c,"UI/Features/Activities/Widgets/System/ActivityCountdown_Widget"),s.hud_timer_anchor,s.hud_timer_item,hud_countdown_id,true);
         c.set(c.field(s.hud_timer_anchor,0x1cff7243),std::array<float,2>{512.f,512.f});
     }
     if(fresh_countdown) {
-        s.hud_countdown_token=token;
-        logging::write(logging::Level::info,logging::Channel::ui,"1-Up: native Throwdown intro and ActivityCountdown 3-2-1/GO sequence mounted.");
+        s.hud_countdown_token=f.token;
+        logging::log(logging::Level::info,logging::Channel::ui,"Native HUD: {} intro and ActivityCountdown 3-2-1/GO sequence mounted.",f.title);
     }
     publish_hud_items(c,s.hud_ready.load(),s.hud_countdown_visible,s.hud_intro_visible);
 }
-void native_score_hud(const Context& c) {
-    auto& s=state();const auto v=one_up::view();const auto now=GetTickCount64();
-    const bool ended=v.state.phase==one_up::Phase::finished || v.state.phase==one_up::Phase::cancelled;
+void native_score_hud(const Context& c, const Feed& f) {
+    auto& s=state();const auto now=GetTickCount64();
+    const bool ended=f.phase==Feed::Phase::ended;
     if(!ended)s.hud_ended_at=0;else if(!s.hud_ended_at)s.hud_ended_at=now;
-    const bool show=v.state.match && v.state.phase!=one_up::Phase::lobby &&
-        (!ended || now-s.hud_ended_at<5000);
+    const bool show=f.match && f.phase!=Feed::Phase::lobby && (!ended || now-s.hud_ended_at<5000);
     if(!show) {publish_hud_items(c,false,s.hud_countdown_visible,s.hud_intro_visible);s.hud_ready.store(false);return;}
-    const bool rebuild=!s.hud_initialized || !hud_list_has_items(c,s.hud_content,3) || s.hud_player_ids.size()!=v.state.players.size();
+    const bool rebuild=!s.hud_initialized || !hud_list_has_items(c,s.hud_content,3) || s.hud_player_ids.size()!=f.rows.size();
     if(rebuild) {
         // These are the same authored records Spot Battle publishes, with
         // private mutable copies. No native style or default is overwritten.
@@ -1512,11 +1597,11 @@ void native_score_hud(const Context& c) {
         hud_list(c,s.hud_content,{
             {asset(c,"UI/Foundations/Components/Text/Label/Widget/Label_Widget"),{0,s.hud_title.handle}},
             {asset(c,"UI/Foundations/Components/Modals/ContentPresenterCombination_Widget"),{0,s.hud_notice.handle}},
-            {asset(c,"UI/Foundations/Components/Lists/LinearList/Widget/LinearList_Widget"),{0,s.hud_rows.handle}}},false,60.f,10.f,64.f*static_cast<float>(v.state.players.size()),520.f);
+            {asset(c,"UI/Foundations/Components/Lists/LinearList/Widget/LinearList_Widget"),{0,s.hud_rows.handle}}},false,60.f,10.f,64.f*static_cast<float>(f.rows.size()),520.f);
         s.hud_initialized=true;
     }
     mount_hud(c,s.hud_content,asset(c,"UI/Foundations/Components/Lists/LinearList/Widget/LinearList_Widget"),s.hud_anchor,s.hud_item,hud_score_id,false);
-    const auto height=140.f+64.f*static_cast<float>(v.state.players.size());
+    const auto height=140.f+64.f*static_cast<float>(f.rows.size());
     const auto place=[&](Value anchor,float width,float h,float x,float y,float pivot_x,float pivot_y) {
         c.set(c.field(anchor,0x1cff7243),std::array<float,2>{width,h});
         for(const auto axis:{0xde7d30c7U,0x185a5736U}) {
@@ -1528,66 +1613,76 @@ void native_score_hud(const Context& c) {
         }
     };
     place(s.hud_anchor,520.f,height,.95f,.82f,1.f,1.f);
-    mount_hud(c,s.hud_clock,asset(c,"UI/Foundations/Components/Countdown/Countdown_Widget"),s.hud_clock_anchor,s.hud_clock_item,hud_clock_id,false);
-    place(s.hud_clock_anchor,150.f,64.f,.5f,.93f,.5f,1.f);
-    const auto points=[](double n){return std::to_string(static_cast<std::uint32_t>(std::max(0.0,n)));};
-    plain_label(c,s.hud_title,ended?(v.state.winner?v.name(v.state.winner)+" WINS!":"1-UP COMPLETE"):
-        "1-UP  /  "+v.name(v.state.active));
-    plain_label(c,c.field(s.hud_target,0x58c9d354),points(v.state.target));
-    plain_label(c,c.field(s.hud_current,0x94703efc),points(v.state.best));
-    const auto timer=s.hud_clock;
-    c.set(c.field(timer,0x703c4d93),false);
-    c.set(c.field(timer,0x167131bb),!ended);c.set(c.field(timer,0x6186003c),!ended);
-    c.set(c.field(timer,0xc11082ee),true);
-    native_timer_seconds(c,timer,0x4cc5ec89,v.state.config.turn_ms);
-    native_timer_seconds(c,timer,0x0ec4a8c0,v.state.phase==one_up::Phase::playing?v.remaining:0);
+    // A game without a clock (S.K.A.T.E. and the other turn games) shows none.
+    s.hud_clock_shown=f.clock_total!=0;
+    if(s.hud_clock_shown) {
+        mount_hud(c,s.hud_clock,asset(c,"UI/Foundations/Components/Countdown/Countdown_Widget"),s.hud_clock_anchor,s.hud_clock_item,hud_clock_id,false);
+        place(s.hud_clock_anchor,150.f,64.f,.5f,.93f,.5f,1.f);
+    }
+    plain_label(c,s.hud_title,f.headline);
+    plain_label(c,c.field(s.hud_target,0x58c9d354),f.best.empty()?"-":f.best);
+    plain_label(c,c.field(s.hud_current,0x94703efc),f.mine.empty()?"-":f.mine);
+    if(s.hud_clock_shown) {
+        const auto timer=s.hud_clock;
+        c.set(c.field(timer,0x703c4d93),false);
+        c.set(c.field(timer,0x167131bb),!ended);c.set(c.field(timer,0x6186003c),!ended);
+        c.set(c.field(timer,0xc11082ee),true);
+        native_timer_seconds(c,timer,0x4cc5ec89,f.clock_total);
+        native_timer_seconds(c,timer,0x0ec4a8c0,f.phase==Feed::Phase::playing?f.remaining:0);
+    }
     std::vector<std::uint64_t> ids;
     std::vector<Widget> rows;
-    for(const auto& player:v.state.players) {
-        auto [entry,fresh]=s.hud_players.try_emplace(player.id);
-        auto& hud=entry->second;
+    for(const auto& player:f.rows) {
+        auto& hud=s.hud_players[player.id];
+        // 1-Up: the name and its three 1-U-P stamps. A game mode: the name and one wider stamp
+        // holding the player's score.
+        const bool stamps=f.one_up;
+        const unsigned shown=stamps?3U:1U;
+        if(hud.row.handle && hud.stamps_row!=stamps) hud.row={}; // the other kind of row: built again
         if(!hud.row.handle) {
+            hud.stamps_row=stamps;
             hud.row=make(c,linear_list);
-            hud.name=record_model(c,"TD_Hud_ContentResources/TD_HUD_Header_Label");
-            label_styles(c,hud.name,"TextStylesList/H52-XBold_White","TextStylesList/H52-XBold_White");
-            c.set(c.field(hud.name,0x87ad624c),2); // Native Label.VerticalAlignment: center.
-            c.set(c.field(hud.name,0xc13ba637),false); // FitHeightToContent must not override the row height.
-            std::vector<Widget> letters;
+            if(!hud.name.handle) {
+                hud.name=record_model(c,"TD_Hud_ContentResources/TD_HUD_Header_Label");
+                label_styles(c,hud.name,"TextStylesList/H52-XBold_White","TextStylesList/H52-XBold_White");
+                c.set(c.field(hud.name,0x87ad624c),2); // Native Label.VerticalAlignment: center.
+                c.set(c.field(hud.name,0xc13ba637),false); // FitHeightToContent must not override the row height.
+            }
             unsigned index{};
             for(const auto* letter:{"1","U","P"}) {
                 auto& stamp=hud.letters[index++];
-                stamp=record_model(c,"Activities_HudElementData_ContentResource/Activity_HUD_CurrentScore_Notice");
-                c.set(c.field(stamp,0x13be0d51),std::array<float,2>{56.f,56.f});
+                if(!stamp.handle)stamp=record_model(c,"Activities_HudElementData_ContentResource/Activity_HUD_CurrentScore_Notice");
+                c.set(c.field(stamp,0x13be0d51),stamps?std::array<float,2>{56.f,56.f}:std::array<float,2>{176.f,56.f});
                 const auto label=c.field(stamp,0x94703efc);
-                plain_label(c,label,letter);
+                plain_label(c,label,stamps?letter:"");
                 label_styles(c,label,"TextStylesList/H52-XBold_White","TextStylesList/H52-XBold_White");
                 c.set(c.field(label,0x87ad624c),2);
                 c.set(c.field(label,0x3d8639d0),2);
                 c.set(c.field(label,0xc13ba637),false);
-                letters.push_back({asset(c,"UI/Foundations/Components/Notices/SmallNotice_Widget"),{0,stamp.handle}});
             }
-            letters.insert(letters.begin(),{asset(c,"UI/Foundations/Components/Text/Label/Widget/Label_Widget"),{0,hud.name.handle}});
-            hud_list(c,hud.row,letters,true,56.f,6.f,0.f,520.f,300.f,true);
-            hud.background=make(c,content_tile_schema);
+            if(!hud.background.handle) {
+                hud.background=make(c,content_tile_schema);
+                c.set(c.field(hud.background,0xa04998ca),false);
+                c.set(c.field(hud.background,0xbc750e6a),false);
+                c.set(c.path(hud.background,{0x0fb0d794,0x8cc042ef}),record_ref(c,"ButtonStyleList/TileButton.RoughPartial.Default"));
+            }
             c.set(c.field(hud.background,widget),Widget{asset(c,"UI/Foundations/Components/Lists/LinearList/Widget/LinearList_Widget"),{0,hud.row.handle}});
-            c.set(c.field(hud.background,0xa04998ca),false);
-            c.set(c.field(hud.background,0xbc750e6a),false);
-            c.set(c.path(hud.background,{0x0fb0d794,0x8cc042ef}),record_ref(c,"ButtonStyleList/TileButton.RoughPartial.Default"));
         }
-        if(!hud_list_has_items(c,hud.row,4)) {
+        if(!hud_list_has_items(c,hud.row,shown+1)) {
             std::vector<Widget> letters;
             letters.push_back({asset(c,"UI/Foundations/Components/Text/Label/Widget/Label_Widget"),{0,hud.name.handle}});
-            for(const auto& stamp:hud.letters)
-                letters.push_back({asset(c,"UI/Foundations/Components/Notices/SmallNotice_Widget"),{0,stamp.handle}});
-            hud_list(c,hud.row,letters,true,56.f,6.f,0.f,520.f,300.f,true);
+            for(unsigned i=0;i<shown;++i)
+                letters.push_back({asset(c,"UI/Foundations/Components/Notices/SmallNotice_Widget"),{0,hud.letters[i].handle}});
+            hud_list(c,hud.row,letters,true,stamps?56.f:176.f,6.f,0.f,520.f,stamps?300.f:330.f,true);
         }
-        plain_label(c,hud.name,v.name(player.id));
-        hud.out=!player.eligible();
+        plain_label(c,hud.name,player.name);
+        if(!stamps)plain_label(c,c.field(hud.letters[0],0x94703efc),player.value);
+        hud.out=player.out;
         label_styles(c,hud.name,hud.out?"TextStylesList/H52-XBold_Grey500":"TextStylesList/H52-XBold_White",
             hud.out?"TextStylesList/H52-XBold_Grey500":"TextStylesList/H52-XBold_White");
         if(hud.out) {
             // Use the game's own randomized Rime scribble across the complete
-            // row, including the player's name and all three penalty stamps.
+            // row, including the player's name and its stamps.
             mount_hud(c,{},asset(c,"UI/ReSkate/OneUp/EliminatedLine_Widget"),hud.strike_anchor,hud.strike_item,
                 hud_strike_id+static_cast<int>(ids.size()),false);
             place(hud.strike_anchor,520.f,56.f,.95f,.82f,1.f,1.f);
@@ -1595,9 +1690,10 @@ void native_score_hud(const Context& c) {
             const auto offset=.85f*(-height+140.f+static_cast<float>(ids.size())*64.f+56.f);
             c.set(c.field(layout,0x40bfbff4),offset);c.set(c.field(layout,0x1d233266),offset);
         }
-        for(unsigned letter=0;letter<3;++letter) {
-            const auto style=record_ref(c,earned_one_up_letter(player.penalties,letter)?
-                "NoticeStylesList/SmallNotice_ControlSelection_Focus":"NoticeStylesList/SmallNotice_ControlSelection_Default");
+        for(unsigned letter=0;letter<shown;++letter) {
+            // 1-Up lights each earned penalty; a game mode lights whoever is up (it, their turn) and the local player.
+            const bool lit=stamps?earned_one_up_letter(player.penalties,letter):(player.focus || player.self);
+            const auto style=record_ref(c,lit?"NoticeStylesList/SmallNotice_ControlSelection_Focus":"NoticeStylesList/SmallNotice_ControlSelection_Default");
             c.set(c.field(hud.letters[letter],0x8cc042ef),style);
             c.set(c.field(hud.letters[letter],0xa1e84eb1),style);
         }
@@ -1608,34 +1704,40 @@ void native_score_hud(const Context& c) {
         hud_list(c,s.hud_rows,rows,false,56.f,8.f,0.f,520.f);s.hud_player_ids=std::move(ids);
     }
     publish_hud_items(c,true,s.hud_countdown_visible,s.hud_intro_visible);
-    if(!s.hud_ready.exchange(true))logging::log(logging::Level::info,logging::Channel::ui,"1-Up: native target/current counters, clock and 1-U-P penalty stamps mounted.");
+    if(!s.hud_ready.exchange(true))logging::log(logging::Level::info,logging::Channel::ui,"Native HUD: {} counters, clock and player rows mounted.",f.title);
 }
-void native_results_hud(const Context& c) {
-    auto& s=state();const auto v=one_up::view();
-    if(s.results_match!=v.state.match || v.state.phase==one_up::Phase::lobby) {
-        s.results_match=v.state.match;s.results_turn=0;s.eliminated_at.clear();
+void native_results_hud(const Context& c, const Feed& f) {
+    auto& s=state();
+    if(s.results_match!=f.key || f.phase==Feed::Phase::lobby) {
+        s.results_match=f.key;s.results_turn=0;s.eliminated_at.clear();
     }
-    for(const auto& player:v.state.players)
-        if(!player.eligible())s.eliminated_at.try_emplace(player.id,v.state.turn);
-    const bool practice_done=v.solo_test && v.state.phase==one_up::Phase::cancelled &&
-        std::any_of(v.state.players.begin(),v.state.players.end(),[](const auto& p){return p.penalties==3;});
-    const bool finished=v.state.match && (v.state.phase==one_up::Phase::finished || practice_done);
-    if(!finished || !s.hud_ended_at || GetTickCount64()-s.hud_ended_at<4000) return;
-    if(!s.hud_results.handle || s.results_turn!=v.state.turn) {
+    std::uint32_t turn{};
+    if(f.one_up) {
+        const auto v=one_up::view();turn=v.state.turn;
+        for(const auto& player:v.state.players)
+            if(!player.eligible())s.eliminated_at.try_emplace(player.id,v.state.turn);
+    }
+    const bool finished=f.match && ((f.phase==Feed::Phase::ended && !f.cancelled) || f.practice_done);
+    s.hud_results_visible=false;
+    if(!finished || !s.hud_ended_at || GetTickCount64()-s.hud_ended_at<f.results_after) return;
+    // Built once per finished match: the board never rebuilds while it is shown.
+    if(!s.hud_results.handle || s.results_turn!=turn+1) {
         if(!s.hud_results_title.handle)s.hud_results_title=record_model(c,"TD_Hud_ContentResources/TD_HUD_Header_Label");
-        plain_label(c,s.hud_results_title,"1-UP RESULTS");
+        plain_label(c,s.hud_results_title,f.title+" RESULTS");
         label_styles(c,s.hud_results_title,"TextStylesList/D94-Caps-Bold_White","TextStylesList/D94-Caps-Bold_White");
         if(!s.hud_results_notice.handle)s.hud_results_notice=record_model(c,"TD_Page_ContentResources/TD_Notice_MenuDescriptionTitle",notice_schema);
-        const auto winner=v.state.winner;
-        plain_label(c,c.field(s.hud_results_notice,0x94703efc),winner?v.name(winner)+" WINS!":"PRACTICE COMPLETE");
+        plain_label(c,c.field(s.hud_results_notice,0x94703efc),f.results_notice);
         label_styles(c,c.field(s.hud_results_notice,0x94703efc),"TextStylesList/H64-XBold_White","TextStylesList/H64-XBold_White");
         c.set(c.field(s.hud_results_notice,0x13be0d51),std::array<float,2>{1200.f,130.f});
-        auto players=v.state.players;
-        std::stable_sort(players.begin(),players.end(),[&](const auto& a,const auto& b){
-            if(a.id==winner || b.id==winner)return a.id==winner && b.id!=winner;
-            const auto at=s.eliminated_at.find(a.id),bt=s.eliminated_at.find(b.id);
-            return (at==s.eliminated_at.end()?UINT32_MAX:at->second)>(bt==s.eliminated_at.end()?UINT32_MAX:bt->second);
-        });
+        auto players=f.rows;
+        if(f.one_up) {
+            const auto winner=f.winner;
+            std::stable_sort(players.begin(),players.end(),[&](const auto& a,const auto& b){
+                if(a.id==winner || b.id==winner)return a.id==winner && b.id!=winner;
+                const auto at=s.eliminated_at.find(a.id),bt=s.eliminated_at.find(b.id);
+                return (at==s.eliminated_at.end()?UINT32_MAX:at->second)>(bt==s.eliminated_at.end()?UINT32_MAX:bt->second);
+            });
+        }
         if(!s.hud_results_rows.handle)
             s.hud_results_rows=record_model(c,"TD_Scoreboard_ContentResources/LEGACY_TD_Scoreboard");
         // Reuse the actual Throwdown results board and its rank/profile rows.
@@ -1643,13 +1745,16 @@ void native_results_hud(const Context& c) {
         // supplied by the original LEGACY_Scoreboard_Widget blueprint.
         c.set(c.field(s.hud_results_rows,0x5a7cec85),true);
         c.set(c.field(s.hud_results_rows,0xb7e92e95),true);
-        plain_label(c,c.element(c.field(s.hud_results_rows,0x3d98d397),2),"1-UP");
+        plain_label(c,c.element(c.field(s.hud_results_rows,0x3d98d397),2),f.title);
         std::vector<Ref> rows;unsigned rank{};
         for(const auto& player:players) {
+            const bool won=f.winner && player.id==f.winner;
             auto& row=s.result_players[player.id];
+            if(row.row.handle && row.winner!=won) row={}; // a winner's row comes from the winner's record
             if(!row.row.handle) {
-                row.row=record_model(c,player.id==winner?"TD_Scoreboard_ContentResources/TD_WinnerProfileInline":"TD_Scoreboard_ContentResources/TD_PlayerProfileInline");
-                row.rank=record_model(c,player.id==winner?"TD_Scoreboard_ContentResources/TD_WinnerRank":"TD_Scoreboard_ContentResources/TD_DefaultRank");
+                row.winner=won;
+                row.row=record_model(c,won?"TD_Scoreboard_ContentResources/TD_WinnerProfileInline":"TD_Scoreboard_ContentResources/TD_PlayerProfileInline");
+                row.rank=record_model(c,won?"TD_Scoreboard_ContentResources/TD_WinnerRank":"TD_Scoreboard_ContentResources/TD_DefaultRank");
                 row.outcome=record_model(c,"TD_Hud_ContentResources/TD_HUD_Header_Label");
                 auto rank_widget=read<Widget>(c.address(c.field(row.row,0xc76d8b73)));
                 rank_widget.data={0,row.rank.handle};
@@ -1658,10 +1763,10 @@ void native_results_hud(const Context& c) {
                 c.array(c.field(scores,0xf2c90867),std::vector<Handle>{});
                 c.array(c.field(scores,rows_field),std::vector<Ref>{{0,row.outcome.handle}});
             }
-            c.set(c.field(row.row,0x8810a01e),player.id==v.local);
-            plain_label(c,c.path(row.row,{0xaed127c3,0x042dd873}),v.name(player.id));
+            c.set(c.field(row.row,0x8810a01e),player.self || player.id==f.local);
+            plain_label(c,c.path(row.row,{0xaed127c3,0x042dd873}),player.name);
             plain_label(c,c.field(row.rank,0x2718c842),std::to_string(++rank));
-            plain_label(c,row.outcome,player.id==winner?"WINNER":player.connected?"1 U P":"LEFT");
+            plain_label(c,row.outcome,f.one_up?(won?"WINNER":player.connected?"1 U P":"LEFT"):player.value);
             rows.push_back({0,row.row.handle});
         }
         const auto player_list=c.field(s.hud_results_rows,0xfcdd0d32);
@@ -1671,14 +1776,15 @@ void native_results_hud(const Context& c) {
             {asset(c,"UI/Foundations/Components/Text/Label/Widget/Label_Widget"),{0,s.hud_results_title.handle}},
             {asset(c,"UI/Foundations/Components/Notices/BasicNotice_Widget"),{0,s.hud_results_notice.handle}},
             {asset(c,"UI/Features/CommunityEvent/LEGACY_Scoreboard_Widget"),{0,s.hud_results_rows.handle}}},false,144.f,16.f,140.f*static_cast<float>(players.size())+100.f,1200.f);
-        s.results_turn=v.state.turn;
-        logging::log(logging::Level::info,logging::Channel::ui,"1-Up: native results leaderboard mounted for {} skater(s).",players.size());
+        s.results_turn=turn+1;
+        logging::log(logging::Level::info,logging::Channel::ui,"Native HUD: {} results leaderboard mounted for {} skater(s).",f.title,players.size());
     }
     mount_hud(c,s.hud_results,asset(c,"UI/Foundations/Components/Lists/LinearList/Widget/LinearList_Widget"),s.hud_results_anchor,s.hud_results_item,hud_results_id,true);
     c.set(c.field(s.hud_results_anchor,0x1cff7243),std::array<float,2>{1200.f,920.f});
     c.set(c.path(s.hud_results_anchor,{0x185a5736,0x99bbed5a}),.5f);
     c.set(c.path(s.hud_results_anchor,{0x185a5736,0x49943bed}),.5f);
     publish_hud_items(c,false,false,false,true);
+    s.hud_results_visible=true;
 }
 void gameplay_hud(const Context& c,std::uint64_t now) {
     auto& s=state();
@@ -1687,25 +1793,41 @@ void gameplay_hud(const Context& c,std::uint64_t now) {
         static std::uint64_t report{};
         if(now>=report) {report=now+10000;logging::log(logging::Level::warning,logging::Channel::ui,"1-Up native waiting HUD: {}",e.what());}
     }
-    try {native_countdown_hud(c);}
+    Feed f;
+    try {f=current_feed();} catch(...) {}
+    if(f.match) {
+        // The widgets were built for the other kind (1-Up stamps, a game mode's scores): built again.
+        const int kind=f.one_up?1:0;
+        if(s.hud_kind>=0 && s.hud_kind!=kind) {
+            try {publish_hud_items(c,false,false);}catch(...) {}
+            clear_hud_state();
+        }
+        s.hud_kind=kind;
+    }
+    try {native_countdown_hud(c,f);}
     catch(const std::exception& e) {
         s.hud_countdown_visible=false;s.hud_intro_visible=false;
         try {publish_hud_items(c,s.hud_ready.load(),false);}catch(...) {}
         static std::uint64_t report{};
-        if(now>=report) {report=now+10000;logging::log(logging::Level::warning,logging::Channel::ui,"1-Up native countdown HUD: {}",e.what());}
+        if(now>=report) {report=now+10000;logging::log(logging::Level::warning,logging::Channel::ui,"Native countdown HUD: {}",e.what());}
     }
-    try {native_score_hud(c);}
+    try {native_score_hud(c,f);}
     catch(const std::exception& e) {
         s.hud_ready.store(false);
         try {publish_hud_items(c,false,s.hud_countdown_visible,s.hud_intro_visible);}catch(...) {}
         static std::uint64_t report{};
-        if(now>=report) {report=now+10000;logging::log(logging::Level::warning,logging::Channel::ui,"1-Up native gameplay HUD: {}",e.what());}
+        if(now>=report) {report=now+10000;logging::log(logging::Level::warning,logging::Channel::ui,"Native gameplay HUD: {}",e.what());}
     }
-    try {native_results_hud(c);}
+    try {native_results_hud(c,f);}
     catch(const std::exception& e) {
+        s.hud_results_visible=false;
         static std::uint64_t report{};
-        if(now>=report) {report=now+10000;logging::log(logging::Level::warning,logging::Channel::ui,"1-Up native results: {}",e.what());}
+        if(now>=report) {report=now+10000;logging::log(logging::Level::warning,logging::Channel::ui,"Native results: {}",e.what());}
     }
+    // Our own drawn HUD (modes_hud_overlay.cpp) leaves out what the game's widgets now show.
+    const bool modes=f.match && !f.one_up;
+    overlay::set_native_modes_hud({modes && s.hud_ready.load(),modes && (s.hud_countdown_visible || s.hud_intro_visible),
+                                   modes && s.hud_results_visible});
 }
 void render(const Context& c) {
     auto& s=state(); const auto v=one_up::view(); std::vector<std::string> shown{"rules"};
