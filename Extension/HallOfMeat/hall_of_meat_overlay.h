@@ -8,6 +8,8 @@
 #include <chrono>
 
 struct ImFontAtlas;
+struct ImVec2;
+typedef unsigned int ImU32;
 
 namespace dingosdk::overlay {
 // Startup: starts reading the images in the background, once.
@@ -20,4 +22,9 @@ void fill_hall_of_meat_images(ImFontAtlas& atlas) noexcept;
 // closed), then the drawing.
 bool hall_of_meat_pending();
 void draw_hall_of_meat();
+// Other game pictures read with Hall of Meat's (the race checkpoint's hoop and bolt), drawn on a
+// screen quad (top left, top right, bottom right, bottom left) on the background draw list, white
+// tinted `tint`. False until they are in the atlas.
+enum class GamePicture { checkpoint_ring, checkpoint_bolt };
+bool draw_game_picture_quad(GamePicture picture, const ImVec2 (&corners)[4], ImU32 tint) noexcept;
 }

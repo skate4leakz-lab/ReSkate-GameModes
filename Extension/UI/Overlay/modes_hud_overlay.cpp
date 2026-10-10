@@ -1,5 +1,6 @@
 #include "overlay_internal.h"
 #include "Extension/UI/skate_theme.h"
+#include "Extension/HallOfMeat/hall_of_meat_overlay.h"
 #include <cmath>
 #include <format>
 #include <optional>
@@ -566,6 +567,50 @@ void draw_centre(ImDrawList *draw, HudState &st, float scale) {
     }
 }
 
+// A picture standing in the world: its quad's centre, half its width along `side` (a unit vector)
+// and half its height along `upward`. False when a corner is behind the camera or the picture is
+// not loaded yet.
+bool world_picture(const Camera &cam, GamePicture picture, const Vec3 &centre, const Vec3 &side, const Vec3 &upward, float half_w,
+                   float half_h, ImU32 tint) {
+    const auto at = [&](float s, float u) {
+        return Vec3{centre[0] + side[0] * s * half_w + upward[0] * u * half_h, centre[1] + side[1] * s * half_w + upward[1] * u * half_h,
+                    centre[2] + side[2] * s * half_w + upward[2] * u * half_h};
+    };
+    const auto a = cam.project(at(-1, 1)), b = cam.project(at(1, 1)), c = cam.project(at(1, -1)), d = cam.project(at(-1, -1));
+    if (!a || !b || !c || !d) return false;
+    const ImVec2 corners[4]{*a, *b, *c, *d};
+    return draw_game_picture_quad(picture, corners, tint);
+}
+// A Deathrace gate the way skate.'s race Throwdown puts its checkpoints up: the game's own glowing
+// hoop (its checkpoint effect's texture) standing across the route and facing along it, a soft halo
+// behind it, and in the next gate the game's lightning bolt turning to the camera. False when the
+// pictures are not loaded (the gate is drawn the older way).
+bool checkpoint_hoop(const Camera &cam, const Vec3 &foot, std::array<float, 2> facing, float radius, ImU32 colour, float alpha, bool next,
+                     float time) {
+    // The hoop fills about 88% of its picture; it stands a little sunk into the ground, as the game's does.
+    const float breathe = next ? 1.0f + 0.025f * std::sin(time * 3.2f) : 1.0f;
+    const float extent = radius / 0.44f * breathe;
+    const Vec3 centre{foot[0], foot[1] + radius * 0.9f, foot[2]};
+    const Vec3 across{-facing[1], 0.0f, facing[0]}, upward{0.0f, 1.0f, 0.0f};
+    // A wider, fainter copy first: the glow around the ring.
+    if (!world_picture(cam, GamePicture::checkpoint_ring, centre, across, upward, extent * 1.12f, extent * 1.12f,
+                       with_alpha(colour, (next ? 0.38f : 0.2f) * alpha)))
+        return false;
+    world_picture(cam, GamePicture::checkpoint_ring, centre, across, upward, extent, extent, with_alpha(colour, 0.95f * alpha));
+    // Its white-hot core.
+    world_picture(cam, GamePicture::checkpoint_ring, centre, across, upward, extent * 0.985f, extent * 0.985f,
+                  with_alpha(IM_COL32(255, 255, 255, 255), (next ? 0.75f : 0.4f) * alpha));
+    if (next) {
+        // The bolt, always turned to the camera, bobbing gently in the middle of the hoop.
+        const Vec3 face_side{cam.right[0], cam.right[1], cam.right[2]}, face_up{cam.up[0], cam.up[1], cam.up[2]};
+        const Vec3 middle{centre[0], centre[1] + 0.15f * radius * std::sin(time * 2.0f), centre[2]};
+        const float bolt = radius * 0.55f;
+        world_picture(cam, GamePicture::checkpoint_bolt, middle, face_side, face_up, bolt * 1.15f, bolt * 1.15f, with_alpha(colour, 0.45f));
+        world_picture(cam, GamePicture::checkpoint_bolt, middle, face_side, face_up, bolt, bolt, IM_COL32(255, 255, 255, 240));
+    }
+    return true;
+}
+
 // A Deathrace route, built like an event the game itself put up: at each gate two round pillars
 // (a billboard shaded light in the middle, dark at its edges) hold a banner reading START,
 // CP 2 or a chequered FINISH, with arrows on the ground pointing the way through. The start is
@@ -621,6 +666,35 @@ void draw_route(ImDrawList *draw, const Camera &cam, const ModesHud &h, float sc
             const Vec3 column[]{left, right, up(right, 30.0f), up(left, 30.0f)};
             const ImU32 glow = with_alpha(colour, 0.22f), none = with_alpha(colour, 0.0f), shades[]{glow, glow, none, none};
             fill_world(draw, cam, column, shades);
+        }
+        // skate.'s own checkpoint hoop when its pictures are loaded; else pillars and a banner.
+        const float hoop_radius = std::clamp(half, 1.5f, 9.0f);
+        const bool hoop = checkpoint_hoop(cam, p, d, hoop_radius, colour, alpha, next || (start && h.next_point < 0), time);
+        if (hoop) {
+            glow_path(draw, cam, {up(left, 0.04f), up(right, 0.04f)}, colour, 0.07f, alpha);
+            if (const auto mid = cam.project(up(p, hoop_radius * 1.9f + 0.8f))) {
+                const std::string name = start ? "START" : finish ? "FINISH" : std::format("CHECKPOINT {}", i);
+                const float size = std::clamp(0.55f * cam.focal / std::max(distance, 1.0f), 10.0f * scale, 60.0f * scale);
+                const float w = text_width(font, size, name);
+                soft_text(draw, font, size, ImVec2(mid->x - w * 0.5f, mid->y - size), with_alpha(IM_COL32(255, 255, 255, 255), alpha), name);
+                if (next || (start && h.next_point < 0)) {
+                    const auto text = std::format("{:.0f} m", distance);
+                    const float metres_size = std::max(12.0f * scale, size * 0.5f), sw = text_width(font, metres_size, text);
+                    soft_text(draw, font, metres_size, ImVec2(mid->x - sw * 0.5f, mid->y + 2.0f * scale), with_alpha(colour, 0.95f), text);
+                }
+            }
+            if (!done) {
+                const float run = next ? std::fmod(time * 1.2f, 1.0f) : 0.0f;
+                for (int k = 0; k < 3; ++k) {
+                    const float along = -3.0f + (k + run) * 2.0f, w = 1.1f;
+                    const Vec3 tip{p[0] + d[0] * (along + 0.9f), p[1] + 0.05f, p[2] + d[1] * (along + 0.9f)};
+                    const Vec3 l2{p[0] + d[0] * along - d[1] * w, p[1] + 0.05f, p[2] + d[1] * along + d[0] * w};
+                    const Vec3 r2{p[0] + d[0] * along + d[1] * w, p[1] + 0.05f, p[2] + d[1] * along - d[0] * w};
+                    const float fade = next ? 1.0f - std::abs(along) / 4.0f : 0.6f;
+                    glow_path(draw, cam, {l2, tip, r2}, colour, 0.1f, std::clamp(fade, 0.2f, 1.0f));
+                }
+            }
+            continue;
         }
         pillar(left, colour, alpha);
         pillar(right, colour, alpha);

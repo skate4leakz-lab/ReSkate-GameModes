@@ -55,6 +55,14 @@ inline constexpr Texture thrasher_wordmark{"Win32/items.toc",
 // of its height (at 55% in the middle, 69% a fifth in), leaving room beneath the arch.
 inline constexpr float thrasher_wordmark_arch = 0.70f;
 
+// The race Throwdown's checkpoint effect (effects/ui/prefabs/spf_ui_checkpoint_base): its glowing
+// hoop and the lightning bolt in it (512 x 512; colour channels are the effect's masks, the shape is
+// the alpha). Game modes stand Deathrace's gates up with them.
+inline constexpr std::string_view checkpoint_toc = "Win32/levels/game/dingolevel_sdm/dingolevel_sdm_int_001/dingolevel_sdm_int_001.toc";
+inline constexpr std::string_view checkpoint_bundle = "win32/levels/game/dingolevel_sdm/dingolevel_sdm_int_001/dingolevel_sdm_int_001";
+inline constexpr Texture checkpoint_ring{checkpoint_toc, checkpoint_bundle, "effects/gameplay/textures/t_fx_checkpoint_v06"};
+inline constexpr Texture checkpoint_bolt{checkpoint_toc, checkpoint_bundle, "effects/gameplay/textures/t_fx_checkpoint_lightningbolt_v02"};
+
 // skate.'s UI shapes, the stuff its menus are built from: white on clear, tinted as they are drawn.
 // A tile with rough, hand-cut edges (256 x 256): about 16 pixels of each edge are rough.
 inline constexpr Texture rough_tile{root_toc, root_bundle, "ui/textures/common/tiles/img_tilebackground_roughfull_256_256_256",
