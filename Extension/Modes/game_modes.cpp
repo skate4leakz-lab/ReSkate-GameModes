@@ -1529,7 +1529,7 @@ void build_hud(State &s, std::uint64_t now) {
         case Phase::setup:
             if (g.leading) {
                 const auto why = missing(g.settings);
-                h.status = why.empty() ? std::format("Ready with {} player{}: `mode start` to begin.", st ? st->standings.size() : 1,
+                h.status = why.empty() ? std::format("Ready with {} skater{}. Press START when everyone's in.", st ? st->standings.size() : 1,
                                                      st && st->standings.size() == 1 ? "" : "s")
                                        : why;
             } else {

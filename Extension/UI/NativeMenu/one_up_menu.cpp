@@ -1016,7 +1016,7 @@ void remove_one_up_rounds(const Context& c,Value root,bool game_mode=false) {
 void official_setup(const Context& c) {
     auto& s=state();
     // The same native setup dressed for a game mode while its flag is placed.
-    const bool game_mode=!one_up::native_setup_active() && one_up::flag_for_mode() && one_up::flag_placement_active();
+    const bool game_mode=one_up::flag_for_mode() && one_up::flag_placement_active();
     std::string mode_title, mode_line;
     if(game_mode) {
         const auto menu=modes::menu_view();

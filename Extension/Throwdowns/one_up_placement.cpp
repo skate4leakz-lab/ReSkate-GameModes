@@ -89,6 +89,8 @@ bool begin_mode_flag_placement(bool open_menu) {
     if(p.step!=Step::idle) return false;
     reset(p); p.step=Step::open; p.world=v.world; p.local=v.local;
     p.for_mode=true; p.mode_game=game; p.open_menu=open_menu;
+    // The stock two steps, as 1-Up's card: the setup (dressed as the mode) and its Confirm, then the flag.
+    p.show_setup=true;
     p.reopen_until=p.reopen_at=0;
     p.seconds=20; p.players=6; p.changed=GetTickCount64(); p.until=p.changed+15000;
     p.status="Opening flag placement...";
@@ -130,7 +132,7 @@ bool arm_native_setup(unsigned seconds,unsigned players) {
     prepare_throwdown_injection();
     return true;
 }
-bool native_setup_active() noexcept { auto& p=placement(); std::lock_guard lock(p.mutex); return p.show_setup && (p.step==Step::open || p.step==Step::setup); }
+bool native_setup_active() noexcept { auto& p=placement(); std::lock_guard lock(p.mutex); return !p.for_mode && p.show_setup && (p.step==Step::open || p.step==Step::setup); }
 void set_native_setup_options(unsigned seconds,unsigned players) noexcept {
     auto& p=placement(); std::lock_guard lock(p.mutex);
     if(p.step==Step::setup && seconds>=10 && seconds<=120 && players>=1 && players<=6) { p.seconds=seconds; p.players=players; }

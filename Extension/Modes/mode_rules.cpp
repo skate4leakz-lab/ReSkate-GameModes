@@ -199,7 +199,7 @@ std::string missing(const Settings &s) {
         if (s.points.size() < 2) return "Deathrace needs a route: a start and a finish (PLACE ROUTE).";
         break;
     case Mode::domination:
-        if (s.points.empty()) return "Domination needs at least 1 spot: ride to each and use `mode point`.";
+        if (s.points.empty()) return "Domination needs at least 1 spot: PLACE SPOTS in its Throwdowns panel.";
         break;
 
     default: break;
