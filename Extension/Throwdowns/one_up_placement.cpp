@@ -23,6 +23,8 @@ struct Placement {
     bool for_mode{};
     std::uint64_t mode_game{};
     bool mode_start_requested{}, mode_stop_requested{};
+    std::uint64_t menu_opened_at{}; // from the world: Throwdowns opened first, SpotBattle after it
+    bool open_menu{};
     std::uint64_t world{}, local{}, until{}, changed{}, sent{}, reopen_until{}, reopen_at{};
     unsigned seconds{}, players{};
     std::uint32_t mmid{};
@@ -40,7 +42,7 @@ void reset(Placement& p) {
     p.created=p.setup_seen=p.flag_seen=p.exited=p.cancelling=p.destroy_queued=p.destroyed=false;
     p.handed_off=p.match_seen=false;
     p.show_setup=p.native_entry=false;
-    p.for_mode=false; p.mode_game=0;
+    p.for_mode=false; p.mode_game=0; p.open_menu=false; p.menu_opened_at=0;
 }
 void open_native_setup(Placement& p,const SetupRequest& request,std::uint64_t now) {
     reset(p); p.pending_setup.reset();
@@ -79,14 +81,14 @@ bool begin_flag_placement(unsigned seconds,unsigned players,bool show_native_set
     prepare_throwdown_injection(); // Prewarm cleanup before the player places the flag.
     return true;
 }
-bool begin_mode_flag_placement() {
+bool begin_mode_flag_placement(bool open_menu) {
     const auto v=view();
     const auto game=modes::flag_game();
     if(!game || !v.world || v.state.match) return false;
     auto& p=placement(); std::lock_guard lock(p.mutex);
     if(p.step!=Step::idle) return false;
     reset(p); p.step=Step::open; p.world=v.world; p.local=v.local;
-    p.for_mode=true; p.mode_game=game;
+    p.for_mode=true; p.mode_game=game; p.open_menu=open_menu;
     p.reopen_until=p.reopen_at=0;
     p.seconds=20; p.players=6; p.changed=GetTickCount64(); p.until=p.changed+15000;
     p.status="Opening flag placement...";
@@ -302,7 +304,9 @@ void tick_flag_placement(const menu_data::Context& c) {
             p.cancelling=true; p.spawn.reset(); p.status="Flag placement timed out. Open 1-Up to try again.";
             p.step=Step::cleanup; p.until=now+15000; p.sent=0;
         }
-        if(p.step==Step::open) { command="SpotBattle"; next=Step::setup; }
+        if(p.step==Step::open && p.open_menu && !p.menu_opened_at) { command="Throwdowner"; next=Step::open; p.menu_opened_at=now; p.until=now+15000; }
+        else if(p.step==Step::open && p.open_menu && now<p.menu_opened_at+900) {} // Throwdowns still opening
+        else if(p.step==Step::open) { command="SpotBattle"; next=Step::setup; }
         else if(p.step==Step::setup && p.created && p.setup_seen && !p.show_setup) { command="ThrowdownPlacement"; next=Step::flag; }
         else if(p.step==Step::cleanup) {
             if(!p.exited && !p.sent) { command="ThrowdownerExit"; next=Step::cleanup; }

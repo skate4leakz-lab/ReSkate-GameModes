@@ -72,6 +72,9 @@ struct NativeMatch {
     std::size_t players{};
 };
 NativeMatch native_match();
+// The local player's game is counting down to GO: they start on their board and their controls
+// wait for GO, as at the start of skate.'s own Throwdowns (any thread).
+bool countdown_active() noexcept;
 // Native flag placement for a game set up here (one_up_placement.cpp, from the mode's Throwdowns
 // panel): the flag's spot and the way it faces. The game starts there, its area centred on it.
 std::string flag_placed(const std::array<float, 3> &spot, float yaw_degrees);

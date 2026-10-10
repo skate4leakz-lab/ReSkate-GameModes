@@ -6,6 +6,7 @@
 #include "playstation_input.h"
 #include "cursor.h"
 #include "Extension/Throwdowns/one_up_runtime.h"
+#include "Extension/Modes/game_modes.h"
 
 using namespace dingosdk::overlay::detail;
 namespace dingosdk::overlay::detail {
@@ -253,7 +254,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
             if (message == WM_MOUSEWHEEL) paused_wheel.fetch_add(GET_WHEEL_DELTA_WPARAM(wp), std::memory_order_relaxed);
             return message == WM_INPUT ? DefWindowProcW(window, message, wp, lp) : 0;
         }
-        const bool countdown=dingosdk::multiplayer::one_up::countdown_locks_input();
+        const bool countdown=dingosdk::multiplayer::one_up::countdown_locks_input() || dingosdk::modes::countdown_active();
         // Keep console/escape messages available while gameplay devices are
         // held neutral. Reuse the existing raw-input cleanup path so keys held
         // before teleport cannot push the board during the starting countdown.

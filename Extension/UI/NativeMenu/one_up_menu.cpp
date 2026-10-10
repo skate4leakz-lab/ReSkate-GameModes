@@ -35,6 +35,8 @@
 
 namespace dingosdk::multiplayer {
 namespace {
+constexpr bool own_card=false;
+constexpr bool native_results_board=false;
 using namespace menu_data;
 namespace build = game::build::v20260929;
 constexpr Schema tile_schema{0xdeb20e0f, 1200}, category_schema{0x628aa99c, 320},
@@ -113,6 +115,7 @@ struct State {
     bool details{};
 };
 State& state() { static auto* s = new State; return *s; }
+std::string upper_text(std::string text);
 void session_marker_controls(const Context& c,bool release=false);
 Value reference(const Context& c, Ref ref) { return {ref.handle, c.type_of(ref.handle)}; }
 Value primary(const Context& c, Value tile) {
@@ -958,14 +961,19 @@ void penalty_row(const Context& c,std::vector<std::string>& shown) {
 }
 // Adapt the ACTUAL native setup mounted by SpotBattle. Its stack, anchors,
 // transitions, footer and Confirm navigation stay under the game's ownership.
-void remove_one_up_rounds(const Context& c,Value root) {
+void remove_one_up_rounds(const Context& c,Value root,bool game_mode=false) {
     std::set<Handle> seen;
     std::function<bool(Value,unsigned)> visit=[&](Value value,unsigned depth) -> bool {
         require(depth<32,"1-Up settings graph depth differs.");
         if(!value.handle)return false;
         const auto hash=read<std::uint32_t>(read<Address>(value.type));
-        if(hash==setting_schema.hash)
-            return c.text(c.path(value,{0x58c9d354,text_field}))=="ID_LABEL_ROUNDS";
+        if(hash==setting_schema.hash) {
+            // 1-Up drops Spot Battle's rounds; a game mode its rounds, turn timer and player count
+            // too (the mode's own panel holds its settings).
+            const auto id=c.text(c.path(value,{0x58c9d354,text_field}));
+            return id=="ID_LABEL_ROUNDS" ||
+                (game_mode && (id=="ID_LABEL_TURNTIMER" || id=="ID_LABEL_DURATION" || id=="ID_SETTINGS_PLAYERS"));
+        }
         if(!seen.insert(value.handle).second)return false;
         struct Unvisit { std::set<Handle>& seen;Handle handle;~Unvisit(){seen.erase(handle);} } unvisit{seen,value.handle};
         if(hash==0x62088281) {
@@ -1007,7 +1015,17 @@ void remove_one_up_rounds(const Context& c,Value root) {
 }
 void official_setup(const Context& c) {
     auto& s=state();
-    if(!one_up::native_setup_active()) {
+    // The same native setup dressed for a game mode while its flag is placed.
+    const bool game_mode=!one_up::native_setup_active() && one_up::flag_for_mode() && one_up::flag_placement_active();
+    std::string mode_title, mode_line;
+    if(game_mode) {
+        const auto menu=modes::menu_view();
+        if(const auto mode=modes::parse_mode(menu.mode)) {
+            mode_title=upper_text(std::string(modes::mode_name(*mode)));
+            mode_line=std::string(modes::mode_summary(*mode));
+        }
+    }
+    if(!one_up::native_setup_active() && !game_mode) {
         restore_official(c);
         s.setup_open.store(false); return;
     }
@@ -1031,7 +1049,7 @@ void official_setup(const Context& c) {
             for(const auto key:{0xc0f1b449U,0x43967eceU,0xbfc64535U}) {
                 const auto slot=c.field(root.model,key);
                 const auto copy=graph.clone(key==0x43967eceU?Ref{0,slot.handle}:read<Widget>(c.address(slot)).data);
-                if(key==0x43967eceU)remove_one_up_rounds(c,copy);
+                if(key==0x43967eceU)remove_one_up_rounds(c,copy,game_mode);
                 copies.emplace_back(slot,copy);
                 if(key==0xc0f1b449U)header=copy;
             }
@@ -1068,7 +1086,13 @@ void official_setup(const Context& c) {
             auto current=read<Widget>(c.address(slot));
             if(current.data.handle!=copy.handle) {current.data={0,copy.handle};c.set(slot,current);}
         }
-        plain_label(c,title,"1-UP");
+        plain_label(c,title,game_mode?mode_title:std::string("1-UP"));
+        if(game_mode) {
+            // A game mode keeps the panel's own mark, the native Confirm and its flag placement.
+            for(const auto notice:ui_models(c,c.field(root.model,0x43967ece),notice_schema.hash))
+                plain_label(c,c.field(notice,0x94703efc),mode_line);
+            continue;
+        }
         // The blue art is a RimeTexture, while ActivityDisplay's framed icon
         // expects a RimeImage. Use the native Texture widget for this slot;
         // optional art must never block the title or native controls.
@@ -1254,7 +1278,6 @@ void session_marker_controls(const Context& c,bool release) {
             if(current!=disabled)c.set(field,disabled);
         }
 }
-std::string upper_text(std::string text);
 // The waiting card a native flag brings, for a 1-Up match or a game mode's flag: its title, the
 // line under it, the player count, the countdown and what Start and Leave do.
 struct WaitingCard {
@@ -1618,6 +1641,16 @@ void native_countdown_hud(const Context& c, const Feed& f) {
     }
     publish_hud_items(c,s.hud_ready.load(),s.hud_countdown_visible,s.hud_intro_visible);
 }
+// The see-through look of our own HUD in the game's own styles: rows without a backing, white
+// text with a drop shadow, 60% black score stamps. Each falls back to the opaque stock style.
+Ref style_or(const Context& c,const char* wanted,const char* fallback) {
+    try { if(const auto ref=record_ref(c,wanted);ref.record) return ref; } catch(...) {}
+    return record_ref(c,fallback);
+}
+void shadow_label(const Context& c,Value label,const char* fallback) {
+    const auto style=style_or(c,"TextStylesList/H52-XBold_White_4pxBottomDropShadow",fallback);
+    c.set(c.field(label,0xf94d8cc6),style);c.set(c.field(label,0xa1e84eb1),style);c.set(c.field(label,0x25189231),style);
+}
 void native_score_hud(const Context& c, const Feed& f) {
     auto& s=state();const auto now=GetTickCount64();
     const bool ended=f.phase==Feed::Phase::ended;
@@ -1631,6 +1664,7 @@ void native_score_hud(const Context& c, const Feed& f) {
         if(!s.hud_title.handle) {
             s.hud_title=record_model(c,"TD_Hud_ContentResources/TD_HUD_Header_Label");
             label_styles(c,s.hud_title,"TextStylesList/H52-XBold_White","TextStylesList/H52-XBold_White");
+            shadow_label(c,s.hud_title,"TextStylesList/H52-XBold_White");
         }
         if(!s.hud_notice.handle)s.hud_notice=record_model(c,"Activities_HudElementData_ContentResource/Activity_HUD_TargetScore_ContentCombination");
         if(!s.hud_target.handle)s.hud_target=clone_widget_model(c,c.field(s.hud_notice,0xa98391bd));
@@ -1698,7 +1732,7 @@ void native_score_hud(const Context& c, const Feed& f) {
             for(const auto* letter:{"1","U","P"}) {
                 auto& stamp=hud.letters[index++];
                 if(!stamp.handle)stamp=record_model(c,"Activities_HudElementData_ContentResource/Activity_HUD_CurrentScore_Notice");
-                c.set(c.field(stamp,0x13be0d51),stamps?std::array<float,2>{56.f,56.f}:std::array<float,2>{176.f,56.f});
+                c.set(c.field(stamp,0x13be0d51),stamps?std::array<float,2>{56.f,56.f}:std::array<float,2>{150.f,56.f});
                 const auto label=c.field(stamp,0x94703efc);
                 plain_label(c,label,stamps?letter:"");
                 label_styles(c,label,"TextStylesList/H52-XBold_White","TextStylesList/H52-XBold_White");
@@ -1710,7 +1744,8 @@ void native_score_hud(const Context& c, const Feed& f) {
                 hud.background=make(c,content_tile_schema);
                 c.set(c.field(hud.background,0xa04998ca),false);
                 c.set(c.field(hud.background,0xbc750e6a),false);
-                c.set(c.path(hud.background,{0x0fb0d794,0x8cc042ef}),record_ref(c,"ButtonStyleList/TileButton.RoughPartial.Default"));
+                c.set(c.path(hud.background,{0x0fb0d794,0x8cc042ef}),
+                      style_or(c,"ButtonStyleList/TileButton.RoughPartial.NoDefaultBG","ButtonStyleList/TileButton.RoughPartial.Default"));
             }
             c.set(c.field(hud.background,widget),Widget{asset(c,"UI/Foundations/Components/Lists/LinearList/Widget/LinearList_Widget"),{0,hud.row.handle}});
         }
@@ -1719,13 +1754,15 @@ void native_score_hud(const Context& c, const Feed& f) {
             letters.push_back({asset(c,"UI/Foundations/Components/Text/Label/Widget/Label_Widget"),{0,hud.name.handle}});
             for(unsigned i=0;i<shown;++i)
                 letters.push_back({asset(c,"UI/Foundations/Components/Notices/SmallNotice_Widget"),{0,hud.letters[i].handle}});
-            hud_list(c,hud.row,letters,true,stamps?56.f:176.f,6.f,0.f,520.f,stamps?300.f:330.f,true);
+            // A score row: a fixed name column, so a long name never runs under the score.
+            hud_list(c,hud.row,letters,true,stamps?56.f:150.f,10.f,0.f,520.f,stamps?300.f:340.f,stamps);
         }
-        plain_label(c,hud.name,player.name);
+        // The H52 face fits about 13 characters in the score row's name column.
+        plain_label(c,hud.name,stamps || player.name.size()<=13?player.name:player.name.substr(0,12)+".");
         if(!stamps)plain_label(c,c.field(hud.letters[0],0x94703efc),player.value);
         hud.out=player.out;
-        label_styles(c,hud.name,hud.out?"TextStylesList/H52-XBold_Grey500":"TextStylesList/H52-XBold_White",
-            hud.out?"TextStylesList/H52-XBold_Grey500":"TextStylesList/H52-XBold_White");
+        if(hud.out) label_styles(c,hud.name,"TextStylesList/H52-XBold_Grey500","TextStylesList/H52-XBold_Grey500");
+        else shadow_label(c,hud.name,"TextStylesList/H52-XBold_White");
         if(hud.out) {
             // Use the game's own randomized Rime scribble across the complete
             // row, including the player's name and its stamps.
@@ -1739,7 +1776,9 @@ void native_score_hud(const Context& c, const Feed& f) {
         for(unsigned letter=0;letter<shown;++letter) {
             // 1-Up lights each earned penalty; a game mode lights whoever is up (it, their turn) and the local player.
             const bool lit=stamps?earned_one_up_letter(player.penalties,letter):(player.focus || player.self);
-            const auto style=record_ref(c,lit?"NoticeStylesList/SmallNotice_ControlSelection_Focus":"NoticeStylesList/SmallNotice_ControlSelection_Default");
+            const auto style=lit?record_ref(c,"NoticeStylesList/SmallNotice_ControlSelection_Focus"):
+                stamps?record_ref(c,"NoticeStylesList/SmallNotice_ControlSelection_Default"):
+                style_or(c,"NoticeStylesList/SmallNotice_Rect_Alpha60_Black_Players","NoticeStylesList/SmallNotice_ControlSelection_Default");
             c.set(c.field(hud.letters[letter],0x8cc042ef),style);
             c.set(c.field(hud.letters[letter],0xa1e84eb1),style);
         }
@@ -1796,11 +1835,14 @@ void native_results_hud(const Context& c, const Feed& f) {
         for(const auto& player:players) {
             const bool won=f.winner && player.id==f.winner;
             auto& row=s.result_players[player.id];
-            if(row.row.handle && row.winner!=won) row={}; // a winner's row comes from the winner's record
-            if(!row.row.handle) {
-                row.winner=won;
-                row.row=record_model(c,won?"TD_Scoreboard_ContentResources/TD_WinnerProfileInline":"TD_Scoreboard_ContentResources/TD_PlayerProfileInline");
-                row.rank=record_model(c,won?"TD_Scoreboard_ContentResources/TD_WinnerRank":"TD_Scoreboard_ContentResources/TD_DefaultRank");
+            // The profile's name is label 0x042ddc73 inside its 0xaed127c3 model (type 0x4771a9c1,
+            // read in game 2026-10-10). The winner gets the gold winner row; if its record ever
+            // differs, the stock player row.
+            const auto build=[&](bool winner_row) {
+                row={};
+                row.winner=winner_row;
+                row.row=record_model(c,winner_row?"TD_Scoreboard_ContentResources/TD_WinnerProfileInline":"TD_Scoreboard_ContentResources/TD_PlayerProfileInline");
+                row.rank=record_model(c,winner_row?"TD_Scoreboard_ContentResources/TD_WinnerRank":"TD_Scoreboard_ContentResources/TD_DefaultRank");
                 row.outcome=record_model(c,"TD_Hud_ContentResources/TD_HUD_Header_Label");
                 auto rank_widget=read<Widget>(c.address(c.field(row.row,0xc76d8b73)));
                 rank_widget.data={0,row.rank.handle};
@@ -1808,11 +1850,23 @@ void native_results_hud(const Context& c, const Feed& f) {
                 const auto scores=c.field(row.row,0xa3d2bba9);
                 c.array(c.field(scores,0xf2c90867),std::vector<Handle>{});
                 c.array(c.field(scores,rows_field),std::vector<Ref>{{0,row.outcome.handle}});
+            };
+            const auto fill=[&] {
+                c.set(c.field(row.row,0x8810a01e),player.self || player.id==f.local);
+                plain_label(c,c.path(row.row,{0xaed127c3,0x042ddc73}),player.name);
+                plain_label(c,c.field(row.rank,0x2718c842),std::to_string(rank+1));
+                plain_label(c,row.outcome,won?(f.one_up?std::string("WINNER"):player.value):f.one_up?(player.connected?"1 U P":"LEFT"):player.value);
+            };
+            if(!row.row.handle || row.winner!=won) {
+                try { build(won); fill(); }
+                catch(const std::exception& e) {
+                    if(!won) throw;
+                    logging::log(logging::Level::warning,logging::Channel::ui,"Native results: winner row unavailable ({}); stock row used.",e.what());
+                    build(false);
+                }
             }
-            c.set(c.field(row.row,0x8810a01e),player.self || player.id==f.local);
-            plain_label(c,c.path(row.row,{0xaed127c3,0x042dd873}),player.name);
-            plain_label(c,c.field(row.rank,0x2718c842),std::to_string(++rank));
-            plain_label(c,row.outcome,f.one_up?(won?"WINNER":player.connected?"1 U P":"LEFT"):player.value);
+            fill();
+            ++rank;
             rows.push_back({0,row.row.handle});
         }
         const auto player_list=c.field(s.hud_results_rows,0xfcdd0d32);
@@ -1864,7 +1918,10 @@ void gameplay_hud(const Context& c,std::uint64_t now) {
         static std::uint64_t report{};
         if(now>=report) {report=now+10000;logging::log(logging::Level::warning,logging::Channel::ui,"Native gameplay HUD: {}",e.what());}
     }
-    try {native_results_hud(c,f);}
+    // The native results board (LEGACY_TD_Scoreboard) crashed the game in its own widget code a
+    // moment after it first showed (Skate.exe+0x19126f0, 2026-10-10): it stays off. The score block
+    // names the winner, and the game modes' own results screen shows the standings.
+    if(native_results_board) try {native_results_hud(c,f);}
     catch(const std::exception& e) {
         s.hud_results_visible=false;
         static std::uint64_t report{};
@@ -1944,6 +2001,17 @@ void render(const Context& c) {
     }
 }
 } // namespace
+bool open_native_one_up_setup() noexcept {
+    auto& s=state();
+    try {
+        if(!one_up::arm_native_setup(20,s.entry_players.load()))return false;
+        s.reset_setup.store(true);
+        std::lock_guard lock(s.mutex);
+        if(!s.owner.load())s.owner.store(s.manager?s.manager:1);
+        s.pending.push_back({s.owner.load(),"open",{},s.pass});
+        return true;
+    } catch(...) { return false; }
+}
 bool native_one_up_setup_open() noexcept { return state().setup_open.load(std::memory_order_acquire); }
 std::uint64_t native_one_up_card() noexcept { return state().card.handle; }
 bool native_one_up_hud_ready() noexcept { return state().hud_ready.load(std::memory_order_acquire); }
@@ -1994,7 +2062,10 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
         if(s.page.handle && c.type_of(s.page.handle)!=s.page.type) release(c);
         // The game creates new page/list generations when Throwdowns reopens.
         // Find fresh instances rather than leaving the card on a retired page.
-        for(const auto& p:c.roots({page.hash})) if(const auto list=card_list(c,p.model)) {
+        // The 1-UP card is the game modes grid's (modes_card.cpp, open_native_one_up_setup): this
+        // adapter no longer adds its own card to the Throwdowns row (the grid holding this one's
+        // card crashed the game, 2026-10-10; a longer row overflowed this adapter's list).
+        if(own_card) for(const auto& p:c.roots({page.hash})) if(const auto list=card_list(c,p.model)) {
             if(s.page.handle && (p.model.handle!=s.page.handle || list->handle!=s.cards.handle) && !s.generations.contains({p.model.handle,list->handle})) release(c);
             if(!s.page.handle && !s.generations.contains({p.model.handle,list->handle})) { initialize(c,p.model,*list); break; }
         }
@@ -2009,7 +2080,9 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
             std::vector<Action> pending;
             {std::lock_guard pending_lock(s.mutex);pending=std::exchange(s.pending,{});}
             for(const auto& a:pending)if(a.generation==s.owner.load()) {
-                if(a.command=="oneup")one_up::queue(a.argument);
+                // The grid's 1-UP card armed the native setup: host a session for others to join.
+                if(a.command=="open") { if(one_up::native_setup_active() && s.max_players!=1 && !model().active)queue_command("host","",{}); }
+                else if(a.command=="oneup")one_up::queue(a.argument);
                 else if(a.command=="mode")mode_commands.push_back(a.argument);
             }
             gameplay_hud(c,now);

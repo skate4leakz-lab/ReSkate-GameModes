@@ -9,6 +9,7 @@
 #include "Engine/Core/Platform/memory.h"
 #include "Extension/Multiplayer/Hud/native_party.h"
 #include "trick_gestures.h"
+#include "Extension/Throwdowns/one_up_placement.h"
 #include "Engine/Game/UI/game_view.h"
 #include "Engine/Core/Log/logging.h"
 #include "Extension/Console/commands.h"
@@ -212,6 +213,7 @@ struct State {
     // For the native menu's thread: the game a flag may be placed for (published each tick), and a
     // placed flag waiting for the game thread (under hud_mutex).
     std::atomic<std::uint64_t> flaggable{};
+    std::atomic<bool> counting_down{};
     std::optional<std::pair<Vec3, float>> pending_flag;
 };
 // `mode grid on|off`: the Throwdowns cards in a grid (seen working in game, modes.13) or one row.
@@ -781,9 +783,9 @@ void line_up(State &s) {
     if (g.settings.mode == Mode::race && g.settings.points.size() >= 2) {
         const auto &start = g.settings.points[0];
         const float yaw = gate_heading(g.settings, 0) * 3.14159265f / 180.0f, dx = std::sin(yaw), dz = std::cos(yaw);
-        // Side by side across the gate, a step behind its line.
+        // Side by side across the gate, a few steps behind its line, facing through it.
         const float across = (index - (count - 1.0f) * 0.5f) * 2.5f;
-        spot = {start[0] - dz * across - dx * 1.5f, start[1], start[2] + dx * across - dz * 1.5f};
+        spot = {start[0] - dz * across - dx * 3.0f, start[1], start[2] + dx * across - dz * 3.0f};
     } else {
         Vec3 centre{};
         if (g.settings.area_radius > 0 && !g.settings.corners.empty()) centre = g.settings.corners[0];
@@ -1890,6 +1892,7 @@ void build_hud(State &s, std::uint64_t now) {
             }
     }
     auto native = native_snapshot(s);
+    s.counting_down.store(s.game && s.game->state && s.game->state->phase == Phase::countdown && standing(*s.game, self_id(s)));
     s.flaggable.store(s.game && s.game->leading && (!s.game->state || s.game->state->phase != Phase::results) ? game_key(*s.game) : 0);
     std::lock_guard lock(s.hud_mutex);
     s.hud = std::move(h);
@@ -2294,6 +2297,13 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         return "Game stopped.";
     }
     if (g.referee) return "error: the game has started; only `mode stop` now.";
+    if (v == "flag") {
+        // skate.'s own Throwdown flag (Spot Battle's placement): where everyone starts.
+        s.flaggable.store(game_key(g));
+        return multiplayer::one_up::begin_mode_flag_placement(true)
+            ? std::string("Place your start flag: skate.'s flag placement is opening.")
+            : std::string("error: the flag can't be placed right now (a 1-Up or another flag is up, or no world is loaded).");
+    }
     const auto changed = [&](std::string text) {
         settings_changed(g);
         return text;
@@ -2468,6 +2478,7 @@ NativeMatch native_match() {
     return s.native;
 }
 std::uint64_t flag_game() noexcept { return state().flaggable.load(); }
+bool countdown_active() noexcept { return state().counting_down.load(); }
 std::string flag_placed(const std::array<float, 3> &spot, float yaw_degrees) {
     auto &s = state();
     if (!s.flaggable.load()) return "error: no game of yours to place a flag for.";

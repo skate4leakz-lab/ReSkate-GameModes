@@ -1,4 +1,5 @@
 #include "native_menu_data.h"
+#include <format>
 #include "Engine/Game/Build/addresses.h"
 #include "Engine/Game/Build/20260929/engine.h"
 #include "Engine/Game/Build/20260929/native_menu.h"
@@ -115,8 +116,16 @@ Field Context::member(Address type, std::uint32_t hash) const {
         require(result.offset + size(result.type) <= size(type), "Native menu field exceeds its structure.");
         return result;
     }
+    // Name what the structure does have (field hash:type hash), to find the right one.
+    std::string have;
+    for (unsigned i = 0; i < count && have.size() < 1500; ++i) {
+        const auto entry = fields + i * 24;
+        const auto field_type = read<Address>(entry + 16);
+        const auto field_meta = field_type ? read<Address>(field_type) : 0;
+        have += std::format(" {:08x}:{:08x}", read<std::uint32_t>(entry), field_meta ? read<std::uint32_t>(field_meta) : 0);
+    }
     throw std::runtime_error("Native menu field schema differs (field " + std::to_string(hash) +
-        ", model " + std::to_string(read<std::uint32_t>(meta)) + ").");
+        ", model " + std::to_string(read<std::uint32_t>(meta)) + "; it has" + have + ").");
 }
 Value Context::field(Value value, std::uint32_t hash) const {
     address(value);

@@ -127,6 +127,8 @@ struct State {
     // instead. Without a grid (it could not be built) our cards join the stock row.
     Value holder, grid;
     Widget original_holder{};
+    // A card just set a game up: its native flag placement opens once the game is there (until then).
+    std::uint64_t flag_after{};
     // The native 1-UP card (one_up_menu.cpp) when it was on the page: it takes our 1-Up card's
     // place in the grid. Its description label's text is put back when the grid goes.
     Original one_up;
@@ -1148,15 +1150,29 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
             } else {
                 // Keep the cards' callbacks reserved while a panel shows.
                 for (const auto &card : s.mode_cards) callback(c, "card", card.key);
+                // 1-Up's card wears its own blue 1UP badge (built into ReSkate.dll with its HUD art).
+                for (const auto &card : s.mode_cards)
+                    if (card.mode == modes::Mode::one_up)
+                        publish_texture(c, std::array{c.field(card.category, 0x189084da), c.field(card.category, 0xc2917efc)},
+                                        "UI/ReSkate/OneUp/img_OneUp_Blue_1024");
                 shrink_all(c); // the native list can restore authored sizes when it remounts
                 if (s.grid.handle) mount_grid(c);
                 else publish_cards(c);
                 for (const auto &a : pending) {
                     if (a.generation != s.owner.load()) continue;
                     // A mode's card sets that mode up (unless a game is on) and shows its panel.
-                    if (a.command == "card") {
-                        if (!modes::menu_view().in_game) run.push_back({a.generation, "mode", "new " + a.argument, a.pass});
-                        switch_page(c, true);
+                    // A mode's card sets that mode up and goes straight to skate.'s own flag
+                    // placement, like the 1-UP card; with a game on it shows the game's panel.
+                    if (a.command == "card" && a.argument == modes::mode_key(modes::Mode::one_up)) {
+                        // 1-Up is the native one (one_up_menu.cpp): skate.'s own setup and flag.
+                        if (!open_native_one_up_setup()) s.status = "1-Up can't start right now (a game or flag is up).";
+                    } else if (a.command == "card") {
+                        if (!modes::menu_view().in_game) {
+                            run.push_back({a.generation, "mode", "new " + a.argument, a.pass});
+                            s.flag_after = GetTickCount64() + 4000;
+                            s.status = "Place your start flag.";
+                        } else
+                            switch_page(c, true);
                     }
                     else if (a.command == "back") switch_page(c, false);
                     else if (a.command == "mode") run.push_back(a);
@@ -1175,6 +1191,13 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                         if (!navigate(c, "ThrowdownerExit")) s.status = "Close the menu to place.";
                         run.push_back({a.generation, "mode", "place " + a.argument, a.pass});
                     }
+                }
+                if (s.flag_after && modes::flag_game()) {
+                    s.flag_after = 0;
+                    if (!one_up::begin_mode_flag_placement()) switch_page(c, true); // no flag now: the panel
+                } else if (s.flag_after && GetTickCount64() > s.flag_after) {
+                    s.flag_after = 0;
+                    switch_page(c, true); // the game was not set up (the panel says why)
                 }
                 if (s.grid.handle) mount_grid(c); // straight back after Back restored the page
                 if (s.details) render(c);

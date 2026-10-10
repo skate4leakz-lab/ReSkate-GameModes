@@ -916,7 +916,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool ready, std::string_vi
                 } catch (...) {}
             }
             relay_throwdowns(s, ready, map_name, &solo);
-            if (solo.ready && one_up::countdown_locks_input())
+            if (solo.ready && (one_up::countdown_locks_input() || modes::countdown_active()))
                 prepare_on_board_teleport(client, solo.entity);
             // Without a session the UI model follows at the same 10 Hz as in one;
             // commands still publish at once.
@@ -1015,7 +1015,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool ready, std::string_vi
         relay_throwdowns(s, world_playing(s, local));
         // A S.K.A.T.E. player waiting for their turn stays off the board.
         update_board_lock(client, local.entity, local.ready && (throwdown_relay_waits_offboard() || one_up::waits_offboard()));
-        if (local.ready && one_up::countdown_locks_input())
+        if (local.ready && (one_up::countdown_locks_input() || modes::countdown_active()))
             prepare_on_board_teleport(client, local.entity);
         update_physics_tuning(s, local, now);
         const auto send_at = now_us();

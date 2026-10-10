@@ -14,7 +14,7 @@ bool arm_native_setup(unsigned seconds, unsigned players);
 // The same native flag for a game mode the local player set up (modes::flag_game): straight to
 // the flag (the mode's own Throwdowns panel is its setup). Its spot and facing start the game;
 // the native Start on its waiting card starts it, Leave ends it.
-bool begin_mode_flag_placement();
+bool begin_mode_flag_placement(bool open_menu = false); // open_menu: from the world (opens Throwdowns first)
 bool flag_for_mode() noexcept;
 void request_mode_start() noexcept;
 void request_mode_stop() noexcept;

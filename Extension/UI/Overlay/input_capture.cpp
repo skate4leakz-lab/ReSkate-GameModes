@@ -3,6 +3,7 @@
 #include "input_capture.h"
 #include "held_input.h"
 #include "Extension/Throwdowns/one_up_runtime.h"
+#include "Extension/Modes/game_modes.h"
 #include "Engine/Game/Input/playstation_report.h"
 #include <hidsdi.h>
 #include <atomic>
@@ -30,7 +31,7 @@ bool block_polled_input() {
     // the rest.
     const bool capture = !overlay_input_access && (game_input_paused() || owns_menu_cursor(state()) ||
                                                    state().freecam_controller_active.load(std::memory_order_relaxed) ||
-                                                   multiplayer::one_up::countdown_locks_input());
+                                                   multiplayer::one_up::countdown_locks_input() || modes::countdown_active());
     SetLastError(error);
     return capture;
 }
