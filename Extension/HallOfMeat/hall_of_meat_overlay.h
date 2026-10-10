@@ -25,6 +25,11 @@ void draw_hall_of_meat();
 // Other game pictures read with Hall of Meat's (the race checkpoint's hoop and bolt), drawn on a
 // screen quad (top left, top right, bottom right, bottom left) on the background draw list, white
 // tinted `tint`. False until they are in the atlas.
-enum class GamePicture { checkpoint_ring, checkpoint_bolt };
+enum class GamePicture { checkpoint_ring, checkpoint_bolt, brush_bar, rough_tile, streak, scratches };
 bool draw_game_picture_quad(GamePicture picture, const ImVec2 (&corners)[4], ImU32 tint) noexcept;
+// skate.'s UI shapes on a screen box (white, tinted): a brush stroke's bar laid on the box with its
+// splatter around it (brush_bar, streak), or nine-sliced with `edge` pixel corners (rough_tile),
+// or stretched over it (scratches). False until they are in the atlas.
+bool draw_game_shape(GamePicture picture, ImVec2 min, ImVec2 max, ImU32 tint) noexcept;
+bool draw_game_panel(GamePicture picture, ImVec2 min, ImVec2 max, float edge, ImU32 tint) noexcept;
 }

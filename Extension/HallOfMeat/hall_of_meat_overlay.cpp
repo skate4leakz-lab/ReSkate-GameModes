@@ -390,10 +390,43 @@ Shown& shown() {
 }
 } // namespace
 
+Picture picture_of(GamePicture picture) {
+    switch (picture) {
+    case GamePicture::checkpoint_ring: return Picture::checkpoint_ring;
+    case GamePicture::checkpoint_bolt: return Picture::checkpoint_bolt;
+    case GamePicture::brush_bar: return Picture::row_bar;
+    case GamePicture::rough_tile: return Picture::panel;
+    case GamePicture::streak: return Picture::underline;
+    case GamePicture::scratches: return Picture::scratches;
+    }
+    return Picture::panel;
+}
+bool draw_game_shape(GamePicture picture, ImVec2 min, ImVec2 max, ImU32 tint) noexcept {
+    try {
+        const auto index = picture_of(picture);
+        auto *draw = ImGui::GetBackgroundDrawList();
+        if (index == Picture::scratches) {
+            Found found;
+            if (!find(index, found)) return false;
+            draw->AddImage(loaded().atlas->TexID, min, max, found.uv0, found.uv1, tint);
+            return true;
+        }
+        return draw_shape(draw, index, min, max, tint);
+    } catch (...) {
+        return false;
+    }
+}
+bool draw_game_panel(GamePicture picture, ImVec2 min, ImVec2 max, float edge, ImU32 tint) noexcept {
+    try {
+        return draw_panel(ImGui::GetBackgroundDrawList(), picture_of(picture), min, max, edge, tint);
+    } catch (...) {
+        return false;
+    }
+}
 bool draw_game_picture_quad(GamePicture picture, const ImVec2 (&corners)[4], ImU32 tint) noexcept {
     try {
         Found found;
-        const auto index = picture == GamePicture::checkpoint_ring ? Picture::checkpoint_ring : Picture::checkpoint_bolt;
+        const auto index = picture_of(picture);
         if (!find(index, found)) return false;
         // Corners: top left, top right, bottom right, bottom left of the picture.
         ImGui::GetBackgroundDrawList()->AddImageQuad(loaded().atlas->TexID, corners[0], corners[1], corners[2], corners[3], found.uv0,

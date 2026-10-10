@@ -1655,7 +1655,8 @@ void native_score_hud(const Context& c, const Feed& f) {
     auto& s=state();const auto now=GetTickCount64();
     const bool ended=f.phase==Feed::Phase::ended;
     if(!ended)s.hud_ended_at=0;else if(!s.hud_ended_at)s.hud_ended_at=now;
-    const bool show=f.match && f.phase!=Feed::Phase::lobby && (!ended || now-s.hud_ended_at<5000);
+    // A game mode's end has its own winner screen (modes_hud_overlay.cpp): the score block goes.
+    const bool show=f.match && f.phase!=Feed::Phase::lobby && (!ended || (f.one_up && now-s.hud_ended_at<5000));
     if(!show) {publish_hud_items(c,false,s.hud_countdown_visible,s.hud_intro_visible);s.hud_ready.store(false);return;}
     const bool rebuild=!s.hud_initialized || !hud_list_has_items(c,s.hud_content,3) || s.hud_player_ids.size()!=f.rows.size();
     if(rebuild) {
