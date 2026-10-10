@@ -25,6 +25,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <tuple>
 #include <utility>
 
 namespace dingosdk::modes {
@@ -175,6 +176,25 @@ struct State {
     bool spectate = true; // `mode spectate on|off`: watch whoever is up in S.K.A.T.E.
     bool goofy{};         // `mode stance regular|goofy`: S.K.A.T.E.'s flick diagrams mirrored for goofy
     bool was_infected{};  // Infection: the local player was infected at the last tick
+    // The lobby leaderboard: every finished game of two or more players seen in this session (the
+    // local player's, or any other's whose state reaches here), each once. 1st 3 points, 2nd 2,
+    // 3rd 1. Cleared when the session ends.
+    struct LobbyEntry {
+        std::string name;
+        int points{}, wins{}, podiums{}, games{}, streak{}, best_streak{};
+        std::map<Mode, int> mode_wins;
+    };
+    struct LobbyGame {
+        Mode mode{};
+        std::string winner, second;
+        int players{};
+        std::uint64_t at{};
+    };
+    std::map<std::uint64_t, LobbyEntry> lobby;
+    std::set<std::pair<std::uint64_t, std::uint32_t>> lobby_counted;
+    std::deque<LobbyGame> lobby_recent; // newest first, at most 6
+    std::map<Mode, int> lobby_played;
+    std::uint64_t lobby_leader{};
     std::uint64_t diagram_until{}; // `mode diagram <trick>`: its flick diagram on screen until then
     std::string diagram_trick;
     std::mutex hud_mutex;
@@ -1182,6 +1202,40 @@ void run_placing(State &s, std::uint64_t now) {
 }
 
 // ---- the game ------------------------------------------------------------------------
+// A game's final standings onto the lobby leaderboard, once per game, from whichever copy of its
+// state arrives first; a solo game counts for nothing. A new leader is called out in chat.
+void record_result(State &s, std::uint64_t leader, std::uint32_t game, Mode mode, const Message &m) {
+    if (m.phase != Phase::results || m.standings.size() < 2 || !s.lobby_counted.insert({leader, game}).second) return;
+    for (std::size_t i = 0; i < m.standings.size(); ++i) {
+        auto &e = s.lobby[m.standings[i].player];
+        e.name = name_of(s, m.standings[i].player);
+        ++e.games;
+        if (i == 0) {
+            ++e.wins;
+            ++e.mode_wins[mode];
+            e.best_streak = std::max(e.best_streak, ++e.streak);
+        } else {
+            e.streak = 0;
+        }
+        if (i < 3) {
+            ++e.podiums;
+            e.points += 3 - static_cast<int>(i);
+        }
+    }
+    ++s.lobby_played[mode];
+    s.lobby_recent.push_front({mode, name_of(s, m.standings[0].player), name_of(s, m.standings[1].player),
+                               static_cast<int>(m.standings.size()), now_ms()});
+    if (s.lobby_recent.size() > 6) s.lobby_recent.pop_back();
+    const auto top = std::max_element(s.lobby.begin(), s.lobby.end(), [](const auto &a, const auto &b) {
+        return std::tie(a.second.points, a.second.wins) < std::tie(b.second.points, b.second.wins);
+    });
+    if (top != s.lobby.end() && top->first != s.lobby_leader) {
+        s.lobby_leader = top->first;
+        notice(s, std::format("{} takes the lobby lead: {} point{}, {} win{}!", top->second.name, top->second.points,
+                              top->second.points == 1 ? "" : "s", top->second.wins, top->second.wins == 1 ? "" : "s"));
+    }
+}
+
 void run_leader(State &s, Game &g, std::uint64_t now) {
     if (!g.referee) {
         // Setting up: players who left are dropped from the ones who answered.
@@ -1235,6 +1289,7 @@ void run_leader(State &s, Game &g, std::uint64_t now) {
         g.tags_sent = g.tags.size();
     }
     g.state = r.state(now);
+    record_result(s, g.leader, g.id, g.settings.mode, *g.state);
     if (changed || now - g.state_sent >= state_every_ms) {
         send(s, *g.state);
         g.state_sent = now;
@@ -1609,6 +1664,29 @@ void build_hud(State &s, std::uint64_t now) {
         else if (s.other_version.contains(id)) m.lobby_outdated.push_back(name_of(s, id));
         else m.lobby_modded.push_back(name_of(s, id));
     }
+    for (const auto &[id, e] : s.lobby) {
+        overlay::ModesLeaderRow row{e.name, e.points, e.wins, e.podiums, e.games, e.streak, e.best_streak, {}, id == self_id(s)};
+        int most{};
+        for (const auto &[mode, wins] : e.mode_wins)
+            if (wins > most) {
+                most = wins;
+                row.best_mode = std::string(mode_name(mode));
+            }
+        m.leaders.push_back(std::move(row));
+    }
+    std::stable_sort(m.leaders.begin(), m.leaders.end(), [](const auto &a, const auto &b) {
+        return std::tie(a.points, a.wins, a.podiums) > std::tie(b.points, b.wins, b.podiums);
+    });
+    for (const auto &g : s.lobby_recent)
+        m.recent.push_back({std::string(mode_name(g.mode)), g.winner, g.second, g.players,
+                            static_cast<std::uint32_t>((now - g.at) / 1000)});
+    m.lobby_games = static_cast<int>(s.lobby_counted.size());
+    int played{};
+    for (const auto &[mode, count] : s.lobby_played)
+        if (count > played) {
+            played = count;
+            m.lobby_top_mode = std::string(mode_name(mode));
+        }
     m.goofy = s.goofy;
     m.official_meat = hall_of_meat::available();
     m.meat_every_bail = hall_of_meat::switched_on();
@@ -1706,6 +1784,13 @@ std::vector<std::vector<std::uint8_t>> tick(const SessionInput &input) {
     auto &s = state();
     const auto now = now_ms();
     s.session = input.local != 0;
+    if (!s.session && !s.lobby_counted.empty()) { // left the lobby: a new one starts a new leaderboard
+        s.lobby.clear();
+        s.lobby_counted.clear();
+        s.lobby_recent.clear();
+        s.lobby_played.clear();
+        s.lobby_leader = 0;
+    }
     s.barred = input.barred;
     if (input.local != s.local || (input.world != s.world && s.game)) {
         if (s.game) end_game(s, "The game ended: the session or map changed.");
@@ -1824,9 +1909,11 @@ bool receive(std::uint64_t sender, std::span<const std::uint8_t> bytes) {
         if (ours && !s.game->leading && sender == m.leader) {
             s.game->state = m;
             s.game->heard = now;
+            record_result(s, m.leader, m.game, s.game->settings.mode, m);
         } else if (!ours && sender == m.leader) {
             for (auto &o : s.offers)
                 if (o.leader == m.leader && o.game == m.game) {
+                    record_result(s, o.leader, o.game, o.settings.mode, m); // a game played without us counts too
                     o.phase = m.phase;
                     o.players = std::max<std::size_t>(1, m.standings.size());
                     o.heard = now;

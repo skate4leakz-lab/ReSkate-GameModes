@@ -1,6 +1,9 @@
 #include "skate_menu_internal.h"
 #include "Extension/UI/skate_theme.h"
+#include <algorithm>
 #include <array>
+#include <cfloat>
+#include <cmath>
 #include <format>
 #include <string>
 
@@ -72,6 +75,152 @@ void setting(SkateMenu &menu, const CallbacksV3 &callbacks, const char *label, c
     if (ImGui::IsItemDeactivatedAfterEdit()) command(menu, callbacks, std::format("{} {}", verb, edit));
     if (!ImGui::IsItemActive() && !ImGui::IsItemDeactivated()) edit = live;
 }
+// A shiny 1st/2nd/3rd medal (or a plain grey disc further down) with the place in it.
+void medal(ImDrawList *draw, ImVec2 centre, float radius, int place) {
+    struct Metal {
+        ImU32 dark, base, light;
+    };
+    static constexpr Metal metals[]{
+        {IM_COL32(150, 98, 8, 255), IM_COL32(236, 178, 34, 255), IM_COL32(255, 236, 140, 255)},   // gold
+        {IM_COL32(104, 110, 122, 255), IM_COL32(186, 192, 204, 255), IM_COL32(248, 250, 255, 255)}, // silver
+        {IM_COL32(110, 56, 22, 255), IM_COL32(196, 112, 52, 255), IM_COL32(250, 186, 130, 255)},   // bronze
+    };
+    auto *font = ImGui::GetFont();
+    const auto text = std::to_string(place);
+    const float size = radius * 1.15f;
+    if (place > 3) {
+        draw->AddCircleFilled(centre, radius, skate_theme::tile_light, 32);
+        const auto t = font->CalcTextSizeA(size, FLT_MAX, 0, text.c_str());
+        draw->AddText(font, size, ImVec2(centre.x - t.x / 2, centre.y - t.y / 2), skate_theme::grey_text, text.c_str());
+        return;
+    }
+    const auto &c = metals[place - 1];
+    draw->AddCircleFilled(centre, radius + px(3), IM_COL32(0, 0, 0, 90), 32); // shadow
+    draw->AddCircleFilled(centre, radius, c.dark, 32);
+    draw->AddCircleFilled(ImVec2(centre.x, centre.y - radius * 0.06f), radius * 0.86f, c.base, 32);
+    draw->AddCircleFilled(ImVec2(centre.x - radius * 0.18f, centre.y - radius * 0.24f), radius * 0.52f,
+                          (c.light & 0x00ffffffu) | 0x70000000u, 32);
+    draw->AddCircle(centre, radius * 0.86f, c.light, 32, px(1.5f));
+    // A glint that sweeps across now and then.
+    const float phase = std::fmod(static_cast<float>(ImGui::GetTime()) * 0.5f + static_cast<float>(place) * 0.3f, 2.0f);
+    if (phase < 1.0f) {
+        const float x = centre.x - radius + phase * radius * 2;
+        const float half = std::sqrt(std::max(0.0f, radius * radius - (x - centre.x) * (x - centre.x))) * 0.8f;
+        draw->AddLine(ImVec2(x - half * 0.4f, centre.y + half), ImVec2(x + half * 0.4f, centre.y - half), IM_COL32(255, 255, 255, 150), px(3));
+    }
+    const auto t = font->CalcTextSizeA(size, FLT_MAX, 0, text.c_str());
+    const ImVec2 at(centre.x - t.x / 2, centre.y - t.y / 2);
+    draw->AddText(font, size, ImVec2(at.x + px(1), at.y + px(1)), c.dark, text.c_str());
+    draw->AddText(font, size, at, skate_theme::white, text.c_str());
+}
+std::string ago(std::uint32_t seconds) {
+    if (seconds < 60) return "just now";
+    if (seconds < 3600) return std::format("{}m ago", seconds / 60);
+    return std::format("{}h ago", seconds / 3600);
+}
+// The lobby leaderboard: medals, points bars, streaks and what each player wins most.
+void leaderboard(SkateMenu &menu, const ModesMenu &m) {
+    const auto subtitle = m.lobby_games == 0 ? std::string("Every game of 2+ players here counts. 1st 3 points, 2nd 2, 3rd 1.")
+                          : std::format("{} game{} played  -  most played: {}", m.lobby_games, m.lobby_games == 1 ? "" : "s", m.lobby_top_mode);
+    begin_card(menu, "modes-leaders", "LOBBY LEADERBOARD", subtitle.c_str());
+    if (m.leaders.empty()) {
+        note("Nobody is on the board yet. Finish a game with someone and the standings show up here. It resets when you leave the lobby.");
+        end_card();
+        return;
+    }
+    auto *draw = ImGui::GetWindowDrawList();
+    auto *font = ImGui::GetFont();
+    const float base = ImGui::GetFontSize();
+    const float width = ImGui::GetContentRegionAvail().x;
+    const int top_points = std::max(1, m.leaders.front().points);
+    const std::size_t shown = std::min<std::size_t>(m.leaders.size(), 8);
+    for (std::size_t i = 0; i < shown; ++i) {
+        const auto &r = m.leaders[i];
+        const int place = static_cast<int>(i) + 1;
+        const float height = px(i == 0 ? 76.0f : 62.0f);
+        const ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + width, a.y + height);
+        // Row: the leader glows gold, the local player blue.
+        const ImU32 fill = i == 0 ? IM_COL32(64, 48, 10, 235) : r.you ? skate_theme::official_tile : skate_theme::tile_grey;
+        draw->AddRectFilled(a, b, fill, px(8));
+        if (i == 0) {
+            const float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 2.5f);
+            draw->AddRect(a, b, IM_COL32(255, 200, 60, static_cast<int>(120 + 100 * pulse)), px(8), 0, px(2));
+        } else if (r.you) {
+            draw->AddRect(a, b, skate_theme::official, px(8), 0, px(1.5f));
+        }
+        const float radius = height * 0.32f;
+        medal(draw, ImVec2(a.x + px(14) + radius, a.y + height / 2), radius, place);
+        const float left = a.x + px(28) + radius * 2;
+        const float right_space = px(130);
+        // Name (with LEADER / YOU / streak pills), then the stats line under it.
+        const float name_size = base * (i == 0 ? 1.35f : 1.15f);
+        auto name = r.name.empty() ? std::string("Player") : r.name;
+        while (name.size() > 4 &&
+               font->CalcTextSizeA(name_size, FLT_MAX, 0, name.c_str()).x > b.x - right_space - left - px(150))
+            name = name.substr(0, name.size() - 4) + "...";
+        const float name_y = a.y + height / 2 - name_size + px(2);
+        draw->AddText(font, name_size, ImVec2(left, name_y), i == 0 ? IM_COL32(255, 226, 120, 255) : skate_theme::white, name.c_str());
+        float tag_x = left + font->CalcTextSizeA(name_size, FLT_MAX, 0, name.c_str()).x + px(10);
+        const auto pill = [&](const std::string &text, ImU32 back, ImU32 fore) {
+            const float s = base * 0.72f;
+            const auto t = font->CalcTextSizeA(s, FLT_MAX, 0, text.c_str());
+            if (tag_x + t.x + px(12) > b.x - right_space) return;
+            const ImVec2 p(tag_x, name_y + (name_size - t.y) / 2 - px(1));
+            draw->AddRectFilled(p, ImVec2(p.x + t.x + px(12), p.y + t.y + px(4)), back, px(10));
+            draw->AddText(font, s, ImVec2(p.x + px(6), p.y + px(2)), fore, text.c_str());
+            tag_x += t.x + px(18);
+        };
+        if (i == 0) pill("LEADER", IM_COL32(255, 196, 40, 255), skate_theme::black);
+        if (r.you) pill("YOU", skate_theme::official, skate_theme::white);
+        if (r.streak >= 2) pill(std::format("{} IN A ROW", r.streak), IM_COL32(255, 92, 30, 255), skate_theme::white);
+        auto stats = std::format("{} win{}  |  {} podium{}  |  {} game{}", r.wins, r.wins == 1 ? "" : "s", r.podiums,
+                                 r.podiums == 1 ? "" : "s", r.games, r.games == 1 ? "" : "s");
+        if (!r.best_mode.empty()) stats += "  |  best at " + r.best_mode;
+        if (r.best_streak >= 2 && r.streak < r.best_streak) stats += std::format("  |  best streak {}", r.best_streak);
+        draw->PushClipRect(ImVec2(left, a.y), ImVec2(b.x - right_space, b.y), true);
+        draw->AddText(font, base * 0.82f, ImVec2(left, a.y + height / 2 + px(4)), skate_theme::grey_text, stats.c_str());
+        draw->PopClipRect();
+        // Points, big on the right, over a bar of how close they are to the top.
+        const auto points = std::to_string(r.points);
+        const float big = base * (i == 0 ? 1.9f : 1.55f), small = base * 0.7f;
+        const auto pt = font->CalcTextSizeA(big, FLT_MAX, 0, points.c_str());
+        const float edge = b.x - px(16);
+        const float top = a.y + (height - pt.y - px(14)) / 2;
+        draw->AddText(font, big, ImVec2(edge - pt.x - px(30), top), skate_theme::white, points.c_str());
+        draw->AddText(font, small, ImVec2(edge - px(26), top + pt.y - small - px(3)), skate_theme::grey_text, "PTS");
+        const ImVec2 bar_a(edge - px(100), b.y - px(14)), bar_b(edge, b.y - px(9));
+        draw->AddRectFilled(bar_a, bar_b, IM_COL32(0, 0, 0, 120), px(3));
+        const float share = std::clamp(static_cast<float>(r.points) / static_cast<float>(top_points), 0.0f, 1.0f);
+        const ImU32 bar_colour = place == 1 ? IM_COL32(255, 196, 40, 255) : place == 2 ? IM_COL32(200, 206, 218, 255)
+                               : place == 3 ? IM_COL32(214, 124, 60, 255) : skate_theme::blue;
+        if (share > 0) draw->AddRectFilled(bar_a, ImVec2(bar_a.x + (bar_b.x - bar_a.x) * share, bar_b.y), bar_colour, px(3));
+        ImGui::Dummy(ImVec2(width, height + px(4)));
+    }
+    if (m.leaders.size() > shown) note(std::format("+ {} more", m.leaders.size() - shown).c_str());
+    end_card();
+
+    if (m.recent.empty()) return;
+    begin_card(menu, "modes-recent", "RECENT GAMES", "The last games finished in this lobby.");
+    draw = ImGui::GetWindowDrawList();
+    const float row_width = ImGui::GetContentRegionAvail().x;
+    for (const auto &g : m.recent) {
+        const ImVec2 a = ImGui::GetCursorScreenPos();
+        const float height = px(48);
+        draw->AddRectFilled(a, ImVec2(a.x + row_width, a.y + height), skate_theme::tile_grey, px(6));
+        draw->AddRectFilled(a, ImVec2(a.x + px(5), a.y + height), IM_COL32(255, 196, 40, 255), px(6), ImDrawFlags_RoundCornersLeft);
+        const float s = base * 0.8f;
+        draw->AddText(font, s, ImVec2(a.x + px(16), a.y + px(5)), skate_theme::official_text, g.mode.c_str());
+        const auto when = std::format("{} players  -  {}", g.players, ago(g.ago_s));
+        const auto wt = font->CalcTextSizeA(s, FLT_MAX, 0, when.c_str());
+        draw->AddText(font, s, ImVec2(a.x + row_width - wt.x - px(12), a.y + px(5)), skate_theme::grey_text, when.c_str());
+        const auto line = std::format("{} won  -  {} 2nd", g.winner, g.second);
+        draw->PushClipRect(a, ImVec2(a.x + row_width - px(8), a.y + height), true);
+        draw->AddText(font, base, ImVec2(a.x + px(16), a.y + px(7) + s), skate_theme::white, line.c_str());
+        draw->PopClipRect();
+        ImGui::Dummy(ImVec2(row_width, height + px(3)));
+    }
+    end_card();
+}
 } // namespace
 
 void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
@@ -107,6 +256,7 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
         if (m.lobby_without > 0) info(menu, "No game modes", std::to_string(m.lobby_without) + (m.lobby_without == 1 ? " player" : " players"));
         end_card();
     }
+    if (m.in_session) leaderboard(menu, m);
     if (!m.in_game) {
         begin_card(menu, "modes-new", "START A GAME", "Pick a Skate 3 online mode. Everyone in your lobby with game modes gets an invite.");
         choice(menu, "modes-pick-a", p.pick, {"SPOT JAM", "1-UP", "HALL OF MEAT"});

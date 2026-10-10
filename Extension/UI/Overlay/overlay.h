@@ -459,6 +459,20 @@ struct BoneCam {
 };
 using BoneCamFeed = BoneCam (*)();
 void set_bone_cam_feed(BoneCamFeed) noexcept;
+// One row of the lobby leaderboard (Game Modes page), best first.
+struct ModesLeaderRow {
+    std::string name;
+    int points{}, wins{}, podiums{}, games{};
+    int streak{}, best_streak{}; // wins in a row: now, and the most this session
+    std::string best_mode;       // the mode they win most ("Skate Tag"), or empty without a win
+    bool you{};
+};
+// A finished game on the lobby leaderboard, newest first.
+struct ModesLeaderGame {
+    std::string mode, winner, second;
+    int players{};
+    std::uint32_t ago_s{};
+};
 // ModesHud's menu needs (the Game Modes page of the ReSkate menu): what the local player can do.
 struct ModesMenu {
     bool in_game{}, leading{};
@@ -482,6 +496,11 @@ struct ModesMenu {
     bool in_session{};
     std::vector<std::string> lobby_modded, lobby_outdated;
     int lobby_without{};
+    // The lobby leaderboard: every game of two or more finished in this session.
+    std::vector<ModesLeaderRow> leaders;
+    std::vector<ModesLeaderGame> recent;
+    int lobby_games{};
+    std::string lobby_top_mode; // the most played mode
     float area_radius{};          // > 0: the area is a circle
     std::string placing;          // "circle", "corners", "points" while placing on the skater; else empty
     std::vector<ModesHudOffer> offers; // other players' games, to join from the menu
