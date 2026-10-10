@@ -402,7 +402,17 @@ void relay_throwdowns(Session &s, bool in_world, std::string_view offline_map = 
     if (!in_session && !offline_map.empty()) offline_world = map_hash(offline_map);
     game.world = in_session ? input.world : offline_world;
     game.barred = input.barred;
-    for (const auto &peer : input.peers) game.peers.push_back({peer.id, peer.name});
+    for (const auto &peer : input.peers) {
+        modes::SessionPlayer player{peer.id, peer.name};
+        // Where their skater is, from the poses the session already receives (seen within 1 s).
+        if (peer.slot < s.used_slots) {
+            const auto &p = s.peers[peer.slot];
+            if (p.member.id == peer.id && p.world_ready && p.latest_root && p.pose_arrival && now >= p.pose_arrival &&
+                now - p.pose_arrival <= 1000000)
+                player.at = p.latest_root->position;
+        }
+        game.peers.push_back(std::move(player));
+    }
     for (auto &message : modes::tick(game)) send_throwdown(s, std::move(message));
     for (auto &text : modes::take_notices()) add_chat(s, 0, "ReSkate", std::move(text));
 }

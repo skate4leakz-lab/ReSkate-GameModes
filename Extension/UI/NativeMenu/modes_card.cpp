@@ -20,8 +20,9 @@
 #include <utility>
 
 // The Throwdowns page holds a LinearList of three card tiles (S.K.A.T.E., Spot Battle, Skate Jam).
-// Each game mode gets a card after them, a private copy of the Spot Battle tile, at full size; the row
-// clips to its bounds so it scrolls left and right to the focused card. A card's button calls back
+// Each game mode gets a card after them, a private copy of the Spot Battle tile; every card is shown
+// smaller (card_width, card_height) and the row clips to its bounds, so it scrolls left and right to
+// the focused card. A card's button calls back
 // here (the native navigation id is cleared, so it opens no stock setup): the mode is set up and the
 // page body swaps to a private copy of the authored Throwdown creation panel whose list holds our
 // rows. Leaving restores the page's own body, Back button, title and page actions.
@@ -76,9 +77,15 @@ struct Row {
     std::string text;
     Address callback{};
 };
+// A stock card and its authored sizes, put back when our cards go.
 struct Original {
     Value tile, category, description;
+    std::array<float, 2> tile_size{}, description_size{};
+    float icon_width{}, icon_height{};
 };
+// Every card in the row is shown at this share of its authored width and height, so about twice
+// as many are on screen at once.
+constexpr float card_width = .6f, card_height = .9f;
 struct State {
     Address manager{}, base{}, anchor_asset{}, primary_input{};
     Value page, cards, source_label;
@@ -501,6 +508,20 @@ void switch_page(const Context &c, bool details) {
     }
     s.details = details;
 }
+// Shows a card at the shared smaller size (its authored sizes are `o`'s), publishing only changes.
+void shrink(const Context &c, Value tile, Value cat, Value desc, const Original &o) {
+    const std::array<float, 2> size{o.tile_size[0] * card_width, o.tile_size[1] * card_height};
+    if (read<std::array<float, 2>>(c.address(c.field(tile, 0x868043e1))) != size) c.set(c.field(tile, 0x868043e1), size);
+    const std::array<float, 2> text{o.description_size[0] * card_width, o.description_size[1] * card_height};
+    if (read<std::array<float, 2>>(c.address(c.field(desc, 0x1cff7243))) != text) c.set(c.field(desc, 0x1cff7243), text);
+    for (const auto [hash, value] : std::array{std::pair{0x495ffd43U, o.icon_width * card_width}, std::pair{0x24fb5ca8U, o.icon_height * card_width}})
+        if (read<float>(c.address(c.field(cat, hash))) != value) c.set(c.field(cat, hash), value);
+}
+void shrink_all(const Context &c) {
+    auto &s = state();
+    for (const auto &o : s.originals) shrink(c, o.tile, o.category, o.description, o);
+    for (const auto &card : s.mode_cards) shrink(c, card.tile, card.category, card.description, s.originals[1]);
+}
 bool ours(const State &s, Handle handle) {
     return std::any_of(s.mode_cards.begin(), s.mode_cards.end(), [&](const ModeCard &card) { return card.tile.handle == handle; });
 }
@@ -526,6 +547,14 @@ void release(const Context &c) {
                 }
                 c.array(c.field(s.cards, rows_field), retained);
                 c.set(c.field(s.cards, clip_field), s.original_clip);
+            }
+            for (const auto &o : s.originals) {
+                if (c.type_of(o.tile.handle) == o.tile.type) c.set(c.field(o.tile, 0x868043e1), o.tile_size);
+                if (c.type_of(o.category.handle) == o.category.type) {
+                    c.set(c.field(o.category, 0x495ffd43), o.icon_width);
+                    c.set(c.field(o.category, 0x24fb5ca8), o.icon_height);
+                }
+                if (c.type_of(o.description.handle) == o.description.type) c.set(c.field(o.description, 0x1cff7243), o.description_size);
             }
         },
         [&](Value value) { c.destroy(value); });
@@ -598,7 +627,9 @@ void initialize(const Context &c, Value p, Value list) {
     std::memcpy(refs.data(), bytes.data(), bytes.size());
     for (const auto &ref : refs) {
         auto tile = reference(c, ref), cat = category(c, tile), desc = description(c, cat);
-        s.originals.push_back({tile, cat, desc});
+        s.originals.push_back({tile, cat, desc, read<std::array<float, 2>>(c.address(c.field(tile, 0x868043e1))),
+                               read<std::array<float, 2>>(c.address(c.field(desc, 0x1cff7243))), read<float>(c.address(c.field(cat, 0x495ffd43))),
+                               read<float>(c.address(c.field(cat, 0x24fb5ca8)))});
     }
     const auto &donor = s.originals[1];
     s.anchor_asset = read<Widget>(c.address(c.path(donor.tile, {widget, widget}))).blueprint;
@@ -623,6 +654,7 @@ void initialize(const Context &c, Value p, Value list) {
     s.original_actions = make(c, page);
     c.copy(c.field(s.original_actions, page_actions), c.address(c.field(p, page_actions)));
     s.original_clip = read<bool>(c.address(c.field(list, clip_field)));
+    shrink_all(c);
     publish_cards(c);
     s.generations.emplace(p.handle, list.handle);
     logging::log(logging::Level::info, logging::Channel::ui, "Game modes card: {} mode cards added to the Throwdowns menu.", s.mode_cards.size());
@@ -855,6 +887,7 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
             } else {
                 // Keep the cards' callbacks reserved while a panel shows.
                 for (const auto &card : s.mode_cards) callback(c, "card", card.key);
+                shrink_all(c); // the native list can restore authored sizes when it remounts
                 publish_cards(c);
                 for (const auto &a : pending) {
                     if (a.generation != s.owner.load()) continue;

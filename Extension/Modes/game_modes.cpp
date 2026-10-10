@@ -69,6 +69,9 @@ struct Game {
     std::optional<Message> state;       // the latest state (the leader's own when leading)
     std::uint64_t heard{}, setup_sent{}, state_sent{}, join_sent{};
     std::uint32_t sequence{}, calls_seen{};
+    // Leader: the sequence of the positions it gives its referee from the session's poses. Far
+    // above any player's own event sequence, so neither is ever taken for an old one.
+    std::uint32_t position_sequence = 1u << 30;
     int checkpoint_sent{-1};
     bool lined_up{}; // Deathrace: put at the start gate for this game's countdown
     bool announced{}; // the winner went to chat
@@ -278,8 +281,7 @@ void report(State &s, Event event, std::int32_t value, std::int32_t extra, const
     ++g.sequence;
     if (g.referee) {
         g.referee->event(self_id(s), event, value, at, g.sequence, now_ms(), tags, trick);
-        // Everyone draws everyone in Skate Tag: the leader's own position goes to the others too.
-        if (event != Event::position) return;
+        return;
     }
     auto m = header(g, Message::Kind::event);
     m.event = event;
@@ -893,12 +895,16 @@ void track_game(State &s, std::uint64_t now) {
     const auto *me = standing(g, self_id(s));
     if (!me || me->out) return;
     if (tag_like(g.settings.mode)) {
-        // Where we are, to the leader and everyone (about 7 times a second), and the sounds of
-        // being tagged and of tagging.
+        // Where everyone is comes from the session's own skater poses (tick() keeps s.positions),
+        // not from messages of ours: the leader's referee reads them about 7 times a second.
         s.positions[self_id(s)] = {s.position, now};
-        if (now - s.position_sent >= 150) {
+        if (g.referee && g.state && now - s.position_sent >= 150) {
             s.position_sent = now;
-            report(s, Event::position, 0, 0, s.position);
+            for (const auto &p : g.state->standings) {
+                const auto found = s.positions.find(p.player);
+                if (found == s.positions.end() || now - found->second.second > position_fresh_ms) continue;
+                g.referee->event(p.player, Event::position, 0, found->second.first, ++g.position_sequence, now);
+            }
         }
     }
     // Infection: the moment the local player is caught.
@@ -1082,17 +1088,14 @@ void run_placing(State &s, std::uint64_t now) {
     // stays ours after placing ends until it is let go: the D-pad Down that drops the finish must
     // not reach skate. still held (its replay editor takes the camera).
     constexpr std::uint32_t dpad = pad_up | pad_down | pad_left | pad_right;
-    std::uint32_t still_held = 0;
     if (s.placing != State::Placing::none) {
         s.dpad_release = true;
     } else if (s.dpad_release) {
         ControllerInput pad;
         DingoSDKOverlayReadControllerInput(&pad);
-        still_held = pad.available ? pad.buttons & dpad : 0;
-        if (!still_held) s.dpad_release = false;
+        if (!pad.available || !(pad.buttons & dpad)) s.dpad_release = false;
     }
     overlay::hide_game_buttons(s.placing != State::Placing::none || s.dpad_release ? dpad : 0);
-    if (s.placing == State::Placing::none) overlay::hold_game_buttons(static_cast<std::uint16_t>(still_held));
     // Placing with the free camera, like skate.'s quick drop: on while placing, off after.
     const bool want_freecam = s.placing != State::Placing::none && s.free_place;
     // The sticks fly the camera, so the skater does not roll off meanwhile.
@@ -1128,7 +1131,6 @@ void run_placing(State &s, std::uint64_t now) {
     const auto buttons = pad.available ? pad.buttons : 0u;
     auto pressed = buttons & ~s.pad_previous;
     s.pad_previous = buttons;
-    overlay::hold_game_buttons(static_cast<std::uint16_t>(buttons & (pad_up | pad_down | pad_left | pad_right)));
     const auto held = [](int key) { return overlay::key_down(key); }; // past the pause while the free camera flies
     // Mouse and keyboard work as well as the D-pad: with the free camera, left click drops (the
     // right button is the camera's look) and F finishes; the wheel turns a gate or sizes a circle.
@@ -1859,6 +1861,7 @@ std::vector<std::vector<std::uint8_t>> tick(const SessionInput &input) {
     for (const auto &peer : input.peers) {
         s.present.insert(peer.id);
         if (!peer.name.empty()) s.names[peer.id] = peer.name;
+        if (peer.at) s.positions[peer.id] = {*peer.at, now};
     }
     try {
         track_skater(s, input.in_world, now);
@@ -1986,9 +1989,10 @@ bool receive(std::uint64_t sender, std::span<const std::uint8_t> bytes) {
         }
         break;
     case Message::Kind::event:
-        if (ours && s.game->referee) s.game->referee->event(sender, m.event, m.value, m.at, m.sequence, now, m.tags, m.trick);
-        // Skate Tag: where every other player is, for the crown and the arrows.
-        if (ours && m.event == Event::position) s.positions[sender] = {m.at, now};
+        // Positions are the session's own skater poses (tick), never a player's say-so: a sent one
+        // is ignored, so nobody can place themselves somewhere else in Skate Tag.
+        if (ours && s.game->referee && m.event != Event::position)
+            s.game->referee->event(sender, m.event, m.value, m.at, m.sequence, now, m.tags, m.trick);
         break;
     case Message::Kind::tags:
         // Graffiti tag shapes from the leader, from index `first` on.

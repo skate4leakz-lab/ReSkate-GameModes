@@ -1,6 +1,8 @@
 #pragma once
 #include "Extension/UI/Overlay/overlay.h"
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -14,6 +16,9 @@ namespace dingosdk::modes {
 struct SessionPlayer {
     std::uint64_t id{}; // Steam ID
     std::string name;
+    // Where their skater is, from the session's own pose updates (none without a recent pose).
+    // Skate Tag, Infection and Hide & Seek are played on these: game modes send no positions.
+    std::optional<std::array<float, 3>> at;
 };
 struct SessionInput {
     std::uint64_t local{};    // this player's Steam ID; 0 without a session (then playing alone)

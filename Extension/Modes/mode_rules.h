@@ -45,7 +45,7 @@ bool timed(Mode) noexcept; // ends when the clock runs out (1-Up ends on strikes
 enum class Phase : std::uint8_t { setup = 1, countdown = 2, playing = 3, results = 4 };
 
 inline constexpr std::uint8_t wire_magic = 0xD5; // never a throwdown message's first byte (1..15)
-inline constexpr std::uint8_t wire_version = 9; // 2: circle areas; 3: Graffiti tags; 4: spawn, gate facings; 5: gate widths; 6: Skate Tag; 7: S.K.A.T.E.; 8: Infection; 9: Hide & Seek
+inline constexpr std::uint8_t wire_version = 10; // 2: circle areas; 3: Graffiti tags; 4: spawn, gate facings; 5: gate widths; 6: Skate Tag; 7: S.K.A.T.E.; 8: Infection; 9: Hide & Seek; 10: positions from the session's poses, not sent
 inline constexpr std::size_t max_corners = 16, max_points = 16, max_players = 16, max_zones = 64, max_calls = 4,
                              max_call_length = 96, max_tags = 64, max_tag_points = 6, max_line_tags = 6;
 inline constexpr std::uint32_t countdown_ms = 5000, results_ms = 12000;

@@ -2,7 +2,34 @@
 
 This page covers how ReSkate's game modes appear in, and launch from, the game's own Throwdowns
 menu. It also records what is native, what is still ReSkate's own, and what has and hasn't been
-tested. Status as of **v2.0.2-modes.7**.
+tested. Status as of **v2.0.2-modes.8**.
+
+## Staying mergeable with official ReSkate
+
+This work is meant to go back to [Dingo-Shenanigans/ReSkate](https://github.com/Dingo-Shenanigans/ReSkate)
+as a pull request. The rules below keep it mergeable:
+
+- **Track upstream `main`.** `game-modes` merges `upstream/main` regularly (last at 8255290,
+  upstream e98169a). A pull request should be one merge away from their `main`, not from a tag.
+- **Never change ReSkate's `protocol_version`.** Game-mode messages ride the existing throwdown
+  channel, marked by a leading `0xD5` that no throwdown message starts with, and carry their own
+  `wire_version` (10). Clients without game modes ignore them.
+- **Official dedicated servers relay them unchanged.** The server treats throwdown packets as opaque
+  and allows each player 60 per 5 s. Game modes stay well inside that budget: about 2 per second
+  from a leader, and no position stream. Positions come from the session's own skater poses
+  (`SessionPlayer::at`), and the leader never takes a position from a message. A player flagged
+  by the server for speed or scoring mods plays no game modes, as with stock throwdowns.
+- **Opt-in for players.** Nobody is put in a game without joining it. The stock throwdowns, their
+  menu cards and their settings are left as they were, and everything ours is restored on release.
+- **Upstream's style.** C++20 with 4-space indentation, full-sentence comments, and no third-party
+  dependencies. New code lives in `Extension/Modes`, `Extension/UI/NativeMenu/modes_card.*` and
+  the `modes_*` overlay files. Changes to upstream files are small hooks.
+- **Fork-only files stay out of a pull request:** `contrib/release-modes.ps1`, the
+  `follow-reskate` workflow on `main`, and the `-modes.N` version suffix. Nothing in the code
+  depends on the fork's GitHub repository; the launcher's update source is a build option set by
+  the release script.
+- **No dead hooks.** Experiments that hooked Steam Input and kernel file reads were removed (8);
+  only the PlayStation report D-pad helper, used by upstream's input capture, remains.
 
 ## What a player sees
 

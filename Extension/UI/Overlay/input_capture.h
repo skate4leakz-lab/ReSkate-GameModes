@@ -24,10 +24,8 @@ inline bool game_input_paused() noexcept { return GetTickCount64() < game_input_
 // Mouse wheel movement (WHEEL_DELTA units) the game did not get while its input was paused.
 extern std::atomic<int> paused_wheel;
 bool install_input_capture();
-// The game's own DualShock 4 / DualSense HID reads: the D-pad is released in them while
-// hide_game_buttons keeps it (playstation_filter.cpp). Installed by install_input_capture.
-bool install_playstation_filter();
-// Releases the D-pad in one PlayStation input report while hide_game_buttons keeps it.
+// Releases the D-pad in one PlayStation input report while hide_game_buttons keeps it
+// (playstation_filter.cpp).
 void release_playstation_dpad(PlayStationPad kind, std::uint8_t *report, unsigned long size) noexcept;
 // Skate's controller mode registers the mouse with RIDEV_NOLEGACY, which stops
 // the Windows cursor from moving. While the overlay owns the pointer the mouse

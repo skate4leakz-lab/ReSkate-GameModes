@@ -806,10 +806,6 @@ bool install_input_capture() {
             reinterpret_cast<void*>(captured_direct_create))) return false;
     }
     dingosdk::logging::write(dingosdk::logging::Level::info, dingosdk::logging::Channel::input, "Menu input capture installed: keyboard, raw input, XInput, DirectInput, PlayStation HID and cursor ownership.");
-    // Game modes' own PlayStation report filter (playstation_filter.cpp) is not installed: the HID
-    // capture above hooks the same kernel functions and already neutralises the game's pad reports
-    // while game modes pause its input, and the filter's second hooks on them do not all take, which
-    // left it calling an empty original.
     return true;
 }
 

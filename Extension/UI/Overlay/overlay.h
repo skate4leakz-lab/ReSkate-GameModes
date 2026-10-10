@@ -530,9 +530,6 @@ void pause_game_input(bool paused) noexcept;
 bool key_down(int virtual_key) noexcept;
 // Mouse wheel movement since the last call while the game's input was paused (WHEEL_DELTA units).
 int take_mouse_wheel() noexcept;
-// The pad buttons physically held right now, while some are hidden: with Steam Input the game hears
-// actions, not buttons, so its actions wait while a hidden button is held (steam_input_block.cpp).
-void hold_game_buttons(std::uint16_t held) noexcept;
 // ReSkate's own nametags: one per other player, placed over the world with the camera the
 // client last used. Close ones show a name and distance, far ones a dot, and players off
 // screen a dot at the screen's edge. Empty = nothing to draw (off, or the game hides its UI).
