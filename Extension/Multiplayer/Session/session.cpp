@@ -500,6 +500,11 @@ void render(Session &s, std::uintptr_t client, const NativeFrame &local, std::ui
         tag.nameless = s.nametags_friends && !std::binary_search(s.friend_ids.begin(), s.friend_ids.end(), p.member.id);
         tag.talking = std::any_of(voices.begin(), voices.end(), [&](const auto &v) { return v.id == p.member.id && v.speaking; });
         tag.bubbles = recent_bubbles(p.member.id);
+        // Game Modes' Hide & Seek: nothing above a hider's head gives them away.
+        if (modes::hidden_player(p.member.id)) {
+            tag.nameless = true;
+            tag.bubbles.clear();
+        }
         nametags.push_back(std::move(tag));
     };
     // Creating a player's actor (skater, skateboard and both recipes) or re-applying a

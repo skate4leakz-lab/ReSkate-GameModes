@@ -29,7 +29,7 @@ namespace {
 struct ModeInfo {
     const char *key, *name, *summary, *points; // points: what `mode point` places here, or null
 };
-constexpr std::array<ModeInfo, 9> mode_info{{
+constexpr std::array<ModeInfo, 10> mode_info{{
     {"jam", "SPOT JAM", "Land lines inside the area. Every line adds to your score; highest total wins.", nullptr},
     {"1up", "1-UP", "Take turns. Beat the last score or take a strike; last one standing wins.", nullptr},
     {"meat", "HALL OF MEAT", "Bail as hard as you can. Every bail scores its Meat; most meat wins. Your bones show through your skater.", nullptr},
@@ -39,6 +39,7 @@ constexpr std::array<ModeInfo, 9> mode_info{{
     {"tag", "SKATE TAG", "One player is it and wears the crown: get close to tag someone else. No tag-backs. Least time spent it wins.", nullptr},
     {"skate", "S.K.A.T.E.", "Set a trick, everyone copies it or takes a letter. Spell S.K.A.T.E. and you're out; last one standing wins. You pick the tricks that count.", nullptr},
     {"infection", "INFECTION", "One player starts infected and turns into the Grim Reaper. Everyone they catch turns too and joins the hunt. Survive longest to win.", nullptr},
+    {"hide", "HIDE & SEEK", "The seeker's screen goes black while everyone hides. Then they hunt with a hot/cold meter; whoever is found seeks too. Stay hidden longest to win.", nullptr},
 }};
 struct Page {
     int pick{};
@@ -264,6 +265,8 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
         if (choice(menu, "modes-pick-b", second, {"DEATHRACE", "DOMINATION", "GRAFFITI"})) p.pick = second + 3;
         int third = p.pick - 6;
         if (choice(menu, "modes-pick-c", third, {"SKATE TAG", "S.K.A.T.E.", "INFECTION"})) p.pick = third + 6;
+        int fourth = p.pick - 9;
+        if (choice(menu, "modes-pick-d", fourth, {"HIDE & SEEK"})) p.pick = fourth + 9;
         p.pick = std::clamp(p.pick, 0, static_cast<int>(mode_info.size()) - 1);
         note(mode_info[static_cast<std::size_t>(p.pick)].summary);
         if (primary_button(menu, std::format("SET UP {}", mode_info[static_cast<std::size_t>(p.pick)].name).c_str()))
@@ -294,7 +297,7 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(px(200));
         // Skate Tag can spread over a whole district: up to 1.5 km out.
-        ImGui::SliderFloat("##circle-size", &p.circle, 5.0f, m.mode == "tag" || m.mode == "infection" ? 1500.0f : 150.0f, "%.0f m radius",
+        ImGui::SliderFloat("##circle-size", &p.circle, 5.0f, m.mode == "tag" || m.mode == "infection" || m.mode == "hide" ? 1500.0f : 150.0f, "%.0f m radius",
                            ImGuiSliderFlags_Logarithmic);
         if (small_button(menu, "CUSTOM SHAPE")) command(menu, callbacks, "place corners");
         ImGui::SameLine();
@@ -357,9 +360,13 @@ void modes_page(SkateMenu &menu, const Model &, const CallbacksV3 &callbacks) {
         } else {
             setting(menu, callbacks, "Time (seconds)", "##time", p.duration, static_cast<int>(m.duration),
                     [](const char *id, int *v) { return ImGui::SliderInt(id, v, 30, 1800); }, "time");
+            // Hide & Seek: how long the seekers are blind while everyone hides.
+            if (m.mode == "hide")
+                setting(menu, callbacks, "Hiding time (seconds)", "##hiding", p.turn, static_cast<int>(m.turn),
+                        [](const char *id, int *v) { return ImGui::SliderInt(id, v, 10, 120); }, "turn");
         }
-        if (m.mode == "tag" || m.mode == "infection")
-            setting(menu, callbacks, "Tag reach (metres)", "##reach", p.radius, m.radius,
+        if (m.mode == "tag" || m.mode == "infection" || m.mode == "hide")
+            setting(menu, callbacks, m.mode == "hide" ? "Find reach (metres)" : "Tag reach (metres)", "##reach", p.radius, m.radius,
                     [](const char *id, float *v) { return ImGui::SliderFloat(id, v, 1.5f, 8.0f, "%.1f"); }, "radius");
         if (current && current->points)
             setting(menu, callbacks, "Reach (metres)", "##radius", p.radius, m.radius,

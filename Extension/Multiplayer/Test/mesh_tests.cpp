@@ -69,6 +69,7 @@ std::vector<std::vector<std::uint8_t>> tick(const SessionInput &) { return {}; }
 bool receive(std::uint64_t, std::span<const std::uint8_t>) { return false; }
 std::vector<std::string> take_notices() { return {}; }
 bool infected_look(std::uint64_t) noexcept { return false; }
+bool hidden_player(std::uint64_t) noexcept { return false; }
 }
 namespace dingosdk::physics_tuning {
 void prepare() noexcept {}

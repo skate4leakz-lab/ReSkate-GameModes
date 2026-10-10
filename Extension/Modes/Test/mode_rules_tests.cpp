@@ -393,6 +393,53 @@ void infection_flow() {
     check(decode(encode(setup)) == setup && parse_mode("zombies") == Mode::infection, "the Infection setup round trips");
 }
 
+void hide_flow() {
+    Settings s;
+    s.mode = Mode::hide;
+    s.radius = default_tag_reach;
+    s.duration_s = 120;
+    s.turn_s = 20; // hiding time
+    Referee r(s, a, 9); // players[9 % 3] = a seeks
+    r.add_player(a);
+    r.add_player(b);
+    r.add_player(c);
+    r.start(0);
+    r.tick(countdown_ms);
+    std::uint64_t t = countdown_ms;
+    std::uint32_t sa = 0, sb = 0, sc = 0;
+    const auto of = [&](const Message &m, std::uint64_t id) {
+        return *std::find_if(m.standings.begin(), m.standings.end(), [&](const Standing &x) { return x.player == id; });
+    };
+    auto st = r.state(t);
+    check(of(st, a).up && !of(st, b).up && st.target == 20000, "a seeks; 20 s to hide");
+    // Right next to b while still counting: nobody is found, and hiding scores nothing.
+    t += 10000;
+    r.tick(t);
+    r.event(b, Event::position, 0, {1, 0, 0}, ++sb, t);
+    r.event(a, Event::position, 0, {0, 0, 0}, ++sa, t);
+    st = r.state(t);
+    check(!of(st, b).up && of(st, b).score == 0 && st.target == 10000, "nobody is found while the seeker counts");
+    t += 10000;
+    check(r.tick(t), "the seekers come out at once");
+    t += 5000;
+    r.tick(t);
+    st = r.state(t);
+    check(st.target == 0 && of(st, b).score == 50 && of(st, c).score == 50, "hidden time counts from the release");
+    r.event(b, Event::position, 0, {40, 0, 0}, ++sb, t);
+    r.event(c, Event::position, 0, {80, 0, 0}, ++sc, t);
+    r.event(a, Event::position, 0, {39, 0, 0}, ++sa, t);
+    st = r.state(t);
+    check(of(st, b).up && of(st, a).aux == 1 && !of(st, c).up, "a found b, who seeks now");
+    t += 3000;
+    r.tick(t);
+    r.event(c, Event::position, 0, {80, 0, 0}, ++sc, t);
+    r.event(b, Event::position, 0, {79, 0, 0}, ++sb, t);
+    check(r.phase() == Phase::results, "b found c, the last one hiding");
+    st = r.state(t);
+    check(st.standings.front().player == c && of(st, c).score == 80 && of(st, b).aux == 1, "c hid longest and wins");
+    check(decode(encode(st)) == st && parse_mode("hideandseek") == Mode::hide, "a Hide & Seek state round trips");
+}
+
 void skate_flow() {
     check(trick_kinds_of("Kickflip") == trick_flips && trick_kinds_of("BS 50-50 Grind") == trick_grinds, "flips and grinds are told apart");
     check(trick_kinds_of("Heelflip + Seatbelt") == (trick_flips | trick_grabs) && trick_kinds_of("Manual") == trick_manuals,
@@ -493,6 +540,7 @@ int main() {
         graffiti_flow();
         skate_flow();
         infection_flow();
+        hide_flow();
         std::cout << "Game modes: area, scoring, wire, Spot Jam, 1-Up, Deathrace, Domination, tag, Graffiti and S.K.A.T.E. flows passed.\n";
         return 0;
     } catch (const std::exception &e) {

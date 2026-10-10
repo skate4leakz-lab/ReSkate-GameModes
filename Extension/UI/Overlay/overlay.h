@@ -365,6 +365,14 @@ struct ModesHud {
     bool goofy{};                             // mirror the flicks for a goofy stance
     std::vector<ModesHudPlayer> players; // Skate Tag and Infection, while they are played
     bool infection{};                     // the players' `it` are the infected (the reapers), not one tagger
+    // Hide & Seek: `players` holds only the seekers (hiders are never shown); a blind seeker's screen
+    // is black with `blind` (the seconds left) on it; `heat` 0 (cold) .. 1 (right there) is how close
+    // the nearest hider is for a seeker, or the nearest seeker for a hider (< 0: no meter).
+    bool hide{};
+    std::string blind;
+    float heat = -1;
+    std::string heat_label;               // "FREEZING" .. "ON FIRE"
+    bool heat_seeking{};
     std::vector<ModesHudOffer> offers;
     std::string invite;   // "Huntredbanzzz is starting Hall of Meat", shown for a while after it appears
     float invite_fade{};  // 0..1

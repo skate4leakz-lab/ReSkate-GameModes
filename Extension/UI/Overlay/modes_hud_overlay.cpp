@@ -915,8 +915,9 @@ void draw_tag_players(ImDrawList *draw, const ModesHud &h, float scale) {
     const auto display = ImGui::GetIO().DisplaySize;
     const float time = static_cast<float>(ImGui::GetTime());
     // Skate Tag's it is pink and crowned; Infection's reapers are toxic green, under a halo.
-    const ImU32 neon = h.infection ? IM_COL32(110, 255, 70, 255) : IM_COL32(255, 60, 200, 255);
-    const std::string it_label = h.infection ? "REAPER" : "IT";
+    // Hide & Seek's seekers burn orange under a halo too.
+    const ImU32 neon = h.hide ? IM_COL32(255, 130, 20, 255) : h.infection ? IM_COL32(110, 255, 70, 255) : IM_COL32(255, 60, 200, 255);
+    const std::string it_label = h.hide ? "SEEKER" : h.infection ? "REAPER" : "IT";
     bool me_it = false;
     for (const auto &p : h.players)
         if (p.self && p.it) me_it = true;
@@ -943,7 +944,7 @@ void draw_tag_players(ImDrawList *draw, const ModesHud &h, float scale) {
         };
         glow_path(draw, cam, ring(0.0f), neon, 0.02f, 1.0f);
         glow_path(draw, cam, ring(0.045f), neon, 0.012f, 0.8f);
-        if (h.infection) { // a halo, no points
+        if (h.infection || h.hide) { // a halo, no points
             const float d = cam.distance(c);
             if (!p.self && d > 20.0f)
                 if (const auto label = cam.project({c[0], c[1] + 0.4f, c[2]})) {
@@ -1294,6 +1295,68 @@ bool modes_hud_pending() {
     return h.hud.active || !h.hud.offers.empty() || !h.hud.invite.empty();
 }
 
+// Hide & Seek, for a seeker while the others hide: the screen goes black, the seconds left counting
+// down in neon in the middle.
+void draw_blind(ImDrawList *draw, const ModesHud &h, float scale) {
+    auto &s = state();
+    auto *heading = s.menu.heading ? s.menu.heading : ImGui::GetFont();
+    auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
+    const auto display = ImGui::GetIO().DisplaySize;
+    const float time = static_cast<float>(ImGui::GetTime());
+    draw->AddRectFilled(ImVec2(0, 0), display, IM_COL32(0, 0, 0, 255));
+    const ImU32 orange = IM_COL32(255, 130, 20, 255);
+    const float pulse = 0.5f + 0.5f * std::sin(time * 3.0f);
+    // A slow ring breathing round the count.
+    const ImVec2 c(display.x * 0.5f, display.y * 0.47f);
+    neon_arc(draw, c, 150.0f * scale, 0.0f, 6.2831853f, with_alpha(orange, 0.35f + 0.25f * pulse), 2.0f * scale);
+    const float size = 150.0f * scale, w = text_width(heading, size, h.blind);
+    neon_text(draw, heading, size, ImVec2(c.x - w * 0.5f, c.y - size * 0.55f), orange, h.blind);
+    spaced_text(draw, bold, 30.0f * scale, c.x, c.y - 250.0f * scale, IM_COL32(255, 255, 255, 235), "YOU'RE SEEKING", 6.0f * scale);
+    spaced_text(draw, bold, 17.0f * scale, c.x, c.y + 185.0f * scale, IM_COL32(200, 200, 205, 200), "EYES CLOSED. EVERYONE IS HIDING...", 3.0f * scale);
+}
+// Hide & Seek's hot/cold meter at the bottom of the screen: ice blue far away, white hot close by,
+// beating faster the closer it gets. A hider being closed in on also feels it at the screen's edges.
+void draw_heat(ImDrawList *draw, const ModesHud &h, float scale) {
+    if (h.heat < 0) return;
+    auto &s = state();
+    auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
+    const auto display = ImGui::GetIO().DisplaySize;
+    const float time = static_cast<float>(ImGui::GetTime());
+    const auto mix = [](ImU32 a, ImU32 b, float t) {
+        const auto x = ImGui::ColorConvertU32ToFloat4(a), y = ImGui::ColorConvertU32ToFloat4(b);
+        return ImGui::ColorConvertFloat4ToU32(ImVec4(x.x + (y.x - x.x) * t, x.y + (y.y - x.y) * t, x.z + (y.z - x.z) * t, x.w + (y.w - x.w) * t));
+    };
+    const ImU32 cold = IM_COL32(60, 170, 255, 255), warm = IM_COL32(255, 170, 30, 255), hot = IM_COL32(255, 40, 40, 255);
+    const ImU32 colour = h.heat < 0.5f ? mix(cold, warm, h.heat * 2.0f) : mix(warm, hot, (h.heat - 0.5f) * 2.0f);
+    const float beat = 0.5f + 0.5f * std::sin(time * (2.0f + h.heat * 12.0f));
+    const float width = 420.0f * scale, height = 14.0f * scale;
+    const ImVec2 a(display.x * 0.5f - width * 0.5f, display.y - 150.0f * scale), b(a.x + width, a.y + height);
+    draw->AddRectFilled(ImVec2(a.x - 6 * scale, a.y - 6 * scale), ImVec2(b.x + 6 * scale, b.y + 6 * scale), IM_COL32(0, 0, 0, 140), 12.0f * scale);
+    // The scale itself, cold to hot, dimmed past the reading.
+    const float mid = a.x + width * 0.5f;
+    draw->AddRectFilledMultiColor(a, ImVec2(mid, b.y), with_alpha(cold, 0.35f), with_alpha(warm, 0.35f), with_alpha(warm, 0.35f), with_alpha(cold, 0.35f));
+    draw->AddRectFilledMultiColor(ImVec2(mid, a.y), b, with_alpha(warm, 0.35f), with_alpha(hot, 0.35f), with_alpha(hot, 0.35f), with_alpha(warm, 0.35f));
+    const float x = a.x + width * h.heat;
+    draw->PushClipRect(a, ImVec2(x, b.y), true);
+    draw->AddRectFilledMultiColor(a, ImVec2(mid, b.y), cold, warm, warm, cold);
+    draw->AddRectFilledMultiColor(ImVec2(mid, a.y), b, warm, hot, hot, warm);
+    draw->PopClipRect();
+    neon_dot(draw, ImVec2(x, a.y + height * 0.5f), (6.0f + 4.0f * beat * h.heat) * scale, colour);
+    const std::string label = h.heat_label;
+    const float size = 30.0f * scale, w = text_width(bold, size, label);
+    neon_text(draw, bold, size, ImVec2(display.x * 0.5f - w * 0.5f, a.y - 50.0f * scale), with_alpha(colour, 0.75f + 0.25f * beat), label);
+    spaced_text(draw, bold, 13.0f * scale, display.x * 0.5f, b.y + 10.0f * scale, IM_COL32(220, 220, 225, 200),
+                h.heat_seeking ? "NEAREST HIDER" : "NEAREST SEEKER", 3.0f * scale);
+    if (!h.heat_seeking && h.heat > 0.6f) { // a hider with a seeker close: the edges throb red
+        const float strength = (h.heat - 0.6f) / 0.4f * (0.25f + 0.35f * beat), edge = 160.0f * scale;
+        const ImU32 glow = with_alpha(hot, strength), none = with_alpha(hot, 0.0f);
+        draw->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(display.x, edge), glow, glow, none, none);
+        draw->AddRectFilledMultiColor(ImVec2(0, display.y - edge), display, none, none, glow, glow);
+        draw->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(edge, display.y), glow, none, none, glow);
+        draw->AddRectFilledMultiColor(ImVec2(display.x - edge, 0), display, none, glow, glow, none);
+    }
+}
+
 void draw_modes_hud() {
     auto &h = hud_state();
     if (!h.hud.active && h.hud.offers.empty() && h.hud.invite.empty()) return;
@@ -1306,7 +1369,13 @@ void draw_modes_hud() {
     draw_invite(draw, h.hud, scale);
     if (!h.hud.active) return;
     draw_world(draw, h.hud, scale);
+    if (!h.hud.blind.empty()) { // a blind seeker sees only the count and the board
+        draw_blind(draw, h.hud, scale);
+        draw_panel(draw, h, scale);
+        return;
+    }
     draw_tag_players(draw, h.hud, scale);
+    draw_heat(draw, h.hud, scale);
     if (h.hud.results) {
         draw_results(draw, h.hud, scale);
         return;

@@ -176,6 +176,7 @@ struct State {
     bool spectate = true; // `mode spectate on|off`: watch whoever is up in S.K.A.T.E.
     bool goofy{};         // `mode stance regular|goofy`: S.K.A.T.E.'s flick diagrams mirrored for goofy
     bool was_infected{};  // Infection: the local player was infected at the last tick
+    bool was_hiding{};    // Hide & Seek: the hiding time was still running at the last tick
     // The lobby leaderboard: every finished game of two or more players seen in this session (the
     // local player's, or any other's whose state reaches here), each once. 1st 3 points, 2nd 2,
     // 3rd 1. Cleared when the session ends.
@@ -255,6 +256,12 @@ const Standing *standing(const Game &g, std::uint64_t id) {
     return nullptr;
 }
 bool playing(const Game &g) { return g.state && g.state->phase == Phase::playing; }
+// Hide & Seek: the local player seeks while the others still hide, so sees nothing and cannot move.
+bool seeker_blind(const State &s) {
+    if (!s.game || !playing(*s.game) || s.game->settings.mode != Mode::hide || s.game->state->target <= 0) return false;
+    const auto *me = standing(*s.game, self_id(s));
+    return me && me->up && !me->out;
+}
 void notice(State &s, std::string text) { s.notices.push_back(std::move(text)); }
 void end_game(State &s, std::string why) {
     if (!why.empty()) notice(s, std::move(why));
@@ -349,6 +356,7 @@ std::uint32_t default_duration(Mode mode) {
     case Mode::race: return 300;
     case Mode::tag: return 240;
     case Mode::infection: return 300;
+    case Mode::hide: return 360;
     default: return 300;
     }
 }
@@ -901,6 +909,20 @@ void track_game(State &s, std::uint64_t now) {
         }
         s.was_infected = me->up;
     }
+    // Hide & Seek: found, and the seekers let loose.
+    if (g.settings.mode == Mode::hide && g.state) {
+        if (me->up && !s.was_infected && g.state->target <= 0) {
+            play(Cue::missed);
+            popup(s, "FOUND! Now you seek too");
+        }
+        s.was_infected = me->up;
+        const bool hiding = g.state->target > 0;
+        if (s.was_hiding && !hiding) {
+            play(Cue::invite);
+            popup(s, me->up ? "GO FIND THEM!" : "THEY'RE COMING!");
+        }
+        s.was_hiding = hiding;
+    }
     if (g.settings.mode == Mode::tag) {
         const auto it = g.state ? g.state->turn : 0;
         if (it && it != s.last_it) {
@@ -1074,7 +1096,7 @@ void run_placing(State &s, std::uint64_t now) {
     // Placing with the free camera, like skate.'s quick drop: on while placing, off after.
     const bool want_freecam = s.placing != State::Placing::none && s.free_place;
     // The sticks fly the camera, so the skater does not roll off meanwhile.
-    overlay::pause_game_input(want_freecam);
+    overlay::pause_game_input(want_freecam || seeker_blind(s));
     // Back to the skater: asked again for a moment in case a request is dropped while busy.
     if (!s.freecam_ours && now < s.freecam_off_until && now - s.freecam_off_sent >= 400) {
         s.freecam_off_sent = now;
@@ -1462,6 +1484,16 @@ void build_hud(State &s, std::uint64_t now) {
                 const auto clean = std::count_if(st->standings.begin(), st->standings.end(), [](const Standing &p) { return !p.up && !p.out; });
                 h.status = me->up ? std::format("YOU'RE INFECTED! Catch the survivors ({} left)", clean)
                                   : std::format("SURVIVE! Stay away from the reapers ({} still clean)", clean);
+            } else if (mode == Mode::hide && me) {
+                const auto hiding = std::count_if(st->standings.begin(), st->standings.end(), [](const Standing &p) { return !p.up && !p.out; });
+                const auto counting = (std::max(st->target, 0) + 999) / 1000;
+                if (st->target > 0)
+                    h.status = me->up ? std::format("YOU'RE SEEKING. Count... the hunt starts in {} s", counting)
+                                      : std::format("HIDE! The seekers come out in {} s", counting);
+                else
+                    h.status = me->up ? std::format("FIND THEM! {} still hiding. Follow the heat", hiding)
+                                      : std::format("STAY HIDDEN! {} still hiding", hiding);
+                if (st->target > 0 && me->up && !me->out) h.blind = std::to_string(counting);
             } else if (!me) {
                 h.status = "Watching.";
             } else {
@@ -1488,11 +1520,31 @@ void build_hud(State &s, std::uint64_t now) {
         // infected marked (all of them hunt).
         if (tag_like(mode) && st && (phase == Phase::playing || phase == Phase::results)) {
             h.infection = mode == Mode::infection;
+            h.hide = mode == Mode::hide;
             for (const auto &p : st->standings) {
                 const auto found = s.positions.find(p.player);
                 if (found == s.positions.end() || now - found->second.second > 3000 || p.out) continue;
-                const bool marked = mode == Mode::infection ? p.up : p.player == st->turn;
+                if (mode == Mode::hide && !p.up && phase == Phase::playing) continue; // hiders stay hidden
+                const bool marked = hunt_like(mode) ? p.up : p.player == st->turn;
                 h.players.push_back({name_of(s, p.player), found->second.first, player_colour(st, p.player), marked, p.player == self});
+            }
+        }
+        // Hide & Seek's hot/cold meter, once the seekers are out: a seeker feels the nearest hider, a
+        // hider the nearest seeker. 60 m away or more is freezing.
+        if (mode == Mode::hide && me && !me->out && phase == Phase::playing && st->target <= 0) {
+            float nearest = -1;
+            for (const auto &p : st->standings) {
+                if (p.player == self || p.out || p.up == me->up) continue;
+                const auto found = s.positions.find(p.player);
+                if (found == s.positions.end() || now - found->second.second > 3000) continue;
+                const auto &a = found->second.first;
+                const float d = std::hypot(a[0] - s.position[0], a[1] - s.position[1], a[2] - s.position[2]);
+                if (nearest < 0 || d < nearest) nearest = d;
+            }
+            if (nearest >= 0) {
+                h.heat = std::clamp(1.0f - nearest / 60.0f, 0.0f, 1.0f);
+                h.heat_seeking = me->up;
+                h.heat_label = h.heat > 0.85f ? "ON FIRE" : h.heat > 0.6f ? "HOT" : h.heat > 0.35f ? "WARM" : h.heat > 0.1f ? "COLD" : "FREEZING";
             }
         }
         // S.K.A.T.E. reads trick names through Hall of Meat's UI hook: without it no attempt can count.
@@ -1528,6 +1580,10 @@ void build_hud(State &s, std::uint64_t now) {
                 case Mode::graffiti: row.value = std::format("{} zone{}", p.score, p.score == 1 ? "" : "s"); break;
                 case Mode::tag: row.value = std::format("{:.1f} s it", p.score / 10.0); break;
                 case Mode::infection: row.value = std::format("{}{:.1f} s", p.up ? "INFECTED  " : "", p.score / 10.0); break;
+                case Mode::hide:
+                    row.value = p.up ? std::format("SEEKING  {:.1f} s{}", p.score / 10.0, p.aux ? std::format(", found {}", p.aux) : "")
+                                     : std::format("{:.1f} s hidden", p.score / 10.0);
+                    break;
                 case Mode::skate:
                     row.value = p.out ? "OUT" : p.aux > 0 ? skate_letters(static_cast<unsigned>(p.aux), g.settings.strikes) : "no letters";
                     break;
@@ -2112,6 +2168,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         case Mode::graffiti: next = "Open GAME MODES to set an area if you want one, then START GAME."; break;
         case Mode::tag: next = "The whole map is the playground; PLACE CIRCLE in GAME MODES fences it in (up to 3 km across). Then START GAME."; break;
         case Mode::infection: next = "The whole map is the hunting ground; PLACE CIRCLE in GAME MODES fences it in. Then START GAME."; break;
+        case Mode::hide: next = "Pick the hiding time in GAME MODES, PLACE CIRCLE to keep everyone close (recommended), then START GAME."; break;
         case Mode::skate: next = "Pick the tricks that count in GAME MODES (or `mode tricks flips grabs grinds manuals`), then START GAME."; break;
         default: next = "Optional: `mode corner` at each corner of an area. Then `mode start`."; break;
         }
@@ -2284,11 +2341,17 @@ overlay::ModesMenu menu_view() {
 
 bool infected_look(std::uint64_t player) noexcept {
     const auto &s = state();
-    if (!s.game || !s.game->state || s.game->settings.mode != Mode::infection) return false;
+    if (!s.game || !s.game->state || !hunt_like(s.game->settings.mode)) return false; // infected, or seeking
     const auto phase = s.game->state->phase;
     if (phase != Phase::playing && phase != Phase::results) return false;
     const auto *p = standing(*s.game, player);
     return p && p->up && !p->out;
+}
+bool hidden_player(std::uint64_t player) noexcept {
+    const auto &s = state();
+    if (!s.game || !playing(*s.game) || s.game->settings.mode != Mode::hide) return false;
+    const auto *p = standing(*s.game, player);
+    return p && !p->up && !p->out;
 }
 
 bool local_meat_game() noexcept {

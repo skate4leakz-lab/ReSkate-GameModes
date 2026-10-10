@@ -23,11 +23,15 @@ namespace dingosdk::modes {
 using Vec3 = std::array<float, 3>;
 
 // infection: Skate Tag where the tagged stay infected and hunt too; whoever stays clean longest wins.
-enum class Mode : std::uint8_t { jam = 1, one_up = 2, meat = 3, race = 4, domination = 5, graffiti = 6, tag = 7, skate = 8, infection = 9 };
+// hide: Hide & Seek. The seeker is blind while everyone hides (turn_s seconds), then hunts; whoever
+// is found seeks too. Hiders score the time they stay hidden, seekers count who they find.
+enum class Mode : std::uint8_t { jam = 1, one_up = 2, meat = 3, race = 4, domination = 5, graffiti = 6, tag = 7, skate = 8, infection = 9, hide = 10 };
 inline constexpr Mode all_modes[]{Mode::jam,      Mode::one_up, Mode::meat,  Mode::race,     Mode::domination,
-                                  Mode::graffiti, Mode::tag,    Mode::skate, Mode::infection};
-// Played on where everyone is (position events): Skate Tag and Infection.
-inline constexpr bool tag_like(Mode m) noexcept { return m == Mode::tag || m == Mode::infection; }
+                                  Mode::graffiti, Mode::tag,    Mode::skate, Mode::infection, Mode::hide};
+// Played on where everyone is (position events): Skate Tag, Infection and Hide & Seek.
+inline constexpr bool tag_like(Mode m) noexcept { return m == Mode::tag || m == Mode::infection || m == Mode::hide; }
+// The caught join the hunters: Infection and Hide & Seek.
+inline constexpr bool hunt_like(Mode m) noexcept { return m == Mode::infection || m == Mode::hide; }
 std::string_view mode_name(Mode) noexcept;    // "Spot Jam"
 std::string_view mode_key(Mode) noexcept;     // "jam": what `mode new` takes
 std::string_view mode_summary(Mode) noexcept; // one line on how it is played
@@ -37,7 +41,7 @@ bool timed(Mode) noexcept; // ends when the clock runs out (1-Up ends on strikes
 enum class Phase : std::uint8_t { setup = 1, countdown = 2, playing = 3, results = 4 };
 
 inline constexpr std::uint8_t wire_magic = 0xD5; // never a throwdown message's first byte (1..15)
-inline constexpr std::uint8_t wire_version = 8; // 2: circle areas; 3: Graffiti tags; 4: spawn, gate facings; 5: gate widths; 6: Skate Tag; 7: S.K.A.T.E.; 8: Infection
+inline constexpr std::uint8_t wire_version = 9; // 2: circle areas; 3: Graffiti tags; 4: spawn, gate facings; 5: gate widths; 6: Skate Tag; 7: S.K.A.T.E.; 8: Infection; 9: Hide & Seek
 inline constexpr std::size_t max_corners = 16, max_points = 16, max_players = 16, max_zones = 64, max_calls = 4,
                              max_call_length = 96, max_tags = 64, max_tag_points = 6, max_line_tags = 6;
 inline constexpr std::uint32_t countdown_ms = 5000, results_ms = 12000;
@@ -221,7 +225,7 @@ class Referee {
         Vec3 at{};                // Skate Tag: where they last said they were
         std::uint64_t at_time{};  // and when (0: never)
         std::uint64_t it_ms{};    // Skate Tag: time spent it; Infection: time survived
-        bool infected{};          // Infection
+        bool infected{};          // Infection; Hide & Seek: seeking
     };
     Player *find(std::uint64_t id) noexcept;
     const Player *find(std::uint64_t id) const noexcept;
@@ -255,6 +259,9 @@ class Referee {
     std::size_t turn_{};
     std::int32_t target_{};
     std::uint64_t it_{}, tagged_by_{}, it_since_{}, it_counted_{}; // Skate Tag
+    bool released_{};               // Hide & Seek: the hiding time is over
+    std::uint64_t hide_end() const noexcept { return play_at_ + settings_.turn_s * 1000ull; }
+    std::uint64_t play_at_{};
     std::vector<Tag> tags_;         // Graffiti
     std::vector<ZoneOwner> owners_; // one per Domination spot or Graffiti tag (owner 0: unclaimed)
     std::vector<std::string> calls_;   // not yet taken

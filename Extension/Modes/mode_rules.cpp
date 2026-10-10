@@ -71,6 +71,7 @@ std::string_view mode_name(Mode m) noexcept {
     case Mode::graffiti: return "Graffiti";
     case Mode::tag: return "Skate Tag";
     case Mode::infection: return "Infection";
+    case Mode::hide: return "Hide & Seek";
     case Mode::skate: return "S.K.A.T.E.";
     }
     return "Game";
@@ -85,6 +86,7 @@ std::string_view mode_key(Mode m) noexcept {
     case Mode::graffiti: return "graffiti";
     case Mode::tag: return "tag";
     case Mode::infection: return "infection";
+    case Mode::hide: return "hide";
     case Mode::skate: return "skate";
     }
     return "";
@@ -99,6 +101,7 @@ std::string_view mode_summary(Mode m) noexcept {
     case Mode::graffiti: return "Grind it, manual it, gap it: what you skate takes your colour. A bigger line steals it. Most tags wins.";
     case Mode::tag: return "One player is it: get close to tag someone else. No tag-backs. Least time spent it wins.";
     case Mode::infection: return "One player starts infected. Everyone they reach is infected too and joins the hunt. Survive longest to win.";
+    case Mode::hide: return "Hide while the seeker can't see. Then they hunt: whoever is found seeks too. Stay hidden longest to win.";
     case Mode::skate: return "Set a trick, everyone copies it or takes a letter. Spell S.K.A.T.E. and you're out; last one standing wins.";
     }
     return "";
@@ -114,7 +117,8 @@ std::optional<Mode> parse_mode(std::string_view text) noexcept {
     if (key == "graffiti" || key == "thps") return Mode::graffiti;
     if (key == "tag" || key == "skatetag" || key == "skate_tag") return Mode::tag;
     if (key == "infection" || key == "infect" || key == "zombie" || key == "zombies") return Mode::infection;
-    if (key == "skate" || key == "s.k.a.t.e." || key == "s.k.a.t.e") return Mode::skate;
+    if (key == "hide" || key == "hideandseek" || key == "hide_and_seek" || key == "hidenseek" || key == "seek") return Mode::hide;
+    if (key == "skate" || key == "s.k.a.t.e."|| key == "s.k.a.t.e") return Mode::skate;
     return std::nullopt;
 }
 bool timed(Mode m) noexcept { return m != Mode::one_up && m != Mode::skate; }
@@ -605,8 +609,8 @@ void Referee::remove_player(std::uint64_t player, std::uint64_t now_ms) {
         if (players_.size() > 1 && still_in() <= 1) finish(now_ms);
         return;
     }
-    // Infection: the last survivor leaving, or the last of the infected, ends it.
-    if (settings_.mode == Mode::infection) {
+    // Infection (and Hide & Seek): the last survivor leaving, or the last of the infected, ends it.
+    if (hunt_like(settings_.mode)) {
         const bool hunters = std::any_of(players_.begin(), players_.end(), [](const Player &q) { return !q.out && q.infected; });
         if (players_.size() > 1 && (survivors() == 0 || !hunters || still_in() <= 1)) finish(now_ms);
         return;
@@ -626,7 +630,8 @@ void Referee::start(std::uint64_t now_ms) {
 }
 void Referee::begin_play(std::uint64_t now_ms) {
     phase_ = Phase::playing;
-    phase_at_ = last_second_ = turn_at_ = now_ms;
+    phase_at_ = last_second_ = turn_at_ = play_at_ = now_ms;
+    released_ = false;
     turn_ = 0;
     target_ = 0;
     call("GO!");
@@ -647,6 +652,13 @@ void Referee::begin_play(std::uint64_t now_ms) {
         it_counted_ = now_ms;
         call(name_of(zero.id) + " is patient zero!");
     }
+    // Hide & Seek: the seeker, picked the same way; everyone else hides.
+    if (settings_.mode == Mode::hide && !players_.empty()) {
+        auto &seeker = players_[game_ % players_.size()];
+        seeker.infected = true;
+        it_counted_ = now_ms;
+        call(std::format("{} is seeking! Hide! ({} s)", name_of(seeker.id), settings_.turn_s));
+    }
 }
 std::size_t Referee::survivors() const noexcept {
     return static_cast<std::size_t>(std::count_if(players_.begin(), players_.end(), [](const Player &p) { return !p.out && !p.infected; }));
@@ -654,6 +666,7 @@ std::size_t Referee::survivors() const noexcept {
 // Infection: every infected player whose position is fresh infects each survivor within reach whose
 // position is fresh too. A game of more than one player ends when nobody is left clean.
 void Referee::try_infections(std::uint64_t now_ms) {
+    if (settings_.mode == Mode::hide && now_ms < hide_end()) return; // nobody is found while the seekers count
     const float reach = settings_.radius;
     const auto fresh = [&](const Player &p) { return !p.out && p.at_time && now_ms - p.at_time <= position_fresh_ms; };
     std::vector<std::pair<std::uint64_t, std::uint64_t>> caught; // victim, by
@@ -670,10 +683,15 @@ void Referee::try_infections(std::uint64_t now_ms) {
     for (const auto &[victim, by] : caught) {
         auto *p = find(victim);
         p->infected = true;
-        call(std::format("{} infected {}!", name_of(by), name_of(victim)));
+        if (settings_.mode == Mode::hide) {
+            ++find(by)->aux; // finds
+            call(std::format("{} found {}!", name_of(by), name_of(victim)));
+        } else {
+            call(std::format("{} infected {}!", name_of(by), name_of(victim)));
+        }
     }
     if (!caught.empty() && players_.size() > 1 && survivors() == 0) {
-        call(name_of(caught.back().first) + " was the last survivor");
+        call(name_of(caught.back().first) + (settings_.mode == Mode::hide ? " was the last one hiding" : " was the last survivor"));
         finish(now_ms);
     }
 }
@@ -841,7 +859,8 @@ void Referee::event(std::uint64_t player, Event event, std::int32_t value, const
     if (settings_.mode != Mode::race && !inside(settings_, at)) return; // out of the area: nothing counts
     switch (settings_.mode) {
     case Mode::tag:
-    case Mode::infection: return; // handled above, from positions
+    case Mode::infection:
+    case Mode::hide: return; // handled above, from positions
     case Mode::skate:
         if (event != Event::trick || turn_ >= players_.size() || players_[turn_].id != player) return;
         skate_attempt(*p, value != 0, trick, now_ms);
@@ -973,8 +992,25 @@ bool Referee::tick(std::uint64_t now_ms) {
             }
             it_counted_ = now_ms;
         }
-        if (settings_.mode == Mode::infection) {
-            // Each survivor's time clean, in tenths of a second (the score: more wins).
+        // Hide & Seek: the seekers come out when the hiding time is up; hiding time scores nothing.
+        if (settings_.mode == Mode::hide && !released_) {
+            if (now_ms < hide_end()) {
+                it_counted_ = now_ms;
+                return false;
+            }
+            released_ = true;
+            it_counted_ = hide_end();
+            call("Ready or not, here they come!");
+            for (auto &p : players_) // the release: scored from the end of the hiding time, sent at once
+                if (!p.out && !p.infected) {
+                    p.it_ms += now_ms - it_counted_;
+                    p.score = static_cast<std::int32_t>(std::min<std::uint64_t>(p.it_ms / 100, 0x7fffffff));
+                }
+            it_counted_ = now_ms;
+            return true;
+        }
+        if (hunt_like(settings_.mode)) {
+            // Each survivor's time clean (or hidden), in tenths of a second (the score: more wins).
             for (auto &p : players_)
                 if (!p.out && !p.infected) {
                     p.it_ms += now_ms - it_counted_;
@@ -1041,7 +1077,12 @@ Message Referee::state(std::uint64_t now_ms) const {
             m.standings.back().aux = p.infected ? 1 : 0;
             m.standings.back().up = p.infected;
         }
+        // Hide & Seek: `up` for the seekers, aux how many each found.
+        if (settings_.mode == Mode::hide) m.standings.back().up = p.infected;
     }
+    // Hide & Seek: target is the hiding time left (ms), 0 once the seekers are out.
+    if (settings_.mode == Mode::hide && phase_ == Phase::playing)
+        m.target = static_cast<std::int32_t>(now_ms < hide_end() ? hide_end() - now_ms : 0);
     const auto mode = settings_.mode;
     std::stable_sort(m.standings.begin(), m.standings.end(), [mode, this](const Standing &a, const Standing &b) {
         if (mode == Mode::race) {
@@ -1058,6 +1099,10 @@ Message Referee::state(std::uint64_t now_ms) const {
         if (mode == Mode::infection) { // longest survived first; a survivor before the infected on a tie
             if (a.score != b.score) return a.score > b.score;
             return a.aux < b.aux;
+        }
+        if (mode == Mode::hide) { // longest hidden first; then most found
+            if (a.score != b.score) return a.score > b.score;
+            return a.aux > b.aux;
         }
         if (mode == Mode::one_up || mode == Mode::skate) {
             if (a.out != b.out) return !a.out;

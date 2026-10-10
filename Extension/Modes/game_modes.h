@@ -33,6 +33,9 @@ std::vector<std::string> take_notices();
 // Infection: whether this other player is infected now, so their skater wears the reaper here
 // (game thread, from the session's outfit pass).
 bool infected_look(std::uint64_t player) noexcept;
+// Hide & Seek: whether this other player is hiding now, so their nametag, dot and chat bubbles
+// stay off (game thread).
+bool hidden_player(std::uint64_t player) noexcept;
 // `mode <verb> [arguments]` from the console dispatcher (game thread).
 std::string command(std::string_view verb, const std::vector<std::string> &arguments);
 // The HUD's snapshot, with the latest camera (any thread).
