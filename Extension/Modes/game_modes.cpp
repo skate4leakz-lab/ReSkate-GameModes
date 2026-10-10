@@ -209,6 +209,10 @@ struct State {
     // game starts at the flag rather than wherever the leader stands when they press Start.
     std::uint64_t flag_key{};
     float flag_yaw{};
+    // For the native menu's thread: the game a flag may be placed for (published each tick), and a
+    // placed flag waiting for the game thread (under hud_mutex).
+    std::atomic<std::uint64_t> flaggable{};
+    std::optional<std::pair<Vec3, float>> pending_flag;
 };
 // `mode grid on|off`: the Throwdowns cards in a grid (seen working in game, modes.13) or one row.
 std::atomic<bool> throwdown_grid_on{true};
@@ -1886,6 +1890,7 @@ void build_hud(State &s, std::uint64_t now) {
             }
     }
     auto native = native_snapshot(s);
+    s.flaggable.store(s.game && s.game->leading && (!s.game->state || s.game->state->phase != Phase::results) ? game_key(*s.game) : 0);
     std::lock_guard lock(s.hud_mutex);
     s.hud = std::move(h);
     s.menu = std::move(m);
@@ -1911,9 +1916,18 @@ std::string help() {
 }
 } // namespace
 
+std::string apply_flag(State &s, const Vec3 &spot, float yaw_degrees);
 std::vector<std::vector<std::uint8_t>> tick(const SessionInput &input) {
     auto &s = state();
     const auto now = now_ms();
+    // A native flag placed from the menu's thread.
+    std::optional<std::pair<Vec3, float>> flag;
+    {
+        std::lock_guard lock(s.hud_mutex);
+        flag = std::exchange(s.pending_flag, std::nullopt);
+    }
+    if (flag)
+        if (auto said = apply_flag(s, flag->first, flag->second); !said.starts_with("error")) notice(s, std::move(said));
     s.session = input.local != 0;
     if (!s.session && !s.lobby_counted.empty()) { // left the lobby: a new one starts a new leaderboard
         s.lobby.clear();
@@ -2453,12 +2467,15 @@ NativeMatch native_match() {
     std::lock_guard lock(s.hud_mutex);
     return s.native;
 }
-std::uint64_t flag_game() noexcept {
-    const auto &s = state();
-    return s.game && s.game->leading && (!s.game->state || s.game->state->phase != Phase::results) ? game_key(*s.game) : 0;
-}
+std::uint64_t flag_game() noexcept { return state().flaggable.load(); }
 std::string flag_placed(const std::array<float, 3> &spot, float yaw_degrees) {
     auto &s = state();
+    if (!s.flaggable.load()) return "error: no game of yours to place a flag for.";
+    std::lock_guard lock(s.hud_mutex);
+    s.pending_flag = std::pair{spot, yaw_degrees};
+    return "Flag placed: the game starts there.";
+}
+std::string apply_flag(State &s, const Vec3 &spot, float yaw_degrees) {
     if (!s.game || !s.game->leading) return "error: no game of yours to place a flag for.";
     auto &g = *s.game;
     if (g.referee) return "error: the game has started already.";

@@ -1766,11 +1766,13 @@ bool consume_one_up_throwdown_send(std::uint32_t hash,Address type,Address paylo
             return false;
         }
         if(hash==event_force_start) {
-            one_up::queue("start");
-            logging::write(logging::Level::info,logging::Channel::ui,"1-Up: native Start requested.");
+            if(one_up::flag_for_mode()) one_up::request_mode_start();
+            else one_up::queue("start");
+            logging::write(logging::Level::info,logging::Channel::ui,"Throwdown flag: native Start requested.");
             return true;
         }
-        one_up::queue("leave");
+        if(one_up::flag_for_mode()) one_up::request_mode_stop();
+        else one_up::queue("leave");
         one_up::flag_registration_left();
     } catch(...) {}
     return false;

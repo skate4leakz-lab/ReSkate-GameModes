@@ -3,6 +3,7 @@
 #include "native_menu_internal.h"
 #include "native_menu_lifetime.h"
 #include "one_up_menu.h"
+#include "Extension/Throwdowns/one_up_placement.h"
 #include "Extension/Modes/game_modes.h"
 #include "Extension/Modes/mode_rules.h"
 #include "Extension/UI/Overlay/overlay.h"
@@ -980,6 +981,9 @@ void render(const Context &c) {
                                                : std::string("Play area: the whole map"));
             if (spots) note("spots", std::format("Spots placed: {}", m.points));
             action("start", "START GAME", "start");
+            // skate.'s own Throwdown flag: where everyone starts (Deathrace's start gate), with the
+            // game's waiting card and its Start for the leader.
+            row(c, shown, "place-flag", race ? "PLACE START FLAG (START GATE)" : "PLACE START FLAG", "flag");
             if (race) row(c, shown, "place-route", "PLACE ROUTE AND CHECKPOINTS", "place", "points");
             if (spots) row(c, shown, "place-spots", "PLACE SPOTS", "place", "points");
             if (!race) {
@@ -1156,6 +1160,14 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                     }
                     else if (a.command == "back") switch_page(c, false);
                     else if (a.command == "mode") run.push_back(a);
+                    // The native flag: Spot Battle's own placement (one_up_placement.cpp) for this game.
+                    else if (a.command == "flag") {
+                        if (one_up::begin_mode_flag_placement()) {
+                            switch_page(c, false);
+                            s.status = "Place your start flag.";
+                        } else
+                            s.status = "The flag can't be placed right now (a 1-Up or another flag is up).";
+                    }
                     // Placing flies the free camera over the world: close Throwdowns the way its own
                     // Back does (ThrowdownerExit), then start placing.
                     else if (a.command == "place") {

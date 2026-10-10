@@ -11,6 +11,17 @@ bool begin_flag_placement(unsigned seconds, unsigned players, bool show_native_s
 // Reserve the native setup navigation for this card. The tick publishes it
 // only after previous flag cleanup; a rejected click cannot open Spot Battle.
 bool arm_native_setup(unsigned seconds, unsigned players);
+// The same native flag for a game mode the local player set up (modes::flag_game): straight to
+// the flag (the mode's own Throwdowns panel is its setup). Its spot and facing start the game;
+// the native Start on its waiting card starts it, Leave ends it.
+bool begin_mode_flag_placement();
+bool flag_for_mode() noexcept;
+void request_mode_start() noexcept;
+void request_mode_stop() noexcept;
+struct ModeFlagRequests { bool start{}, stop{}; };
+// The native Start/Leave presses for a game mode's flag since the last call (the menu tick runs
+// them as `mode start` / `mode stop`).
+ModeFlagRequests take_mode_flag_requests() noexcept;
 bool native_setup_active() noexcept;
 void set_native_setup_options(unsigned seconds,unsigned players) noexcept;
 bool flag_placement_active() noexcept;

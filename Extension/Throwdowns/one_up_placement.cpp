@@ -3,6 +3,7 @@
 #include "native_throwdowns.h"
 #include "throwdown_lab.h"
 #include "Extension/UI/NativeMenu/native_menu_data.h"
+#include "Extension/Modes/game_modes.h"
 #include "Engine/Core/Log/logging.h"
 #include <Windows.h>
 #include <algorithm>
@@ -17,6 +18,11 @@ struct SetupRequest { unsigned seconds{}, players{}; std::uint64_t world{}, loca
 struct Placement {
     std::mutex mutex;
     Step step{};
+    // Who the flag is for: 1-Up, or a game mode set up here (Extension/Modes), whose game key
+    // `mode_game` is (the flag starts that game; when it is gone the flag goes too).
+    bool for_mode{};
+    std::uint64_t mode_game{};
+    bool mode_start_requested{}, mode_stop_requested{};
     std::uint64_t world{}, local{}, until{}, changed{}, sent{}, reopen_until{}, reopen_at{};
     unsigned seconds{}, players{};
     std::uint32_t mmid{};
@@ -34,6 +40,7 @@ void reset(Placement& p) {
     p.created=p.setup_seen=p.flag_seen=p.exited=p.cancelling=p.destroy_queued=p.destroyed=false;
     p.handed_off=p.match_seen=false;
     p.show_setup=p.native_entry=false;
+    p.for_mode=false; p.mode_game=0;
 }
 void open_native_setup(Placement& p,const SetupRequest& request,std::uint64_t now) {
     reset(p); p.pending_setup.reset();
@@ -71,6 +78,29 @@ bool begin_flag_placement(unsigned seconds,unsigned players,bool show_native_set
     p.status="Opening flag placement...";
     prepare_throwdown_injection(); // Prewarm cleanup before the player places the flag.
     return true;
+}
+bool begin_mode_flag_placement() {
+    const auto v=view();
+    const auto game=modes::flag_game();
+    if(!game || !v.world || v.state.match) return false;
+    auto& p=placement(); std::lock_guard lock(p.mutex);
+    if(p.step!=Step::idle) return false;
+    reset(p); p.step=Step::open; p.world=v.world; p.local=v.local;
+    p.for_mode=true; p.mode_game=game;
+    p.reopen_until=p.reopen_at=0;
+    p.seconds=20; p.players=6; p.changed=GetTickCount64(); p.until=p.changed+15000;
+    p.status="Opening flag placement...";
+    prepare_throwdown_injection();
+    return true;
+}
+bool flag_for_mode() noexcept { auto& p=placement(); std::lock_guard lock(p.mutex); return p.step!=Step::idle && p.for_mode; }
+void request_mode_start() noexcept { auto& p=placement(); std::lock_guard lock(p.mutex); if(p.for_mode) p.mode_start_requested=true; }
+void request_mode_stop() noexcept { auto& p=placement(); std::lock_guard lock(p.mutex); if(p.for_mode) p.mode_stop_requested=true; }
+ModeFlagRequests take_mode_flag_requests() noexcept {
+    auto& p=placement(); std::lock_guard lock(p.mutex);
+    ModeFlagRequests r{p.mode_start_requested,p.mode_stop_requested};
+    p.mode_start_requested=p.mode_stop_requested=false;
+    return r;
 }
 bool arm_native_setup(unsigned seconds,unsigned players) {
     const auto v=view();
@@ -168,6 +198,9 @@ void observe_flag_exit(bool cancelling) noexcept {
 }
 void observe_flag_destroyed(std::uint32_t mmid) noexcept {
     auto& p=placement(); std::lock_guard lock(p.mutex);
+    if(p.step==Step::waiting && p.handed_off && p.destroy_queued && p.mmid==mmid && p.for_mode) {
+        p.mmid=0;p.destroyed=true;p.changed=GetTickCount64();return;
+    }
     if(p.step==Step::waiting && p.handed_off && p.destroy_queued && p.mmid==mmid) {
         // The registration is a lobby flag, not the running 1-Up match. Once
         // its transform is saved, use the native teardown to remove the pole,
@@ -204,6 +237,7 @@ void tick_flag_placement(const menu_data::Context& c) {
     }
     std::string command; Step next{}; std::uint32_t destroy{};
     std::optional<SpawnRequest> handoff;
+    std::optional<std::pair<std::array<float,3>,float>> mode_flag;
     bool release{};
     {
         std::lock_guard lock(p.mutex);
@@ -223,7 +257,22 @@ void tick_flag_placement(const menu_data::Context& c) {
             reset(p);p.pending_setup.reset(); p.reopen_until=p.reopen_at=0; p.status="Flag placement ended because the session changed."; return;
         }
         if(p.step==Step::flag && p.flag_seen) { p.step=Step::placing; p.until=now+300000; p.status="Place your starting flag. Score anywhere."; }
-        if(p.step==Step::waiting) {
+        if(p.step==Step::waiting && p.for_mode) {
+            // A game mode's flag: its spot and facing go to the game; the registration stays as
+            // the world flag with its waiting card until the game counts down, then goes.
+            if(!p.handed_off && p.spawn) {
+                mode_flag={*p.spawn,std::atan2(p.facing[6],p.facing[8])*180.f/3.14159265f};
+                p.handed_off=true; p.status.clear(); release=true;
+            }
+            const auto m=modes::native_match();
+            const bool same=modes::flag_game()==p.mode_game || (m.active && m.key==p.mode_game);
+            if(p.handed_off && p.mmid && !p.destroy_queued && same && (m.phase==2 || m.phase==3)) destroy=p.mmid;
+            if(!same || (p.handed_off && !p.mmid && p.destroyed)) {
+                if(!same) { p.step=Step::cleanup; p.cancelling=true; p.until=now+15000; }
+                else { reset(p); p.status.clear(); return; }
+            }
+        }
+        else if(p.step==Step::waiting) {
             // Keep the native registration alive: it owns the world flag,
             // waiting notification, and Start/Leave input prompts.
             if(!p.handed_off && p.spawn) {
@@ -272,6 +321,10 @@ void tick_flag_placement(const menu_data::Context& c) {
     }
     if(release) release_one_up_native_placeholder();
     if(handoff) create_at_spawn(*handoff);
+    if(mode_flag) {
+        const auto said=modes::flag_placed(mode_flag->first,mode_flag->second);
+        logging::log(logging::Level::info,logging::Channel::ui,"Game modes flag: {}",said);
+    }
     if(destroy && prepare_throwdown_injection() && queue_throwdown_destroy(destroy)) {
         std::lock_guard lock(p.mutex); if(p.mmid==destroy) p.destroy_queued=true;
     }

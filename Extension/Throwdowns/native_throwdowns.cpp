@@ -3,6 +3,7 @@
 #include "one_up_placement.h"
 #include "one_up_runtime.h"
 #include "one_up_input_contract.h"
+#include "Extension/Modes/game_modes.h"
 #include "Extension/UI/NativeMenu/native_menu_data.h"
 #include "throwdown_lab.h"
 #include "throwdown_relay.h"
@@ -604,7 +605,11 @@ void complete_native_throwdown_parameters(Address vm) noexcept {
                     bool result=false;
                     if(hash==0x1a0c8c31) {
                         if(solo_queue)result=true;
-                        else {
+                        else if(one_up::flag_for_mode()) {
+                            // A game mode's flag: its leader may start it while it is set up.
+                            const auto m=modes::native_match();
+                            result=modes::flag_game()!=0 && (!m.active || m.phase<=1);
+                        } else {
                             const auto v=one_up::view();
                             result=v.state.match && v.state.leader==v.local && v.state.phase==one_up::Phase::lobby;
                         }

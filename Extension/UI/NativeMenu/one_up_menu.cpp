@@ -9,6 +9,7 @@
 #include "native_menu_internal.h"
 #include "Extension/Throwdowns/one_up_runtime.h"
 #include "Extension/Modes/game_modes.h"
+#include "Extension/Modes/mode_rules.h"
 #include "Extension/UI/Overlay/overlay.h"
 #include "Extension/Throwdowns/native_throwdowns.h"
 #include "Extension/Throwdowns/one_up_placement.h"
@@ -1253,11 +1254,60 @@ void session_marker_controls(const Context& c,bool release) {
             if(current!=disabled)c.set(field,disabled);
         }
 }
+std::string upper_text(std::string text);
+// The waiting card a native flag brings, for a 1-Up match or a game mode's flag: its title, the
+// line under it, the player count, the countdown and what Start and Leave do.
+struct WaitingCard {
+    bool active{}, lobby{}, ticking{}, one_up{}, can_start{};
+    std::string title, message, count, start_label, leave_label;
+    std::string start_command, start_argument, leave_command, leave_argument;
+    std::uint32_t remaining{}, countdown_total{};
+};
+WaitingCard waiting_card() {
+    WaitingCard w;
+    const auto v=one_up::view();
+    if(v.state.match && v.state.phase!=one_up::Phase::cancelled) {
+        w.active=w.one_up=true;
+        w.title="1-UP";
+        w.lobby=v.state.phase==one_up::Phase::lobby;
+        w.ticking=v.state.phase==one_up::Phase::countdown;
+        w.remaining=v.remaining; w.countdown_total=v.state.config.countdown_ms;
+        const auto ready=std::count_if(v.state.players.begin(),v.state.players.end(),[](const auto& p){return p.connected && p.ready;});
+        if(w.lobby) w.message="Waiting for players  "+std::to_string(ready)+" / "+std::to_string(v.state.config.max_players)+" ready";
+        else if(w.ticking) w.message="Starting in "+std::to_string((v.remaining+999)/1000);
+        else if(v.state.phase==one_up::Phase::finished) w.message=v.name(v.state.winner)+" wins!";
+        else w.message=v.name(v.state.active)+"  |  Target "+std::to_string(static_cast<unsigned>(v.state.target));
+        const auto connected=std::count_if(v.state.players.begin(),v.state.players.end(),[](const auto& p){return p.connected;});
+        w.count=std::to_string(connected)+"/"+std::to_string(v.state.config.max_players);
+        w.leave_label=one_up::restricts_session_markers()?"QUIT MATCH":"LEAVE"; w.leave_command="oneup"; w.leave_argument="leave";
+        w.start_label=w.lobby?"START":"1-UP"; w.start_command=w.lobby?"oneup":"open"; w.start_argument=w.lobby?"start":"";
+        return w;
+    }
+    if(!one_up::flag_for_mode()) return w;
+    const auto menu=modes::menu_view();
+    if(!menu.in_game) return w;
+    const auto mode=modes::parse_mode(menu.mode);
+    w.active=true;
+    w.title=mode?upper_text(std::string(modes::mode_name(*mode))):std::string("GAME");
+    w.lobby=menu.phase<=1;
+    w.ticking=menu.phase==2;
+    const auto m=modes::native_match();
+    w.remaining=m.active?m.remaining_ms:0; w.countdown_total=m.active?m.countdown_ms:5000;
+    if(w.lobby) w.message=menu.missing.empty()?"Waiting for skaters  "+std::to_string(menu.players)+" in":menu.missing;
+    else if(w.ticking) w.message="Starting in "+std::to_string((w.remaining+999)/1000);
+    else if(menu.phase==4) w.message=m.winner.empty()?std::string("Game over"):m.winner+" wins!";
+    else w.message=m.headline;
+    w.count=std::to_string(menu.players);
+    w.can_start=menu.leading && w.lobby;
+    w.start_label=w.can_start?"START":"GAME"; w.start_command="mode"; w.start_argument=w.can_start?"start":"";
+    w.leave_label=menu.leading?"END GAME":"LEAVE"; w.leave_command="mode"; w.leave_argument=menu.leading?"stop":"leave";
+    return w;
+}
 void waiting_hud(const Context& c) {
-    auto& s=state(); const auto v=one_up::view();
+    auto& s=state(); const auto w=waiting_card();
     // Destroying the flag must not restore a lingering Spot Battle banner
     // during 1-Up. The private presentation belongs to the match until exit.
-    if(!v.state.match || v.state.phase==one_up::Phase::cancelled) {
+    if(!w.active) {
         for(const auto& [handle,presentation]:s.waiting_presentations)
             if(c.type_of(handle)==presentation.first.type) {
                 const auto current=read<Widget>(c.address(presentation.first)).data.handle;
@@ -1274,12 +1324,6 @@ void waiting_hud(const Context& c) {
     // The live HUD is in the gameplay asset domain, which need not be a parent
     // of the card's domain. Resolve its registered type directly.
     constexpr std::uint32_t hash=273922540U; // NotificationViewModel
-    const auto count=std::count_if(v.state.players.begin(),v.state.players.end(),[](const auto& p){return p.connected && p.ready;});
-    std::string message;
-    if(v.state.phase==one_up::Phase::lobby) message="Waiting for players  "+std::to_string(count)+" / "+std::to_string(v.state.config.max_players)+" ready";
-    else if(v.state.phase==one_up::Phase::countdown) message="Starting in "+std::to_string((v.remaining+999)/1000);
-    else if(v.state.phase==one_up::Phase::finished) message=v.name(v.state.winner)+" wins!";
-    else message=v.name(v.state.active)+"  |  Target "+std::to_string(static_cast<unsigned>(v.state.target));
     // Authored Notification defaults and other challenge queues are registered
     // roots too. Only adapt a notification actually mounted in the HUD stack.
     std::map<Handle,Value> mounted_notifications;
@@ -1327,18 +1371,21 @@ void waiting_hud(const Context& c) {
         const auto start=c.field(model,0xd31e2918),leave=c.field(model,0xc13bcfcd);
         clear_value(c,c.field(start,0x67212c85));
         const auto heading=c.field(model,0x1c1d36ea);
-        plain_label(c,c.field(heading,0x44688629),"1-UP");
-        plain_label(c,c.field(heading,0x00f3b15e),message);
+        plain_label(c,c.field(heading,0x44688629),w.title);
+        plain_label(c,c.field(heading,0x00f3b15e),w.message);
         // Start/Leave must remain usable even if optional icon loading is late.
-        footer_action(c,leave,one_up::restricts_session_markers()?"QUIT MATCH":"LEAVE","oneup","leave");
-        footer_action(c,start,v.state.phase==one_up::Phase::lobby?"START":"1-UP",v.state.phase==one_up::Phase::lobby?"oneup":"open",v.state.phase==one_up::Phase::lobby?"start":"");
-        if(!s.waiting_badge.handle) {
-            s.waiting_badge=make(c,texture_schema);
-            c.set(c.field(s.waiting_badge,0xf524c836),96.f);
-            c.set(c.field(s.waiting_badge,0x6fbd254e),96.f);
+        footer_action(c,leave,w.leave_label,w.leave_command,w.leave_argument);
+        footer_action(c,start,w.start_label,w.start_command,w.start_argument);
+        // A game mode's card keeps the game's own Throwdown mark; 1-Up shows its blue badge.
+        if(w.one_up) {
+            if(!s.waiting_badge.handle) {
+                s.waiting_badge=make(c,texture_schema);
+                c.set(c.field(s.waiting_badge,0xf524c836),96.f);
+                c.set(c.field(s.waiting_badge,0x6fbd254e),96.f);
+            }
+            publish_texture(c,std::array{c.field(s.waiting_badge,0x6e469d2a)},"UI/ReSkate/OneUp/img_OneUp_Blue_1024");
+            c.set(c.field(heading,content),Widget{asset(c,"UI/Foundations/Components/Media/Icons/Texture_Widget"),{0,s.waiting_badge.handle}});
         }
-        publish_texture(c,std::array{c.field(s.waiting_badge,0x6e469d2a)},"UI/ReSkate/OneUp/img_OneUp_Blue_1024");
-        c.set(c.field(heading,content),Widget{asset(c,"UI/Foundations/Components/Media/Icons/Texture_Widget"),{0,s.waiting_badge.handle}});
         // The stock queue's decorator displays its backend limit (10). Keep
         // the native green participant icon but bind a private count model to
         // the actual 1-Up roster and selected player limit.
@@ -1350,8 +1397,7 @@ void waiting_hud(const Context& c) {
             participant_widget.data={0,participants.handle};
             c.set(decorator,participant_widget);
         }
-        const auto connected=std::count_if(v.state.players.begin(),v.state.players.end(),[](const auto& p){return p.connected;});
-        plain_label(c,c.field(participants,0x58c9d354),std::to_string(connected)+"/"+std::to_string(v.state.config.max_players));
+        plain_label(c,c.field(participants,0x58c9d354),w.count);
         // CountdownViewModel explicitly supports an outside time source when
         // DoCountdown is false. Keep the authored timer artwork/animation and
         // feed the synchronized match clock, never the native S.K.A.T.E. clock.
@@ -1363,21 +1409,21 @@ void waiting_hud(const Context& c) {
             s.waiting_countdown=make(c,{1783008579U,static_cast<std::uint16_t>(size(timer_type))},timer_type);
             c.copy(s.waiting_countdown,data);
         }
-        const bool ticking=v.state.phase==one_up::Phase::countdown;
+        const bool ticking=w.ticking;
         const auto timer=s.waiting_countdown;
         c.set(c.field(timer,1883000211U),false); // DoCountdown: externally driven
         c.set(c.field(timer,376517051U),ticking); // ForceActive
         c.set(c.field(timer,1636171836U),ticking); // Running
         c.set(c.field(timer,3239084782U),true); // UpdateText
-        native_timer_seconds(c,timer,1288039561U,v.state.config.countdown_ms);
-        native_timer_seconds(c,timer,247769280U,ticking?v.remaining:0);
-        c.text(c.field(timer,378491941U),ticking?std::to_string((v.remaining+999)/1000):"");
+        native_timer_seconds(c,timer,1288039561U,w.countdown_total);
+        native_timer_seconds(c,timer,247769280U,ticking?w.remaining:0);
+        c.text(c.field(timer,378491941U),ticking?std::to_string((w.remaining+999)/1000):"");
         c.set(c.field(model,0x0750d51d),Ref{0,timer.handle});
     }
     // The registration keeps the world flag alive. Its large waiting card is
     // only needed in the lobby; during the match retain the same native Leave
     // button in the same notification slot. Never pop the backend queue.
-    const bool compact=v.state.phase!=one_up::Phase::lobby;
+    const bool compact=!w.lobby;
     for(const auto& [notification,presentation]:mounted_notifications) {
         const auto current=read<Widget>(c.address(presentation));
         if(!s.waiting_widgets.contains(notification))continue;
@@ -1911,6 +1957,31 @@ bool release_native_one_up_menu(std::uintptr_t base) noexcept {
 }
 void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
     auto& s=state(); const auto now=GetTickCount64(); if(loading || (now<s.next_tick && !one_up::flag_placement_active())) return; s.next_tick=now+200;
+    // Game mode commands from a flag's waiting card (and its native Start/Leave), run once the
+    // model lock is released.
+    std::vector<std::string> mode_commands;
+    {
+        const auto flag=one_up::take_mode_flag_requests();
+        if(flag.start) mode_commands.push_back("start");
+        if(flag.stop) mode_commands.push_back(modes::menu_view().leading?"stop":"leave");
+    }
+    const auto run_mode_commands=[&] {
+        for(const auto& text:mode_commands) {
+            if(text.empty()) continue;
+            std::vector<std::string> words;
+            for(std::size_t at=0;at<text.size();) {
+                auto end=text.find(' ',at); if(end==std::string::npos) end=text.size();
+                if(end>at) words.push_back(text.substr(at,end-at));
+                at=end+1;
+            }
+            const auto verb=words.front(); words.erase(words.begin());
+            try {
+                const auto said=modes::command(verb,words);
+                logging::log(logging::Level::info,logging::Channel::ui,"Throwdown flag: mode {} -> {}",text,said);
+            } catch(...) {}
+        }
+    };
+    struct RunAfter { const decltype(run_mode_commands)& run; ~RunAfter(){ run(); } } run_after{run_mode_commands};
     try {
         const auto ui=read<Address>(base+build::engine::ui_manager); const auto manager=ui?read<Address>(ui+0x140):0; if(!manager)return;
         const Context c(base,manager); game::ModelWriteLock lock(manager);
@@ -1937,7 +2008,10 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
             stock_solo_controls(c);
             std::vector<Action> pending;
             {std::lock_guard pending_lock(s.mutex);pending=std::exchange(s.pending,{});}
-            for(const auto& a:pending)if(a.generation==s.owner.load() && a.command=="oneup")one_up::queue(a.argument);
+            for(const auto& a:pending)if(a.generation==s.owner.load()) {
+                if(a.command=="oneup")one_up::queue(a.argument);
+                else if(a.command=="mode")mode_commands.push_back(a.argument);
+            }
             gameplay_hud(c,now);
             return;
         }
@@ -1994,6 +2068,7 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
                 }
             }
             else if(a.command=="oneup") one_up::queue(a.argument);
+            else if(a.command=="mode") mode_commands.push_back(a.argument);
         }
         if(s.place_until) {
             const auto v=one_up::view();

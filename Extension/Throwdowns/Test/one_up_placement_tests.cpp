@@ -17,6 +17,12 @@ unsigned released{};
 std::uint32_t nav{};
 bool available=true;
 }
+// Game modes are not part of these tests: no game of the player's own to flag.
+namespace dingosdk::modes {
+NativeMatch native_match() { return {}; }
+std::uint64_t flag_game() noexcept { return 0; }
+std::string flag_placed(const std::array<float, 3>&, float) { return {}; }
+}
 namespace dingosdk::multiplayer {
 void release_one_up_native_placeholder() noexcept { ++released; }
 bool prepare_throwdown_injection() noexcept { return true; }
