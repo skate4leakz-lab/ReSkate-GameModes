@@ -20,9 +20,9 @@
 #include <utility>
 
 // The Throwdowns page holds a LinearList of three card tiles (S.K.A.T.E., Spot Battle, Skate Jam).
-// Each game mode gets a card after them, a private copy of the Spot Battle tile; every card is shown
-// smaller (card_width, card_height) and the row clips to its bounds, so it scrolls left and right to
-// the focused card. A card's button calls back
+// Each game mode gets a card after them, a private copy of the Spot Battle tile. All the cards are
+// shown smaller in a grid (build_grid): rows of cards_per_row, scrolling up and down, where the
+// stock row was. A card's button calls back
 // here (the native navigation id is cleared, so it opens no stock setup): the mode is set up and the
 // page body swaps to a private copy of the authored Throwdown creation panel whose list holds our
 // rows. Leaving restores the page's own body, Back button, title and page actions.
@@ -83,9 +83,11 @@ struct Original {
     std::array<float, 2> tile_size{}, description_size{};
     float icon_width{}, icon_height{};
 };
-// Every card in the row is shown at this share of its authored width and height, so more are on
-// screen at once; at .7 the longest titles ("DOMINATION", "HALL OF MEAT") still fit.
-constexpr float card_width = .7f, card_height = .9f;
+// The cards are laid out as a grid: rows of `cards_per_row`, each card at this share of its
+// authored width and height (the icon follows the height), so about two rows show at once and the
+// grid scrolls up and down. At .62 wide the longest titles ("DOMINATION", "HALL OF MEAT") fit.
+constexpr unsigned cards_per_row = 4;
+constexpr float card_width = .62f, card_height = .42f, card_gap = 24.f;
 struct State {
     Address manager{}, base{}, anchor_asset{}, primary_input{};
     Value page, cards, source_label;
@@ -109,6 +111,11 @@ struct State {
     std::uint64_t next_id{}, next_tick{}, pass{};
     std::string status; // the last game-mode command's answer
     bool details{};
+    // The grid: `holder` is the page's presenter that showed the stock card row (`original_holder`
+    // its own widget, put back on release); `grid` the vertical list of row presenters shown there
+    // instead. Without a grid (it could not be built) our cards join the stock row.
+    Value holder, grid;
+    Widget original_holder{};
 };
 State &state() {
     static auto *value = new State;
@@ -120,7 +127,8 @@ void reset(bool generations_too) {
     auto &s = state();
     s.owner.store(0);
     s.anchor_asset = s.primary_input = 0;
-    s.page = s.cards = s.source_label = {};
+    s.page = s.cards = s.source_label = s.holder = s.grid = {};
+    s.original_holder = {};
     s.mode_cards.clear();
     s.original_body = s.original_back = s.original_actions = {};
     s.panel_anchor = s.panel = s.header = s.badge = s.panel_style = s.panel_notice = s.footer_anchor = s.footer_list = {};
@@ -461,10 +469,15 @@ Value category(const Context &c, Value tile) {
     return model;
 }
 Value description(const Context &c, Value cat) { return reference(c, read<Widget>(c.address(c.field(cat, widget))).data); }
-// The Throwdowns page's card list: three tiles whose buttons name the stock modes.
-std::optional<Value> card_list(const Context &c, Value p) {
+// The Throwdowns page's card list (three tiles whose buttons name the stock modes) and the
+// presenter showing it.
+struct CardList {
+    Value list, holder;
+};
+std::optional<CardList> card_list(const Context &c, Value p) {
     try {
-        auto w = read<Widget>(c.address(body(c, p)));
+        auto holder = body(c, p);
+        auto w = read<Widget>(c.address(holder));
         for (unsigned depth = 0; depth < 4; ++depth) {
             auto value = reference(c, w.data);
             if (!value.type) return {};
@@ -483,10 +496,11 @@ std::optional<Value> card_list(const Context &c, Value p) {
                         c.text(c.field(primary(c, t), navigation_field)) != expected[i])
                         return {};
                 }
-                return value;
+                return CardList{value, holder};
             }
             if (hash != anchor_schema.hash || size(value.type) != anchor_schema.size) return {};
-            w = read<Widget>(c.address(c.field(value, widget)));
+            holder = c.field(value, widget);
+            w = read<Widget>(c.address(holder));
         }
     } catch (...) {}
     return {};
@@ -514,7 +528,7 @@ void shrink(const Context &c, Value tile, Value cat, Value desc, const Original 
     if (read<std::array<float, 2>>(c.address(c.field(tile, 0x868043e1))) != size) c.set(c.field(tile, 0x868043e1), size);
     const std::array<float, 2> text{o.description_size[0] * card_width, o.description_size[1] * card_height};
     if (read<std::array<float, 2>>(c.address(c.field(desc, 0x1cff7243))) != text) c.set(c.field(desc, 0x1cff7243), text);
-    for (const auto [hash, value] : std::array{std::pair{0x495ffd43U, o.icon_width * card_width}, std::pair{0x24fb5ca8U, o.icon_height * card_width}})
+    for (const auto [hash, value] : std::array{std::pair{0x495ffd43U, o.icon_width * card_height}, std::pair{0x24fb5ca8U, o.icon_height * card_height}})
         if (read<float>(c.address(c.field(cat, hash))) != value) c.set(c.field(cat, hash), value);
 }
 void shrink_all(const Context &c) {
@@ -535,6 +549,10 @@ void release(const Context &c) {
     s.owned.release(
         [&] {
             if (s.page.handle && c.type_of(s.page.handle) == s.page.type && s.details) switch_page(c, false);
+            // The stock row back where the grid was.
+            if (s.grid.handle && s.holder.handle && c.type_of(s.holder.handle) == s.holder.type &&
+                read<Widget>(c.address(s.holder)).data.handle == s.grid.handle)
+                c.set(s.holder, s.original_holder);
             if (s.cards.handle && c.type_of(s.cards.handle) == s.cards.type) {
                 unsigned count{}, stride{};
                 auto bytes = c.array(c.field(s.cards, rows_field), 32, count, stride);
@@ -596,7 +614,59 @@ ModeCard mode_card(const Context &c, modes::Mode mode) {
     c.set(c.field(primary(c, card.tile), callback_field), callback(c, "card", card.key));
     return card;
 }
-// The three stock cards, then ours; the row clips to its bounds so it scrolls to the focused card.
+// The grid: every card (the three stock ones first) in rows of `cards_per_row`. Each row is a
+// private copy of the stock card row holding its cards; the grid is a vertical list of the rows'
+// presenters, clipped so it scrolls to the focused row. Shown where the stock row was.
+void build_grid(const Context &c) {
+    auto &s = state();
+    std::vector<Ref> tiles;
+    for (const auto &o : s.originals) tiles.push_back({0, o.tile.handle});
+    for (const auto &card : s.mode_cards) tiles.push_back({0, card.tile.handle});
+    const auto &sized = s.originals[1];
+    const float tile_w = sized.tile_size[0] * card_width, tile_h = sized.tile_size[1] * card_height;
+    const float row_w = static_cast<float>(cards_per_row) * tile_w + static_cast<float>(cards_per_row - 1) * card_gap;
+    std::vector<Handle> anchors;
+    for (std::size_t first = 0; first < tiles.size(); first += cards_per_row) {
+        auto row = make(c, linear_list);
+        c.copy(row, c.address(s.cards)); // the stock row's own layout, item widget and styles
+        c.array(c.field(row, handles_field), std::vector<Handle>{});
+        c.array(c.field(row, rows_field),
+                std::vector<Ref>(tiles.begin() + static_cast<std::ptrdiff_t>(first),
+                                 tiles.begin() + static_cast<std::ptrdiff_t>(std::min(tiles.size(), first + cards_per_row))));
+        c.set(c.field(row, clip_field), false);
+        auto anchor = make(c, anchor_schema);
+        c.set(c.field(anchor, widget), Widget{s.original_holder.blueprint, {0, row.handle}});
+        c.set(c.field(anchor, 0x1cff7243), std::array<float, 2>{row_w, tile_h});
+        c.set(c.field(anchor, 0x6efc1a61), false);
+        c.set(c.field(anchor, 0xbe5683d9), false);
+        c.set(c.field(anchor, 0x144aee01), true);
+        anchors.push_back(anchor.handle);
+    }
+    auto grid = make(c, linear_list);
+    c.copy(grid, c.address(s.cards));
+    c.array(c.field(grid, rows_field), std::vector<Ref>{});
+    c.set(c.field(grid, 0x55ca89f4), asset(c, "UI/Foundations/Components/Lists/Shared/AnchoredContentPresenterListItem_Widget"));
+    c.set(c.field(grid, 0x4cb61cac), 1);       // Orientation: vertical
+    c.set(c.field(grid, 0x64b9a9e8), 0);       // the rows' own measures
+    c.set(c.field(grid, 0x19ff199a), tile_h);  // row height
+    c.set(c.field(grid, 0xebca7354), card_gap);
+    c.set(c.field(grid, clip_field), true);    // EnableClipping: scrolls to the focused row
+    c.set(c.field(grid, 0xafe8434b), false);
+    c.set(c.field(grid, 0xc33d3081), true);    // RememberFocusedIndex
+    c.array(c.field(grid, handles_field), anchors);
+    c.set(c.field(grid, focus_field), 0);
+    s.grid = grid;
+    logging::log(logging::Level::info, logging::Channel::ui, "Game modes card: {} cards in a grid of {} rows.", tiles.size(), anchors.size());
+}
+// The grid where the stock row is shown, unless the mode panel is up.
+void mount_grid(const Context &c) {
+    auto &s = state();
+    if (s.details || !s.grid.handle || c.type_of(s.holder.handle) != s.holder.type) return;
+    if (read<Widget>(c.address(s.holder)).data.handle != s.grid.handle)
+        c.set(s.holder, Widget{s.original_holder.blueprint, {0, s.grid.handle}});
+}
+// Without a grid: the three stock cards, then ours, in the stock row, which clips to its bounds so
+// it scrolls to the focused card.
 void publish_cards(const Context &c) {
     auto &s = state();
     unsigned count{}, stride{};
@@ -615,7 +685,7 @@ void publish_cards(const Context &c) {
     if (!same) c.array(c.field(s.cards, rows_field), wanted);
     if (!read<bool>(c.address(c.field(s.cards, clip_field)))) c.set(c.field(s.cards, clip_field), true);
 }
-void initialize(const Context &c, Value p, Value list) {
+void initialize(const Context &c, Value p, Value list, Value holder) {
     auto &s = state();
     s.page = p;
     s.cards = list;
@@ -654,8 +724,18 @@ void initialize(const Context &c, Value p, Value list) {
     s.original_actions = make(c, page);
     c.copy(c.field(s.original_actions, page_actions), c.address(c.field(p, page_actions)));
     s.original_clip = read<bool>(c.address(c.field(list, clip_field)));
+    s.holder = holder;
+    s.original_holder = read<Widget>(c.address(holder));
     shrink_all(c);
-    publish_cards(c);
+    try {
+        build_grid(c);
+        mount_grid(c);
+    } catch (const std::exception &e) {
+        // A grid that cannot be built leaves the stock row, with our cards added to it.
+        logging::log(logging::Level::warning, logging::Channel::ui, "Game modes card: no grid ({}); cards in a row.", e.what());
+        s.grid = {};
+        publish_cards(c);
+    }
     s.generations.emplace(p.handle, list.handle);
     logging::log(logging::Level::info, logging::Channel::ui, "Game modes card: {} mode cards added to the Throwdowns menu.", s.mode_cards.size());
 }
@@ -896,12 +976,13 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
             if (s.page.handle && c.type_of(s.page.handle) != s.page.type) release(c);
             // Reopening Throwdowns makes a new page and list: follow them.
             for (const auto &p : c.roots({page.hash}))
-                if (const auto list = card_list(c, p.model)) {
-                    if (s.page.handle && (p.model.handle != s.page.handle || list->handle != s.cards.handle) &&
-                        !s.generations.contains({p.model.handle, list->handle}))
+                if (const auto found = card_list(c, p.model)) {
+                    const auto list = found->list;
+                    if (s.page.handle && (p.model.handle != s.page.handle || list.handle != s.cards.handle) &&
+                        !s.generations.contains({p.model.handle, list.handle}))
                         release(c);
-                    if (!s.page.handle && !s.generations.contains({p.model.handle, list->handle})) {
-                        initialize(c, p.model, *list);
+                    if (!s.page.handle && !s.generations.contains({p.model.handle, list.handle})) {
+                        initialize(c, p.model, list, found->holder);
                         break;
                     }
                 }
@@ -917,7 +998,8 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                 // Keep the cards' callbacks reserved while a panel shows.
                 for (const auto &card : s.mode_cards) callback(c, "card", card.key);
                 shrink_all(c); // the native list can restore authored sizes when it remounts
-                publish_cards(c);
+                if (s.grid.handle) mount_grid(c);
+                else publish_cards(c);
                 for (const auto &a : pending) {
                     if (a.generation != s.owner.load()) continue;
                     // A mode's card sets that mode up (unless a game is on) and shows its panel.
@@ -935,6 +1017,7 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                         run.push_back({a.generation, "mode", "place " + a.argument, a.pass});
                     }
                 }
+                if (s.grid.handle) mount_grid(c); // straight back after Back restored the page
                 if (s.details) render(c);
             }
         }
