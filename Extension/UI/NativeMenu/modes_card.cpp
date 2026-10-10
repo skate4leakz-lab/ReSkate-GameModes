@@ -764,8 +764,23 @@ void render(const Context &c) {
             if (!m.missing.empty()) note("missing", m.missing);
             const auto mode = modes::parse_mode(m.mode);
             const bool wide = mode && modes::tag_like(*mode);
+            const bool race = mode == modes::Mode::race, spots = mode == modes::Mode::domination;
+            // What is placed so far, then the free-camera placing (it closes Throwdowns first).
+            if (race)
+                note("route", m.points < 2 ? std::string("Route: not placed yet")
+                                           : std::format("Route: start, {} checkpoint{}, finish", m.points - 2, m.points == 3 ? "" : "s"));
+            else
+                note("area", m.area_radius > 0 ? std::format("Play area: circle {:.0f} m across", m.area_radius * 2)
+                             : m.corners >= 3  ? std::format("Play area: {} corners", m.corners)
+                                               : std::string("Play area: the whole map"));
+            if (spots) note("spots", std::format("Spots placed: {}", m.points));
             action("start", "START GAME", "start");
-            action("circle", wide ? "PLAY AREA: 150 M AROUND ME" : "PLAY AREA: 40 M AROUND ME", wide ? "circle 150" : "circle 40");
+            if (race) row(c, shown, "place-route", "PLACE ROUTE AND CHECKPOINTS", "place", "points");
+            if (spots) row(c, shown, "place-spots", "PLACE SPOTS", "place", "points");
+            if (!race) {
+                row(c, shown, "place-circle", "PLACE PLAY AREA", "place", "circle");
+                action("circle", wide ? "PLAY AREA: 150 M AROUND ME" : "PLAY AREA: 40 M AROUND ME", wide ? "circle 150" : "circle 40");
+            }
             action("stop", "CANCEL GAME", "stop");
             footer_action(c, s.footer_confirm, "START GAME", "mode", "start");
         } else if (m.leading) {
@@ -804,6 +819,20 @@ void render(const Context &c) {
         c.set(c.field(s.details_list, focus_field), preserved >= 0 ? preserved : first);
         s.displayed = std::move(shown);
     }
+}
+// A native screen change, as the game's own buttons queue it: the StateNavigationModel's current
+// command (a name hash) with no arguments (metadata [-1]). Nothing is sent over a change the game
+// has queued and not run yet; the Back stack is left alone.
+bool navigate(const Context &c, std::string_view name) {
+    const auto roots = c.roots({0xcc4776b5});
+    if (roots.size() != 1) return false;
+    const auto current = c.field(roots.front().model, 0xf3ba9cf8);
+    const auto metadata = c.field(roots.front().model, 0xf437b255);
+    if (read<std::uint32_t>(c.address(current))) return false;
+    c.set(current, game::native_name_hash(name));
+    c.array(metadata, std::vector<std::int32_t>{-1});
+    logging::log(logging::Level::info, logging::Channel::ui, "Game modes card: navigation {}.", name);
+    return true;
 }
 void forget(Address manager) {
     auto &s = state();
@@ -898,6 +927,13 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                     }
                     else if (a.command == "back") switch_page(c, false);
                     else if (a.command == "mode") run.push_back(a);
+                    // Placing flies the free camera over the world: close Throwdowns the way its own
+                    // Back does (ThrowdownerExit), then start placing.
+                    else if (a.command == "place") {
+                        switch_page(c, false);
+                        if (!navigate(c, "ThrowdownerExit")) s.status = "Close the menu to place.";
+                        run.push_back({a.generation, "mode", "place " + a.argument, a.pass});
+                    }
                 }
                 if (s.details) render(c);
             }
