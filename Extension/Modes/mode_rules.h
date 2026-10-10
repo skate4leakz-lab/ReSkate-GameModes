@@ -39,6 +39,12 @@ std::string_view mode_tagline(Mode) noexcept; // a shorter line, for its card in
 // The order modes are offered in (Throwdowns cards): the newest and most played first.
 inline constexpr Mode card_order[]{Mode::tag,  Mode::infection, Mode::hide,       Mode::skate,    Mode::race,
                                    Mode::meat, Mode::jam,       Mode::one_up,     Mode::domination, Mode::graffiti};
+// A mode's place in card_order (past the end when it is not offered).
+constexpr std::size_t card_rank(Mode mode) noexcept {
+    for (std::size_t i = 0; i < std::size(card_order); ++i)
+        if (card_order[i] == mode) return i;
+    return std::size(card_order);
+}
 std::optional<Mode> parse_mode(std::string_view) noexcept;
 bool timed(Mode) noexcept; // ends when the clock runs out (1-Up ends on strikes instead)
 

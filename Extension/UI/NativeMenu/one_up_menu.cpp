@@ -1,4 +1,5 @@
 #include "one_up_menu.h"
+#include "modes_card.h"
 #include "native_menu_data.h"
 #include "native_menu_lifetime.h"
 #include "native_menu_ownership.h"
@@ -1776,6 +1777,7 @@ void render(const Context& c) {
 }
 } // namespace
 bool native_one_up_setup_open() noexcept { return state().setup_open.load(std::memory_order_acquire); }
+std::uint64_t native_one_up_card() noexcept { return state().card.handle; }
 bool native_one_up_hud_ready() noexcept { return state().hud_ready.load(std::memory_order_acquire); }
 bool release_native_one_up_menu(std::uintptr_t base) noexcept {
     auto& s=state(); if(s.owned.empty()) { s.owner.store(0); s.setup_open.store(false); return true; }
@@ -1830,8 +1832,11 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
             for(const auto [hash,value]:std::array{std::pair{0x495ffd43U,original.icon_width*.74f},std::pair{0x24fb5ca8U,original.icon_height*.74f}})
                 if(read<float>(c.address(c.field(cat,hash)))!=value) c.set(c.field(cat,hash),value);
         };
-        for(const auto& original:s.originals) resize(original.tile,original.category,original.description,original);
-        resize(s.card,s.category,s.description,s.originals[1]);
+        // The game modes cards (modes_card.cpp) size every card on the page, this one too.
+        if(!native_modes_card_active()) {
+            for(const auto& original:s.originals) resize(original.tile,original.category,original.description,original);
+            resize(s.card,s.category,s.description,s.originals[1]);
+        }
         std::vector<Action> pending; {std::lock_guard pending_lock(s.mutex); pending=std::exchange(s.pending,{});}
         // Keep the card's callback reserved even while its setup is displayed.
         callback(c,"open");

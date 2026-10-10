@@ -10,4 +10,6 @@ namespace dingosdk::multiplayer {
 void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept;
 // Before a level unloads: our models out of the native menu. False when that failed.
 bool release_native_modes_card(std::uintptr_t base) noexcept;
+// True while our cards are on a Throwdowns page (they size every card there, 1-Up's too).
+bool native_modes_card_active() noexcept;
 } // namespace dingosdk::multiplayer

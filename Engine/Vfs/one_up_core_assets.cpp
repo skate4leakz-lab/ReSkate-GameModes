@@ -60,7 +60,9 @@ std::optional<Mod> one_up_core_assets(const std::filesystem::path& data_root) {
         const auto length=take<std::uint32_t>(bytes);const auto size=take<std::uint64_t>(bytes);
         if(!length || length>512 || length>bytes.size())throw std::runtime_error("Invalid core asset path");
         const std::string name(reinterpret_cast<const char*>(bytes.data()),length);bytes=bytes.subspan(length);
-        const auto relative=std::filesystem::path(name);
+        // The bundle stores a whole Patch layer ("Patch/Win32/...", "Patch/layout.toc"); a mod
+        // folder holds the same files at its top, where the catalogue and merger look.
+        const auto relative=std::filesystem::path(name.starts_with("Patch/")?name.substr(6):name);
         if(relative.is_absolute() || relative.has_root_name() || name.find(':')!=std::string::npos || name.find('\\')!=std::string::npos)
             throw std::runtime_error("Invalid core asset destination");
         for(const auto& part:relative)if(part==L".." || part==L".")throw std::runtime_error("Invalid core asset traversal");
