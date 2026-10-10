@@ -19,10 +19,11 @@
 #include <utility>
 
 // The Throwdowns page holds a LinearList of three card tiles (S.K.A.T.E., Spot Battle, Skate Jam).
-// A private copy of the Spot Battle tile is added as a fourth card, all four narrowed to share the
-// row. The card's button calls back here (the native navigation id is cleared, so it opens no stock
-// setup); the page body then swaps to a private copy of the authored Throwdown creation panel whose
-// list holds our rows. Leaving restores the page's own body, Back button, title and page actions.
+// Each game mode gets a card after them, a private copy of the Spot Battle tile, at full size; the row
+// clips to its bounds so it scrolls left and right to the focused card. A card's button calls back
+// here (the native navigation id is cleared, so it opens no stock setup): the mode is set up and the
+// page body swaps to a private copy of the authored Throwdown creation panel whose list holds our
+// rows. Leaving restores the page's own body, Back button, title and page actions.
 // Model layouts and record names follow the game's authored UI resources (native menu tooling).
 namespace dingosdk::multiplayer {
 namespace {
@@ -35,21 +36,31 @@ constexpr Schema tile_schema{0xdeb20e0f, 1200}, category_schema{0x628aa99c, 320}
 constexpr std::uint32_t content = 0x716496c8, items = 0x61742cb4, widget = 0x214d4984, rows_field = 0x67223da7,
     text_field = 0x4d8e01b9, handles_field = 0xf2c90867, focus_field = 0x55511280, label_field = 0x58c9d354,
     callback_field = 0x9c76b86c, navigation_field = 0xb1e14cd6, page_actions = 0xd2118ca8, title_path = 0x3781b603;
-constexpr float card_scale = .74f;
+constexpr std::uint32_t clip_field = 0x4554761c; // LinearList: clip to its bounds (and scroll to focus)
 
+// One card per mode, after the three stock ones. `icon` is the stock card whose art it borrows
+// (0 S.K.A.T.E., 1 Spot Battle, 2 Skate Jam's plain Throwdown mark).
 struct ModeEntry {
-    const char *key, *name;
+    const char *key, *name, *blurb;
+    unsigned icon;
 };
-constexpr std::array<ModeEntry, 10> mode_entries{{{"tag", "SKATE TAG"},
-                                                  {"infection", "INFECTION"},
-                                                  {"hide", "HIDE & SEEK"},
-                                                  {"skate", "S.K.A.T.E."},
-                                                  {"race", "DEATHRACE"},
-                                                  {"meat", "HALL OF MEAT"},
-                                                  {"jam", "SPOT JAM"},
-                                                  {"1up", "1-UP"},
-                                                  {"domination", "DOMINATION"},
-                                                  {"graffiti", "GRAFFITI"}}};
+constexpr std::array<ModeEntry, 10> mode_entries{{
+    {"tag", "SKATE TAG", "One skater is it. Get close to tag someone else. Least time spent it wins.", 2},
+    {"infection", "INFECTION", "The infected turn into the Grim Reaper and hunt the rest. Survive the longest.", 2},
+    {"hide", "HIDE & SEEK", "Hide while the seeker's screen is black, then stay hidden. Found skaters seek too.", 2},
+    {"skate", "S.K.A.T.E.", "Set a trick, everyone copies it or takes a letter. You pick the tricks that count.", 0},
+    {"race", "DEATHRACE", "Race through every gate in order. First over the finish wins.", 2},
+    {"meat", "HALL OF MEAT", "Bail as hard as you can. Every slam scores its meat.", 1},
+    {"jam", "SPOT JAM", "Land lines inside the area. Every line adds to your score.", 1},
+    {"1up", "1-UP", "Take turns beating the last score or take a strike.", 1},
+    {"domination", "DOMINATION", "Take spots with your best line and hold them to score.", 1},
+    {"graffiti", "GRAFFITI", "Grind it, gap it: what you skate takes your colour. Most tags wins.", 1},
+}};
+// Our card for a mode: a private tile, its category and description, and its description label.
+struct ModeCard {
+    const ModeEntry *mode{};
+    Value tile, category, description, label;
+};
 using Action = MenuAction;
 struct Descriptor {
     alignas(8) std::array<std::byte, 0x70> bytes{};
@@ -63,12 +74,12 @@ struct Row {
 };
 struct Original {
     Value tile, category, description;
-    std::array<float, 2> tile_size{}, description_size{};
-    float icon_width{}, icon_height{};
 };
 struct State {
     Address manager{}, base{}, anchor_asset{}, primary_input{};
-    Value page, cards, card, category, description, source_label;
+    Value page, cards, source_label;
+    std::vector<ModeCard> mode_cards;
+    bool original_clip{};
     Value original_body, original_back, original_actions;
     Value panel_anchor, panel, header, badge, panel_style, panel_notice, footer_anchor, footer_list, footer_back,
         footer_confirm, confirm_action, details_list;
@@ -98,7 +109,8 @@ void reset(bool generations_too) {
     auto &s = state();
     s.owner.store(0);
     s.anchor_asset = s.primary_input = 0;
-    s.page = s.cards = s.card = s.category = s.description = s.source_label = {};
+    s.page = s.cards = s.source_label = {};
+    s.mode_cards.clear();
     s.original_body = s.original_back = s.original_actions = {};
     s.panel_anchor = s.panel = s.header = s.badge = s.panel_style = s.panel_notice = s.footer_anchor = s.footer_list = {};
     s.footer_back = s.footer_confirm = s.confirm_action = s.details_list = {};
@@ -185,8 +197,8 @@ Address asset(const Context &c, const char *name) {
     const auto add_anchor = [&](Address anchor) {
         if (anchor && domains.insert(read<std::uint16_t>(anchor + 0x16)).second) anchors.push_back(anchor);
     };
-    if (s.category.handle && c.type_of(s.category.handle) == s.category.type)
-        if (const auto icon = read<Address>(c.address(c.field(s.category, 0x189084da)))) {
+    if (!s.mode_cards.empty() && c.type_of(s.mode_cards.front().category.handle) == s.mode_cards.front().category.type)
+        if (const auto icon = read<Address>(c.address(c.field(s.mode_cards.front().category, 0x189084da)))) {
             const auto type = read<Address>(icon + 8);
             if (type == c.base + build::native_menu::texture_asset_type || type == c.base + build::native_menu::image_asset_type)
                 add_anchor(icon);
@@ -485,6 +497,9 @@ void switch_page(const Context &c, bool details) {
     }
     s.details = details;
 }
+bool ours(const State &s, Handle handle) {
+    return std::any_of(s.mode_cards.begin(), s.mode_cards.end(), [&](const ModeCard &card) { return card.tile.handle == handle; });
+}
 void release(const Context &c) {
     auto &s = state();
     s.owner.store(0);
@@ -497,38 +512,73 @@ void release(const Context &c) {
             if (s.page.handle && c.type_of(s.page.handle) == s.page.type && s.details) switch_page(c, false);
             if (s.cards.handle && c.type_of(s.cards.handle) == s.cards.type) {
                 unsigned count{}, stride{};
-                auto bytes = c.array(c.field(s.cards, rows_field), 8, count, stride);
+                auto bytes = c.array(c.field(s.cards, rows_field), 32, count, stride);
                 require(stride == sizeof(Ref), "Game modes card: card list changed during cleanup.");
                 std::vector<Ref> retained;
                 for (unsigned i = 0; i < count; ++i) {
                     Ref ref{};
                     std::memcpy(&ref, bytes.data() + i * stride, stride);
-                    if (ref.handle != s.card.handle) retained.push_back(ref);
+                    if (!ours(s, ref.handle)) retained.push_back(ref);
                 }
                 c.array(c.field(s.cards, rows_field), retained);
-            }
-            for (const auto &o : s.originals) {
-                if (c.type_of(o.tile.handle) == o.tile.type) c.set(c.field(o.tile, 0x868043e1), o.tile_size);
-                if (c.type_of(o.category.handle) == o.category.type) {
-                    c.set(c.field(o.category, 0x495ffd43), o.icon_width);
-                    c.set(c.field(o.category, 0x24fb5ca8), o.icon_height);
-                }
-                if (c.type_of(o.description.handle) == o.description.type) c.set(c.field(o.description, 0x1cff7243), o.description_size);
+                c.set(c.field(s.cards, clip_field), s.original_clip);
             }
         },
         [&](Value value) { c.destroy(value); });
     reset(false);
 }
-// Narrows a card to share the row with a fourth.
-void narrow(const Context &c, Value t, Value cat, Value desc, const Original &o) {
-    auto dimensions = o.tile_size;
-    dimensions[0] *= card_scale;
-    if (read<std::array<float, 2>>(c.address(c.field(t, 0x868043e1))) != dimensions) c.set(c.field(t, 0x868043e1), dimensions);
-    auto ds = o.description_size;
-    ds[0] *= card_scale;
-    if (read<std::array<float, 2>>(c.address(c.field(desc, 0x1cff7243))) != ds) c.set(c.field(desc, 0x1cff7243), ds);
-    for (const auto [hash, value] : std::array{std::pair{0x495ffd43U, o.icon_width * card_scale}, std::pair{0x24fb5ca8U, o.icon_height * card_scale}})
-        if (read<float>(c.address(c.field(cat, hash))) != value) c.set(c.field(cat, hash), value);
+// A card for `mode`: a private copy of Spot Battle's tile with the mode's name, description and a
+// stock card's art. Its button calls back with the mode (the native navigation id is cleared).
+ModeCard mode_card(const Context &c, const ModeEntry &mode) {
+    auto &s = state();
+    const auto &donor = s.originals[1];
+    ModeCard card{&mode};
+    const auto card_widget = read<Widget>(c.address(c.path(donor.tile, {widget, widget})));
+    card.tile = make(c, tile_schema);
+    c.copy(card.tile, c.address(donor.tile));
+    card.category = make(c, category_schema);
+    c.copy(card.category, c.address(donor.category));
+    for (const auto hash : {0x189084daU, 0xc2917efcU})
+        c.copy(c.field(card.category, hash), c.address(c.field(s.originals[mode.icon].category, hash)));
+    card.description = make(c, anchor_schema);
+    c.copy(card.description, c.address(donor.description));
+    card.label = make(c, label_schema);
+    c.copy(card.label, c.address(s.source_label));
+    c.text(c.field(card.label, text_field), mode.blurb);
+    c.set(c.field(card.label, 0x042924a4), true);
+    auto desc_widget = read<Widget>(c.address(c.field(card.description, widget)));
+    desc_widget.data = {0, card.label.handle};
+    c.set(c.field(card.description, widget), desc_widget);
+    auto cat_widget = read<Widget>(c.address(c.field(card.category, widget)));
+    cat_widget.data = {0, card.description.handle};
+    c.set(c.field(card.category, widget), cat_widget);
+    c.text(c.path(card.category, {0x77b8ed0b, text_field}), mode.name);
+    c.set(c.path(card.category, {0x77b8ed0b, 0x042924a4}), true);
+    auto cw = card_widget;
+    cw.data = {0, card.category.handle};
+    c.set(c.path(card.tile, {widget, widget}), cw);
+    c.text(c.field(primary(c, card.tile), navigation_field), "");
+    c.set(c.field(primary(c, card.tile), callback_field), callback(c, "card", mode.key));
+    return card;
+}
+// The three stock cards, then ours; the row clips to its bounds so it scrolls to the focused card.
+void publish_cards(const Context &c) {
+    auto &s = state();
+    unsigned count{}, stride{};
+    const auto bytes = c.array(c.field(s.cards, rows_field), 32, count, stride);
+    require(stride == sizeof(Ref), "Game modes card: card list changed.");
+    std::vector<Ref> refs(count);
+    if (count) std::memcpy(refs.data(), bytes.data(), bytes.size());
+    std::vector<Ref> wanted;
+    for (const auto &ref : refs)
+        if (!ours(s, ref.handle)) wanted.push_back(ref);
+    require(wanted.size() == 3, "Game modes card: card list was replaced.");
+    for (const auto &card : s.mode_cards) wanted.push_back({0, card.tile.handle});
+    const bool same = refs.size() == wanted.size() && std::equal(refs.begin(), refs.end(), wanted.begin(), [](const Ref &a, const Ref &b) {
+        return a.handle == b.handle && a.record == b.record;
+    });
+    if (!same) c.array(c.field(s.cards, rows_field), wanted);
+    if (!read<bool>(c.address(c.field(s.cards, clip_field)))) c.set(c.field(s.cards, clip_field), true);
 }
 void initialize(const Context &c, Value p, Value list) {
     auto &s = state();
@@ -542,43 +592,13 @@ void initialize(const Context &c, Value p, Value list) {
     std::memcpy(refs.data(), bytes.data(), bytes.size());
     for (const auto &ref : refs) {
         auto tile = reference(c, ref), cat = category(c, tile), desc = description(c, cat);
-        s.originals.push_back({tile, cat, desc, read<std::array<float, 2>>(c.address(c.field(tile, 0x868043e1))),
-                               read<std::array<float, 2>>(c.address(c.field(desc, 0x1cff7243))), read<float>(c.address(c.field(cat, 0x495ffd43))),
-                               read<float>(c.address(c.field(cat, 0x24fb5ca8)))});
+        s.originals.push_back({tile, cat, desc});
     }
-    // Spot Battle's card is the donor; Skate Jam's icon (the plain Throwdown mark) is the badge.
-    const auto donor = s.originals[1];
-    const auto card_widget = read<Widget>(c.address(c.path(donor.tile, {widget, widget})));
-    s.anchor_asset = card_widget.blueprint;
+    const auto &donor = s.originals[1];
+    s.anchor_asset = read<Widget>(c.address(c.path(donor.tile, {widget, widget}))).blueprint;
     s.source_label = reference(c, read<Widget>(c.address(c.field(donor.description, widget))).data);
     require(s.source_label.type && size(s.source_label.type) == label_schema.size, "Game modes card: description label unavailable.");
-    s.card = make(c, tile_schema);
-    c.copy(s.card, c.address(donor.tile));
-    s.category = make(c, category_schema);
-    c.copy(s.category, c.address(donor.category));
-    for (const auto hash : {0x189084daU, 0xc2917efcU}) c.copy(c.field(s.category, hash), c.address(c.field(s.originals[2].category, hash)));
-    s.description = make(c, anchor_schema);
-    c.copy(s.description, c.address(donor.description));
-    auto label = make(c, label_schema);
-    c.copy(label, c.address(s.source_label));
-    c.text(c.field(label, text_field), "Skate Tag, Infection, Hide & Seek, Deathrace and more ReSkate game modes.");
-    c.set(c.field(label, 0x042924a4), true);
-    auto desc_widget = read<Widget>(c.address(c.field(s.description, widget)));
-    desc_widget.data = {0, label.handle};
-    c.set(c.field(s.description, widget), desc_widget);
-    auto cat_widget = read<Widget>(c.address(c.field(s.category, widget)));
-    cat_widget.data = {0, s.description.handle};
-    c.set(c.field(s.category, widget), cat_widget);
-    c.text(c.path(s.category, {0x77b8ed0b, text_field}), "GAME MODES");
-    c.set(c.path(s.category, {0x77b8ed0b, 0x042924a4}), true);
-    auto cw = card_widget;
-    cw.data = {0, s.category.handle};
-    c.set(c.path(s.card, {widget, widget}), cw);
-    // No native navigation: the button calls back here instead.
-    c.text(c.field(primary(c, s.card), navigation_field), "");
-    c.set(c.field(primary(c, s.card), callback_field), callback(c, "open"));
-    for (const auto &o : s.originals) narrow(c, o.tile, o.category, o.description, o);
-    narrow(c, s.card, s.category, s.description, donor);
+    for (const auto &mode : mode_entries) s.mode_cards.push_back(mode_card(c, mode));
     s.original_body = make(c, presenter);
     c.copy(s.original_body, c.address(body(c, p)));
     s.original_back = make(c, action_schema);
@@ -586,10 +606,10 @@ void initialize(const Context &c, Value p, Value list) {
     s.original_title = c.text(c.path(p, {title_path, text_field}));
     s.original_actions = make(c, page);
     c.copy(c.field(s.original_actions, page_actions), c.address(c.field(p, page_actions)));
-    refs.push_back({0, s.card.handle});
-    c.array(c.field(list, rows_field), refs);
+    s.original_clip = read<bool>(c.address(c.field(list, clip_field)));
+    publish_cards(c);
     s.generations.emplace(p.handle, list.handle);
-    logging::write(logging::Level::info, logging::Channel::ui, "Game modes card: added to the Throwdowns menu.");
+    logging::log(logging::Level::info, logging::Channel::ui, "Game modes card: {} mode cards added to the Throwdowns menu.", s.mode_cards.size());
 }
 
 // One row of the mode panel: a button (with a command) or a plain label.
@@ -689,7 +709,7 @@ void render(const Context &c) {
             if (!offer.own && offer.open)
                 action("offer-" + std::to_string(offer.id), std::format("JOIN {}'S {}", offer.host, offer.mode), "join " + std::to_string(offer.id));
         for (const auto &mode : mode_entries) action(std::string("new-") + mode.key, mode.name, std::string("new ") + mode.key);
-        footer_action(c, s.footer_confirm, "SKATE TAG", "mode", "new tag");
+        footer_action(c, s.footer_confirm, "CLOSE", "back");
     } else {
         const char *phase = m.phase == 1 ? "setting up" : m.phase == 2 ? "starting" : m.phase == 3 ? "in progress" : "finished";
         note("game", std::format("{} - {} - {} player{}", mode_title(m.mode), phase, m.players, m.players == 1 ? "" : "s"));
@@ -817,22 +837,16 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                 for (const auto &a : pending)
                     if (a.command == "mode") run.push_back(a);
             } else {
-                for (const auto &o : s.originals) narrow(c, o.tile, o.category, o.description, o);
-                narrow(c, s.card, s.category, s.description, s.originals[1]);
-                callback(c, "open"); // keep the card's callback reserved while its panel shows
-                unsigned card_count{}, card_stride{};
-                const auto cards = c.array(c.field(s.cards, rows_field), 8, card_count, card_stride);
-                require(card_stride == sizeof(Ref), "Game modes card: card list changed.");
-                std::vector<Ref> refs(card_count);
-                if (!cards.empty()) std::memcpy(refs.data(), cards.data(), cards.size());
-                if (std::none_of(refs.begin(), refs.end(), [&](const Ref &ref) { return ref.handle == s.card.handle; })) {
-                    require(refs.size() == 3, "Game modes card: card list was replaced.");
-                    refs.push_back({0, s.card.handle});
-                    c.array(c.field(s.cards, rows_field), refs);
-                }
+                // Keep the cards' callbacks reserved while a panel shows.
+                for (const auto &mode : mode_entries) callback(c, "card", mode.key);
+                publish_cards(c);
                 for (const auto &a : pending) {
                     if (a.generation != s.owner.load()) continue;
-                    if (a.command == "open") switch_page(c, true);
+                    // A mode's card sets that mode up (unless a game is on) and shows its panel.
+                    if (a.command == "card") {
+                        if (!modes::menu_view().in_game) run.push_back({a.generation, "mode", "new " + a.argument, a.pass});
+                        switch_page(c, true);
+                    }
                     else if (a.command == "back") switch_page(c, false);
                     else if (a.command == "mode") run.push_back(a);
                 }

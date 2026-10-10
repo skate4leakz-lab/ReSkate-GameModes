@@ -1,8 +1,9 @@
 #pragma once
 #include <cstdint>
 
-// ReSkate game modes in skate.'s own Throwdowns menu: a fourth card, GAME MODES, beside S.K.A.T.E.,
-// Spot Battle and Skate Jam. It opens a native page listing every mode (set up, join, start, leave).
+// ReSkate game modes in skate.'s own Throwdowns menu: a card per mode after S.K.A.T.E., Spot Battle
+// and Skate Jam, the row scrolling left and right. A card sets its mode up and opens a native page
+// to start, join, end or leave it.
 // Its models are private copies of the native ones; the three stock cards keep their own. Client
 // thread, from the native menu tick.
 namespace dingosdk::multiplayer {
