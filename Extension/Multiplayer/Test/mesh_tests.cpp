@@ -21,7 +21,6 @@ bool simulated_object_guest{};
 void set_lobby_object_guest(bool guest) { simulated_object_guest = guest; }
 WorldLayersModel simulated_host_layers;
 WorldLayersModel local_profile_world_layers() { return simulated_host_layers; }
-ControllerBindingsModel local_profile_controller_bindings() { return {}; } // chat's button hints: none here
 void apply_host_world_layers(bool, const WorldLayerChoices &) {}
 void apply_host_park_choices(const ParkChoices& choices) {
     if (simulated_park_receives) simulated_park_receives->emplace_back(simulated_park_receiver, choices);
@@ -44,6 +43,7 @@ bool clear_lobby_guest_objects() { ++simulated_guest_wipes; return true; }
 }
 namespace dingosdk {
 bool teleport_local_skater(const std::array<float, 3>&, std::optional<float>) { return true; }
+ControllerBindingsModel local_profile_controller_bindings() { return {}; }
 void update_board_lock(std::uintptr_t, std::uintptr_t, bool) noexcept {}
 void update_developer_hoodie(std::uintptr_t, std::uintptr_t, std::uint64_t, std::uint64_t, DeveloperHoodieState &,
                              const multiplayer::MarkStyles &) noexcept {}
