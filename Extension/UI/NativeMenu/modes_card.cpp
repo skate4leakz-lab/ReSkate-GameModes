@@ -83,9 +83,9 @@ struct Original {
     std::array<float, 2> tile_size{}, description_size{};
     float icon_width{}, icon_height{};
 };
-// Every card in the row is shown at this share of its authored width and height, so about twice
-// as many are on screen at once.
-constexpr float card_width = .6f, card_height = .9f;
+// Every card in the row is shown at this share of its authored width and height, so more are on
+// screen at once; at .7 the longest titles ("DOMINATION", "HALL OF MEAT") still fit.
+constexpr float card_width = .7f, card_height = .9f;
 struct State {
     Address manager{}, base{}, anchor_asset{}, primary_input{};
     Value page, cards, source_label;
