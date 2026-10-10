@@ -1,5 +1,6 @@
 #include "overlay_internal.h"
 #include "Extension/UI/skate_theme.h"
+#include "Extension/HallOfMeat/hall_of_meat_overlay.h"
 #include <cmath>
 #include <format>
 #include <optional>
@@ -15,8 +16,21 @@
 namespace dingosdk::overlay {
 namespace {
 std::atomic<ModesHudFeed> modes_hud_feed{};
+// What skate.'s own widgets show (bits: 1 score, 2 countdown, 4 results), and when that was said:
+// stale after a second (the native menu stopped ticking), so nothing is ever left undrawn.
+std::atomic<unsigned> native_parts{};
+std::atomic<std::uint64_t> native_said{};
 }
 void set_modes_hud_feed(ModesHudFeed feed) noexcept { modes_hud_feed.store(feed); }
+void set_native_modes_hud(NativeModesHud parts) noexcept {
+    native_parts.store((parts.score ? 1u : 0u) | (parts.countdown ? 2u : 0u) | (parts.results ? 4u : 0u));
+    native_said.store(GetTickCount64());
+}
+NativeModesHud native_modes_hud() noexcept {
+    if (GetTickCount64() - native_said.load() > 1000) return {};
+    const auto bits = native_parts.load();
+    return {(bits & 1u) != 0, (bits & 2u) != 0, (bits & 4u) != 0};
+}
 } // namespace dingosdk::overlay
 
 using namespace dingosdk::overlay::detail;
@@ -426,9 +440,21 @@ void dpad_glyph(ImDrawList *draw, ImVec2 c, float size, char lit) {
 
 // The scoreboard on the right: the mode and clock over a thin accent line, what to do, then the
 // standings, each on a band fading in from the screen's edge.
-void draw_panel(ImDrawList *draw, HudState &st, float scale) {
+void draw_panel(ImDrawList *draw, HudState &st, float scale, bool native_score = false) {
     auto &s = state();
     const auto &h = st.hud;
+    if (native_score) {
+        // The game's own score block shows the mode, the clock and the players: only what to do now.
+        if (h.status.empty()) return;
+        auto *body = s.menu.body ? s.menu.body : ImGui::GetFont();
+        const auto display = ImGui::GetIO().DisplaySize;
+        const float right = display.x - 36.0f * scale, width = 360.0f * scale, left = right - width, y = 112.0f * scale;
+        const auto extent = body->CalcTextSizeA(15.0f * scale, FLT_MAX, width, h.status.c_str());
+        band(draw, ImVec2(left - 40.0f * scale, y - 4.0f * scale), ImVec2(display.x, y + extent.y + 6.0f * scale), 0.4f, -1);
+        draw->AddText(body, 15.0f * scale, ImVec2(left + 1, y + 1), IM_COL32(0, 0, 0, 160), h.status.c_str(), nullptr, width);
+        draw->AddText(body, 15.0f * scale, ImVec2(left, y), IM_COL32(230, 232, 236, 255), h.status.c_str(), nullptr, width);
+        return;
+    }
     auto *heading = s.menu.heading ? s.menu.heading : ImGui::GetFont();
     auto *bold = s.menu.bold ? s.menu.bold : ImGui::GetFont();
     auto *body = s.menu.body ? s.menu.body : ImGui::GetFont();
@@ -479,7 +505,7 @@ void draw_panel(ImDrawList *draw, HudState &st, float scale) {
 
 // The middle of the screen: the countdown, the latest callout as a toast, the line being skated,
 // the placing controls as button prompts and the out-of-area warning.
-void draw_centre(ImDrawList *draw, HudState &st, float scale) {
+void draw_centre(ImDrawList *draw, HudState &st, float scale, bool native_countdown = false) {
     auto &s = state();
     const auto &h = st.hud;
     auto *title = s.menu.title ? s.menu.title : ImGui::GetFont();
@@ -489,7 +515,7 @@ void draw_centre(ImDrawList *draw, HudState &st, float scale) {
     const float mid = display.x * 0.5f;
     // Countdown: each number pops in.
     // Neon: a clean ring that drains with each second, a white number with a neon glow, popping in.
-    if (h.clock.size() == 1) {
+    if (h.clock.size() == 1 && !native_countdown) {
         const float t = static_cast<float>(std::fmod(ImGui::GetTime(), 1.0));
         const float pop = std::max(0.0f, 1.0f - t * 5.0f), grow = 1.0f + 0.18f * pop * pop;
         const ImVec2 c(mid, display.y * 0.32f);
@@ -513,7 +539,7 @@ void draw_centre(ImDrawList *draw, HudState &st, float scale) {
     if (!h.banner.empty() && age < 3.6f) {
         const float in = std::min(1.0f, age / 0.18f), out = age < 3.0f ? 1.0f : (3.6f - age) / 0.6f, alpha = in * out;
         const bool go = h.banner == "GO!";
-        if (go) { // GO! in neon where the countdown was, growing out as it fades
+        if (go && !native_countdown) { // GO! in neon where the countdown was, growing out as it fades (unless the game shows its own)
             const float size = 110.0f * scale * (1.0f + 0.25f * (1.0f - out));
             neon_text(draw, title, size, ImVec2(mid - text_width(title, size, h.banner) * 0.5f, display.y * 0.32f - size * 0.56f),
                       with_alpha(neon_go, alpha), h.banner);
@@ -564,6 +590,87 @@ void draw_centre(ImDrawList *draw, HudState &st, float scale) {
                                       IM_COL32(180, 20, 20, static_cast<int>(170 * pulse)));
         soft_text(draw, heading, size, ImVec2(mid - w * 0.5f, bottom), IM_COL32(255, 255, 255, 255), h.warning);
     }
+}
+
+// How strongly the world markers draw: dimmed while skate.'s own intro and 3-2-1 are up (our
+// overlay draws over the game's HUD; the countdown must read clearly through the gates).
+float world_dim = 1.0f;
+// A picture standing in the world: its quad's centre, half its width along `side` (a unit vector)
+// and half its height along `upward`. False when a corner is behind the camera or the picture is
+// not loaded yet.
+bool world_picture(const Camera &cam, GamePicture picture, const Vec3 &centre, const Vec3 &side, const Vec3 &upward, float half_w,
+                   float half_h, ImU32 tint) {
+    const auto at = [&](float s, float u) {
+        return Vec3{centre[0] + side[0] * s * half_w + upward[0] * u * half_h, centre[1] + side[1] * s * half_w + upward[1] * u * half_h,
+                    centre[2] + side[2] * s * half_w + upward[2] * u * half_h};
+    };
+    const auto a = cam.project(at(-1, 1)), b = cam.project(at(1, 1)), c = cam.project(at(1, -1)), d = cam.project(at(-1, -1));
+    if (!a || !b || !c || !d) return false;
+    const ImVec2 corners[4]{*a, *b, *c, *d};
+    return draw_game_picture_quad(picture, corners, tint);
+}
+// A Deathrace gate the way skate.'s race Throwdown puts its checkpoints up: the game's own glowing
+// hoop (its checkpoint effect's texture) standing across the route and facing along it, a soft halo
+// behind it, and in the next gate the game's lightning bolt turning to the camera. False when the
+// pictures are not loaded (the gate is drawn the older way).
+bool checkpoint_hoop(const Camera &cam, const Vec3 &foot, std::array<float, 2> facing, float radius, ImU32 colour, float alpha, bool next,
+                     float time) {
+    // A thin neon hoop standing across the route, like skate.'s race checkpoints: a crisp bright
+    // core, a soft glow round it, clear in the middle so the way on shows through. The next gate
+    // breathes and a brighter streak runs round it; the game's lightning bolt floats inside.
+    auto *draw = ImGui::GetBackgroundDrawList();
+    const float breathe = next ? 1.0f + 0.02f * std::sin(time * 3.2f) : 1.0f;
+    const float r = radius * breathe;
+    const Vec3 centre{foot[0], foot[1] + radius * 0.95f, foot[2]};
+    const float distance = std::max(1.0f, cam.distance(centre));
+    // Up close (at the start line, or riding through) it fades to a trace.
+    alpha *= std::clamp((distance - radius * 1.5f) / (radius * 3.0f), 0.05f, 1.0f) * world_dim;
+    if (alpha <= 0.01f) return true;
+    const Vec3 across{-facing[1], 0.0f, facing[0]};
+    constexpr int segments = 72;
+    std::array<Vec3, segments> ring{};
+    for (int i = 0; i < segments; ++i) {
+        const float a = 6.2831853f * static_cast<float>(i) / segments, s = std::cos(a) * r, u = std::sin(a) * r;
+        ring[i] = {centre[0] + across[0] * s, centre[1] + u, centre[2] + across[2] * s};
+    }
+    std::array<ImVec2, segments> screen{};
+    bool whole = true;
+    for (int i = 0; i < segments && whole; ++i) {
+        const auto p = cam.project(ring[i]);
+        whole = p.has_value();
+        if (p) screen[i] = *p;
+    }
+    const float px = cam.focal / distance; // pixels per metre at the hoop
+    const auto stroke = [&](ImU32 ink, float metres, float lo, float hi) {
+        const float width = std::clamp(metres * px, lo, hi);
+        if (whole) draw->AddPolyline(screen.data(), segments, ink, ImDrawFlags_Closed, width);
+        else
+            for (int i = 0; i < segments; ++i) line3(draw, cam, ring[i], ring[(i + 1) % segments], ink, width);
+    };
+    const auto c = ImGui::ColorConvertU32ToFloat4(colour);
+    const ImU32 hot = ImGui::ColorConvertFloat4ToU32(ImVec4(c.x + (1 - c.x) * 0.55f, c.y + (1 - c.y) * 0.55f, c.z + (1 - c.z) * 0.55f, 1.0f));
+    stroke(with_alpha(colour, (next ? 0.12f : 0.07f) * alpha), 0.55f, 4.0f, 46.0f);  // outer glow
+    stroke(with_alpha(colour, (next ? 0.32f : 0.2f) * alpha), 0.22f, 2.5f, 20.0f);   // inner glow
+    stroke(with_alpha(colour, 0.85f * alpha), 0.09f, 1.5f, 9.0f);                    // the ring
+    stroke(with_alpha(hot, (next ? 0.95f : 0.6f) * alpha), 0.035f, 1.0f, 3.5f);      // its white-hot core
+    if (next && whole) {
+        // A brighter streak running round the hoop.
+        const int length = segments / 6, start = static_cast<int>(std::fmod(time * 0.55f, 1.0f) * segments);
+        for (int k = 0; k < length; ++k) {
+            const int i = (start + k) % segments, j = (i + 1) % segments;
+            const float fade = static_cast<float>(k) / length;
+            draw->AddLine(screen[i], screen[j], with_alpha(IM_COL32(255, 255, 255, 255), fade * 0.9f * alpha), std::clamp(0.07f * px, 1.5f, 6.0f));
+        }
+    }
+    if (next) {
+        // The bolt, always turned to the camera, bobbing gently in the middle of the hoop.
+        const Vec3 face_side{cam.right[0], cam.right[1], cam.right[2]}, face_up{cam.up[0], cam.up[1], cam.up[2]};
+        const Vec3 middle{centre[0], centre[1] + 0.12f * radius * std::sin(time * 2.0f), centre[2]};
+        const float bolt = radius * 0.42f;
+        world_picture(cam, GamePicture::checkpoint_bolt, middle, face_side, face_up, bolt * 1.12f, bolt * 1.12f, with_alpha(colour, 0.35f * alpha));
+        world_picture(cam, GamePicture::checkpoint_bolt, middle, face_side, face_up, bolt, bolt, with_alpha(IM_COL32(255, 255, 255, 235), alpha));
+    }
+    return true;
 }
 
 // A Deathrace route, built like an event the game itself put up: at each gate two round pillars
@@ -621,6 +728,37 @@ void draw_route(ImDrawList *draw, const Camera &cam, const ModesHud &h, float sc
             const Vec3 column[]{left, right, up(right, 30.0f), up(left, 30.0f)};
             const ImU32 glow = with_alpha(colour, 0.22f), none = with_alpha(colour, 0.0f), shades[]{glow, glow, none, none};
             fill_world(draw, cam, column, shades);
+        }
+        // skate.'s own checkpoint hoop when its pictures are loaded; else pillars and a banner.
+        // About as big as skate.'s own race checkpoints (seen in game: a ring the gate's full width
+        // filled the screen near it); the gate line on the ground keeps the gate's real width.
+        const float hoop_radius = std::clamp(half * 0.5f, 2.0f, 4.0f);
+        const bool hoop = checkpoint_hoop(cam, p, d, hoop_radius, colour, alpha, next || (start && h.next_point < 0), time);
+        if (hoop) {
+            glow_path(draw, cam, {up(left, 0.04f), up(right, 0.04f)}, colour, 0.07f, alpha);
+            if (const auto mid = cam.project(up(p, hoop_radius * 1.9f + 0.8f))) {
+                const std::string name = start ? "START" : finish ? "FINISH" : std::format("CHECKPOINT {}", i);
+                const float size = std::clamp(0.55f * cam.focal / std::max(distance, 1.0f), 10.0f * scale, 60.0f * scale);
+                const float w = text_width(font, size, name);
+                soft_text(draw, font, size, ImVec2(mid->x - w * 0.5f, mid->y - size), with_alpha(IM_COL32(255, 255, 255, 255), alpha), name);
+                if (next || (start && h.next_point < 0)) {
+                    const auto text = std::format("{:.0f} m", distance);
+                    const float metres_size = std::max(12.0f * scale, size * 0.5f), sw = text_width(font, metres_size, text);
+                    soft_text(draw, font, metres_size, ImVec2(mid->x - sw * 0.5f, mid->y + 2.0f * scale), with_alpha(colour, 0.95f), text);
+                }
+            }
+            if (!done) {
+                const float run = next ? std::fmod(time * 1.2f, 1.0f) : 0.0f;
+                for (int k = 0; k < 3; ++k) {
+                    const float along = -3.0f + (k + run) * 2.0f, w = 1.1f;
+                    const Vec3 tip{p[0] + d[0] * (along + 0.9f), p[1] + 0.05f, p[2] + d[1] * (along + 0.9f)};
+                    const Vec3 l2{p[0] + d[0] * along - d[1] * w, p[1] + 0.05f, p[2] + d[1] * along + d[0] * w};
+                    const Vec3 r2{p[0] + d[0] * along + d[1] * w, p[1] + 0.05f, p[2] + d[1] * along - d[0] * w};
+                    const float fade = next ? 1.0f - std::abs(along) / 4.0f : 0.6f;
+                    glow_path(draw, cam, {l2, tip, r2}, colour, 0.1f, std::clamp(fade, 0.2f, 1.0f));
+                }
+            }
+            continue;
         }
         pillar(left, colour, alpha);
         pillar(right, colour, alpha);
@@ -840,14 +978,19 @@ void draw_offers(ImDrawList *draw, const ModesHud &h, float scale) {
         if (!offer.has_at) continue;
         const auto &p = offer.at;
         const float distance = cam.distance(p);
-        if (distance > 1500.0f) continue;
+        // Standing at it (the game's own players gather there for the countdown) it would fill the
+        // screen: the marker fades out from 20 m and is gone within 6 m.
+        if (distance > 1500.0f || distance < 6.0f) continue;
+        // The leader's own game near them: its start (or their HUD) already marks it.
+        if (offer.own && distance < 40.0f) continue;
+        const float closeness = std::clamp((distance - 6.0f) / 14.0f, 0.0f, 1.0f);
         const ImU32 colour = offer.open ? accent : IM_COL32(150, 155, 165, 255);
         // The beam: wide and soft, with a bright core, fading up into the sky.
         for (const auto &[width, alpha] : {std::pair{1.6f, 0.10f}, std::pair{0.7f, 0.18f}, std::pair{0.22f, 0.55f}}) {
             const Vec3 side{cam.right[0] * width, 0, cam.right[2] * width};
             const Vec3 beam[]{{p[0] - side[0], p[1], p[2] - side[2]}, {p[0] + side[0], p[1], p[2] + side[2]},
                               {p[0] + side[0], p[1] + 80.0f, p[2] + side[2]}, {p[0] - side[0], p[1] + 80.0f, p[2] - side[2]}};
-            const ImU32 low = with_alpha(colour, alpha), high = with_alpha(colour, 0.0f), shades[]{low, low, high, high};
+            const ImU32 low = with_alpha(colour, alpha * closeness), high = with_alpha(colour, 0.0f), shades[]{low, low, high, high};
             fill_world(draw, cam, beam, shades);
         }
         // The ring on the ground, pulsing outward.
@@ -1368,6 +1511,8 @@ void draw_modes_hud() {
     draw_offers(draw, h.hud, scale);
     draw_invite(draw, h.hud, scale);
     if (!h.hud.active) return;
+    const auto native = native_modes_hud();
+    world_dim = native.countdown ? 0.3f : 1.0f;
     draw_world(draw, h.hud, scale);
     if (!h.hud.blind.empty()) { // a blind seeker sees only the count and the board
         draw_blind(draw, h.hud, scale);
@@ -1377,11 +1522,11 @@ void draw_modes_hud() {
     draw_tag_players(draw, h.hud, scale);
     draw_heat(draw, h.hud, scale);
     if (h.hud.results) {
-        draw_results(draw, h.hud, scale);
+        if (!native.results) draw_results(draw, h.hud, scale);
         return;
     }
-    draw_panel(draw, h, scale);
-    draw_centre(draw, h, scale);
+    draw_panel(draw, h, scale, native.score);
+    draw_centre(draw, h, scale, native.countdown || native.score);
     draw_trick_diagram(draw, h.hud, scale);
     if (h.hud.placing && h.hud.aiming) {
         // The quick-drop reticle: white with a dot when it finds the ground, red when it does not.

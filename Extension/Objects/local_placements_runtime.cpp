@@ -591,13 +591,12 @@ void update_position_teleport() {
     if (!r.teleport || !r.transition_ctor || !r.transition_destroy || !placement_client_channel() ||
         !read(local_runtime().base + addr::local_placements::teleport_manager, manager) || !manager ||
         !read(manager, state) || state != 0) return;
-    const auto at = *r.position_teleport;
+    // The whole transform asked for (teleport_local_skater_transform), facing included. The native
+    // teleport manager handles streaming, ground checks and physics reset; the session tick
+    // prepares the skater's on-board option first when a 1-Up turn starts.
+    alignas(16) const auto transform = *r.position_teleport;
+    const std::array<float, 3> at{transform[12], transform[13], transform[14]};
     r.position_teleport.reset();
-    // Upright at the spot, facing `yaw` when one was asked for (rows: right, up, forward). The native
-    // teleport manager handles streaming, ground checks and physics reset.
-    const float yaw = r.position_teleport_yaw.value_or(0.0f) * 3.14159265f / 180.0f, sy = std::sin(yaw), cy = std::cos(yaw);
-    r.position_teleport_yaw.reset();
-    alignas(16) const std::array<float, 16> transform{cy,0,-sy,0, 0,1,0,0, sy,0,cy,0, at[0], at[1], at[2], 1};
     alignas(16) std::array<std::uint64_t, 2> transition{};
     r.transition_ctor(transition.data());
     struct Destroy { decltype(r.transition_destroy) call; void* value; ~Destroy() { call(value); } } destroy{r.transition_destroy, transition.data()};

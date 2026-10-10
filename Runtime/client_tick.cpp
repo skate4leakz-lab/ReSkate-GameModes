@@ -6,6 +6,7 @@
 #include "Engine/Core/Log/logging.h"
 #include "Engine/Core/Profiling/profiler.h"
 #include "Extension/Settings/job_spin.h"
+#include "Engine/Game/World/load_completion.h"
 #include "Engine/Game/World/client_state.h"
 #include "Extension/HallOfMeat/hall_of_meat.h"
 #include "Extension/Skater/camera_observer.h"
@@ -942,8 +943,13 @@ void update_model(std::uintptr_t client, TickState& frame) {
             const bool manifest_description_active = manifest_sublevel && description.available &&
                 equals(description.level, r.last_request) &&
                 equals(description.lm_level, r.last_lm_level);
-            const bool content_confirmed = manifest_sublevel ? manifest_description_active :
-                (sublevel_active && client_sublevel_present);
+            const bool playable_destination = dingosdk::playable_load_complete(r.transition_seen, state,
+                description.available && equals(description.level, r.last_request) &&
+                    (r.last_lm_level.empty() || equals(description.lm_level, r.last_lm_level)),
+                context_ready, client_content.players_available, client_content.local_player_count,
+                client_content.controllable_reference_count);
+            const bool content_confirmed = playable_destination || (manifest_sublevel ? manifest_description_active :
+                (sublevel_active && client_sublevel_present));
             const bool settled = r.transition_seen && (state == 13 || state == 21) && content_confirmed;
             const bool timed_out = now - r.request_started >= 90000 && (state == 13 || state == 21) && local;
             const bool cancelled = state == 2 || state == 24 || state == 25;
@@ -967,6 +973,7 @@ void update_model(std::uintptr_t client, TickState& frame) {
                        ",\"timed_out\":" + (timed_out ? "true" : "false") +
                        ",\"manifest_sublevel\":" + (manifest_sublevel ? "true" : "false") +
                        ",\"manifest_description_active\":" + (manifest_description_active ? "true" : "false") +
+                       ",\"playable_destination\":" + (playable_destination ? "true" : "false") +
                        ",\"start_points_matched\":" + (start_points_matched ? "true" : "false") +
                        ",\"server_sublevel_active\":" + (sublevel_active ? "true" : "false") +
                        ",\"client_sublevel_present\":" + (client_sublevel_present ? "true" : "false") +

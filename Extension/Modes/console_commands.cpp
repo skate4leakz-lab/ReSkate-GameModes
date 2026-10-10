@@ -28,6 +28,7 @@ void register_mode_commands(Commands &registry) {
         {"radius", "How close counts as at a checkpoint or spot", "<metres>"},
         {"games", "Other players' games you can join", nullptr},
         {"join", "Join another player's game (the announced or nearest one, or the list's nth)", "[n]"},
+        {"flag", "Place skate.'s own Throwdown flag where your game starts", nullptr},
         {"start", "Start the game you lead", nullptr},
         {"stop", "End the game you lead, for everyone", nullptr},
         {"leave", "Sit out the game you are in", nullptr},

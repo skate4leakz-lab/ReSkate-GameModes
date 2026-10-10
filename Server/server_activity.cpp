@@ -53,6 +53,8 @@ void ActivityLog::throwdown(std::uint64_t sender, std::span<const std::uint8_t> 
     const auto decoded = multiplayer::decode_throwdown(bytes);
     if (!decoded) return;
     const auto &m = *decoded;
+    // 1-Up has its own host-owned results; forwarding is handled by the session protocol.
+    if (m.kind == Kind::one_up) return;
     const Key key{m.leader, m.id};
     auto found = throwdowns_.find(key);
     if (m.kind == Kind::offer) {

@@ -4,6 +4,7 @@
 #include "Extension/Skater/client_source_spawn.h"
 #include "Extension/Throwdowns/native_type_scan.h"
 #include "Extension/Throwdowns/throwdown_relay.h"
+#include "Extension/Throwdowns/one_up_runtime.h"
 #include "Engine/Core/Platform/memory.h"
 #include "follow_camera.h"
 #include "Engine/Game/Build/20260929/profile.h"
@@ -542,6 +543,13 @@ std::uint32_t teleport_hook(Address reason, const void *matrix, Address destinat
     // lip mount. While the local player waits for their S.K.A.T.E. turn, the turn start's
     // teleport of the local skater (id 0) lands it on foot. Kept in a static: the native
     // copies the options into its components, but must never see a dead buffer.
+    if(!id && stance && one_up::countdown_locks_input()) {
+        static thread_local std::array<std::uint8_t,3> on_board{};
+        if(memory::peek_bytes(stance,on_board.data(),on_board.size())) {
+            on_board[0]=1;
+            return state().teleport(reason,matrix,destination,id,mode,reinterpret_cast<Address>(on_board.data()),transition);
+        }
+    }
     if (!id && stance && throwdown_relay_waits_offboard()) {
         static thread_local std::array<std::uint8_t, 3> on_foot{};
         if (memory::peek_bytes(stance, on_foot.data(), on_foot.size()) && on_foot[0]) {

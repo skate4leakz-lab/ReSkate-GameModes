@@ -269,6 +269,9 @@ void draw_chat();
 bool game_text_pending();
 void draw_game_text();
 // ReSkate's S.K.A.T.E. throwdown HUD (skate_hud_overlay.cpp): polled every presented frame.
+void draw_one_up_hud(SkateHud);
+bool one_up_pending();
+void draw_one_up();
 bool skate_hud_pending();
 void draw_skate_hud();
 // ReSkate's game modes HUD (modes_hud_overlay.cpp): polled every presented frame.

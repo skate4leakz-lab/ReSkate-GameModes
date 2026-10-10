@@ -12,6 +12,7 @@
 
 namespace dingosdk {
 bool read_local_camera_transform(std::uintptr_t, std::uintptr_t, std::array<float, 16>&) noexcept { return false; }
+PlayerCardModel local_profile_player_card() { return {}; }
 ParksModel simulated_parks;
 std::vector<std::pair<std::uint64_t, ParkChoices>>* simulated_park_receives{};
 std::uint64_t simulated_park_receiver{};
@@ -44,7 +45,9 @@ bool clear_lobby_guest_objects() { ++simulated_guest_wipes; return true; }
 namespace dingosdk {
 bool teleport_local_skater(const std::array<float, 3>&, std::optional<float>) { return true; }
 ControllerBindingsModel local_profile_controller_bindings() { return {}; }
+bool teleport_local_skater_transform(const std::array<float,16>&) { return true; }
 void update_board_lock(std::uintptr_t, std::uintptr_t, bool) noexcept {}
+bool prepare_on_board_teleport(std::uintptr_t, std::uintptr_t) noexcept { return true; }
 void update_developer_hoodie(std::uintptr_t, std::uintptr_t, std::uint64_t, std::uint64_t, DeveloperHoodieState &,
                              const multiplayer::MarkStyles &) noexcept {}
 void update_developer_board(std::uintptr_t, std::uintptr_t, std::uint64_t, std::uint64_t, DeveloperBoardState &,
@@ -69,6 +72,7 @@ std::vector<std::vector<std::uint8_t>> tick(const SessionInput &) { return {}; }
 bool receive(std::uint64_t, std::span<const std::uint8_t>) { return false; }
 std::vector<std::string> take_notices() { return {}; }
 bool infected_look(std::uint64_t) noexcept { return false; }
+bool countdown_active() noexcept { return false; }
 bool hidden_player(std::uint64_t) noexcept { return false; }
 }
 namespace dingosdk::physics_tuning {
@@ -300,6 +304,8 @@ void set_custom_nametags_enabled(bool) noexcept {}
 GameUiState sample_game_ui_state(std::uintptr_t) noexcept { return {}; }
 void note_local_skater(const Transform &) noexcept {}
 void initialize_native_throwdowns(std::uintptr_t) noexcept {}
+std::uint32_t local_native_player_id() noexcept { return 7; }
+std::uint64_t native_throwdown_world() noexcept { return 1; }
 // The relay itself needs the game; routing is checked through each node's inbox.
 std::vector<std::vector<std::uint8_t>> tick_throwdown_relay(std::uintptr_t, const ThrowdownRelayInput &) { return {}; }
 std::vector<std::string> take_throwdown_relay_notices() { return {}; }
@@ -307,6 +313,14 @@ void receive_throwdown_relay(std::uint64_t, std::span<const std::uint8_t>) {}
 bool throwdown_relay_hides(std::uint64_t) noexcept { return false; }
 std::optional<std::array<float, 3>> throwdown_relay_celebration_offset(std::uint64_t, const std::array<float, 3> &) noexcept { return std::nullopt; }
 bool throwdown_relay_waits_offboard() noexcept { return false; }
+namespace one_up {
+void queue(std::string_view) {}
+void receive(std::uint64_t, std::span<const std::uint8_t>) {}
+std::vector<std::vector<std::uint8_t>> tick(std::uintptr_t, const ThrowdownRelayInput&) { return {}; }
+bool hides(std::uint64_t) noexcept { return false; }
+bool waits_offboard() noexcept { return false; }
+bool countdown_locks_input() noexcept { return false; }
+}
 std::shared_ptr<const SteamSocialSnapshot> steam_social_snapshot() {
     static const auto snapshot = std::make_shared<SteamSocialSnapshot>();
     return snapshot;

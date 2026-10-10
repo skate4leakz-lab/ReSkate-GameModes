@@ -47,6 +47,39 @@ bool throwdown_grid() noexcept;
 std::string command(std::string_view verb, const std::vector<std::string> &arguments);
 // The HUD's snapshot, with the latest camera (any thread).
 overlay::ModesHud hud();
+// The local player's game for skate.'s own HUD widgets (the native countdown, the score block with
+// its clock, the results board: Extension/UI/NativeMenu/one_up_menu.cpp draws them for 1-Up and for
+// these). Inactive without a game the local player is in or leads (any thread).
+struct NativeMatch {
+    bool active{};
+    std::uint64_t key{};             // the game: a new key starts a new intro and results
+    std::uint8_t phase{};            // 1 setup, 2 countdown, 3 playing, 4 results (Phase)
+    std::uint32_t remaining_ms{};    // the countdown's, the clock's or the results' time left
+    std::uint32_t clock_ms{};        // a timed game's whole length (0: no clock)
+    std::uint32_t countdown_ms{};    // the countdown's whole length
+    std::string title;               // "SPOT JAM"
+    std::string tagline;             // a line on how it is played, under the intro's title
+    std::string headline;            // over the score block: "SKATE TAG  /  ZEE IS IT"
+    std::string best, mine;          // the leader's value (by the crown) and the local player's
+    struct Row {
+        std::uint64_t id{};
+        std::string name, value;
+        bool self{}, up{}, out{};
+    };
+    std::vector<Row> rows;           // ranked, the leader first
+    std::string winner;              // results: who won ("" for none)
+    bool leading{};                  // the local player leads it (can start or end it)
+    std::size_t players{};
+};
+NativeMatch native_match();
+// The local player's game is counting down to GO: they start on their board and their controls
+// wait for GO, as at the start of skate.'s own Throwdowns (any thread).
+bool countdown_active() noexcept;
+// Native flag placement for a game set up here (one_up_placement.cpp, from the mode's Throwdowns
+// panel): the flag's spot and the way it faces. The game starts there, its area centred on it.
+std::string flag_placed(const std::array<float, 3> &spot, float yaw_degrees);
+// The game a native flag was placed for: its key while it is set up or on (0: none).
+std::uint64_t flag_game() noexcept;
 // What the ReSkate menu's Game Modes page shows (any thread).
 overlay::ModesMenu menu_view();
 } // namespace dingosdk::modes

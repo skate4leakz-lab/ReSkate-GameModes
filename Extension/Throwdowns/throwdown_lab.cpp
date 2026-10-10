@@ -1,4 +1,6 @@
 #include "throwdown_lab.h"
+#include "one_up_placement.h"
+#include "one_up_runtime.h"
 #include "native_type_scan.h"
 #include "Engine/Core/Hooks/hooks.h"
 #include "Engine/Core/Log/logging.h"
@@ -91,6 +93,7 @@ constexpr std::uint32_t field_params = 3750769597U, field_parameters = 188648851
 // while a handler graph of that event runs, the id natives answer the injected
 // sender if that event is the oldest one not yet handled.
 constexpr std::string_view sender_marker = "rsk:"; // still written, for traces
+std::atomic<std::uint32_t> native_solo_queue{};
 struct Handled { std::uint32_t event; std::array<std::uint32_t, 3> graphs; };
 constexpr std::array handled_events{
     Handled{0xb2fc396c, {0x04e2faaf}},                 // RequestTurnEnd: TurnBasedServer.OnRequestTurnEnd
@@ -219,6 +222,7 @@ struct Lab {
     std::uint32_t hosted_mmid{};          // MMID of the local player's own drop (Update/HostSet)
     std::atomic<bool> leaderboard_live{}; // leaderboards[0] belongs to the throwdown running now
     std::atomic<bool> local_entered{};    // the server just made an event of the local player's queue
+    std::atomic<Address> local_entered_activity{}; // candidate until QueueFilled confirms it
     std::atomic<std::uint32_t> server_active{}; // turn-based: whose turn the local server started last
     std::array<std::atomic<std::uint32_t>, 16> players{};
     // `throwdown trace`: every authored graph run in the window, per realm.
@@ -502,6 +506,7 @@ void participants_changed_hook(Address activity, const Address* added, const Add
             auto& l = lab();
             const auto current = realm();
             const auto joined = id_list(added);
+            const auto left = id_list(removed);
             if (l.participant_logs.fetch_add(1) < 400) {
                 const auto text = [](const std::vector<std::uint32_t>& ids) {
                     std::string out;
@@ -510,16 +515,18 @@ void participants_changed_hook(Address activity, const Address* added, const Add
                 };
                 logging::log(logging::Level::info, logging::Channel::progression,
                     "Throwdown lab: participants changed ({} realm, activity {:#x}): added [{}] removed [{}].",
-                    realm_name(current), activity, text(joined), text(id_list(removed)));
+                    realm_name(current), activity, text(joined), text(left));
             }
             // The server sets an event's participants when a queue the local player is
             // in becomes the event (ThrowdownRegistration.QueueFilled), host first.
             const auto local = local_native_player_id();
+            bool cooperative{};
             // The coop challenge that just started: its activity, and its end for the local player.
             if (current == server_realm && local) {
-                if (std::ranges::find(joined, local) != joined.end() && l.challenge_activity_pending.exchange(false))
+                if (std::ranges::find(joined, local) != joined.end() && l.challenge_activity_pending.exchange(false)) {
                     l.challenge_activity.store(activity, std::memory_order_release);
-                const auto left = id_list(removed);
+                    cooperative = true;
+                }
                 if (activity && activity == l.challenge_activity.load(std::memory_order_acquire) &&
                     std::ranges::find(left, local) != left.end()) {
                     l.challenge_activity.store(0, std::memory_order_release);
@@ -527,7 +534,7 @@ void participants_changed_hook(Address activity, const Address* added, const Add
                 }
             }
             if (current == server_realm && local) {
-                const auto left = id_list(removed);
+                for (const auto player : left) native_throwdown_participant_left(activity, player);
                 if (std::ranges::find(left, local) != left.end()) {
                     // Quit (LeaveInProgress), or the event let the player go: its boards are
                     // no longer the local player's and nothing is relayed for it any more.
@@ -542,6 +549,8 @@ void participants_changed_hook(Address activity, const Address* added, const Add
             }
             if (current == server_realm && local && std::ranges::find(joined, local) != joined.end()) {
                 l.local_entered.store(true, std::memory_order_release);
+                if (!cooperative && local_throwdown_active())
+                    l.local_entered_activity.store(activity, std::memory_order_release);
                 ThrowdownLocalAction action{ThrowdownLocalAction::Kind::entered};
                 action.participants = joined;
                 throwdown_relay_local(std::move(action));
@@ -1330,6 +1339,7 @@ std::string run_job(const Job& job) {
         Instance e(type_of(event_destroy));
         e.set_u32(field_mmid, mmid);
         e.send();
+        one_up::observe_flag_destroyed(mmid);
         return std::format("RequestThrowdownDestroyGlobal sent for MMID {:#x}", mmid);
     }
     }
@@ -1552,6 +1562,7 @@ void observe_throwdown_send(std::uint32_t hash, Address type, Address payload) n
             ThrowdownLocalAction action{ThrowdownLocalAction::Kind::exited};
             if (const auto f = find_field(type, field_is_cancelling); f && f->size == 1)
                 action.cancelling = read<std::uint8_t>(payload + f->offset) != 0;
+            if(one_up::flag_placement_active()) { one_up::observe_flag_exit(action.cancelling); return; }
             {
                 std::lock_guard lock(l.mutex);
                 action.series = l.series; action.mmid = l.hosted_mmid;
@@ -1633,15 +1644,24 @@ void observe_throwdown_send(std::uint32_t hash, Address type, Address payload) n
         std::string series; std::uint32_t mmid{};
         std::vector<std::uint8_t> params; std::string note;
         bool placed{};
+        std::uint32_t selected_players{};
+        std::optional<std::array<float,3>> selected_spawn;
+        std::optional<std::array<float,16>> selected_transform;
         if (const auto f = find_field(type, field_mmid); f && f->size == 4) mmid = read<std::uint32_t>(payload + f->offset);
         if (const auto f = find_field(type, field_series); f && f->kind == kind_string) series = read_string(payload + f->offset);
         if (const auto p = find_field(type, field_params); p && p->kind == kind_struct) {
+            if(const auto limit=find_field(p->type,field_max_players);limit && limit->size==4)
+                selected_players=read<std::uint32_t>(payload+p->offset+limit->offset);
             capture_value(p->type, payload + p->offset, params, 0);
             note = describe_params(p->type, payload + p->offset);
             if (const auto f = find_field(p->type, field_series); f && f->kind == kind_string)
                 series = read_string(payload + p->offset + f->offset);
             std::array<float, 3> spawn{};
-            if (const auto f = find_field(p->type, field_spawn); f && f->size >= 12) memory::read(payload + p->offset + f->offset, spawn);
+            if (const auto f = find_field(p->type, field_spawn); f && f->size >= 12 && memory::read(payload + p->offset + f->offset, spawn)) selected_spawn=spawn;
+            if(const auto f=find_field(p->type,field_teleport);f && f->size==64) {
+                std::array<float,16> transform{};
+                if(memory::read(payload+p->offset+f->offset,transform))selected_transform=transform;
+            }
             placed = spawn[0] != 0 || spawn[1] != 0 || spawn[2] != 0;
         }
         {
@@ -1662,6 +1682,18 @@ void observe_throwdown_send(std::uint32_t hash, Address type, Address payload) n
                 "Throwdown lab: local client sent {:#x}; series {} MMID {:#x}{}{}.", hash, l.series, l.mmid,
                 note.empty() ? "" : "; ", note);
         }
+        if(one_up::flag_registration_owned()) {
+            // Keep native type caching, but never advertise the temporary
+            // S.K.A.T.E. picker as a separate multiplayer match.
+            if(hash==event_create) one_up::observe_flag_created();
+            if(hash==event_update && selected_spawn) one_up::observe_flag_position(mmid,*selected_spawn,selected_transform?&*selected_transform:nullptr);
+            return;
+        }
+        if(hash==event_create)native_solo_queue.store(0);
+        if(hash==event_host_set && selected_players) native_throwdown_player_limit(selected_players);
+        if((hash==event_update || hash==event_host_set) && mmid && selected_players)
+            native_solo_queue.store(selected_players==1?mmid:0);
+        if((hash==event_force_start || hash==event_destroy) && mmid==native_solo_queue.load())native_solo_queue.store(0);
         using Kind = ThrowdownLocalAction::Kind;
         const auto kind = hash == event_create ? Kind::created : hash == event_add_participant ? Kind::joined
                         : hash == event_force_start ? Kind::force_started : hash == event_destroy ? Kind::destroy_requested
@@ -1674,6 +1706,78 @@ void observe_throwdown_send(std::uint32_t hash, Address type, Address payload) n
         }
     } catch (...) {}
 }
+
+void prepare_native_solo_throwdown_leave(std::uint32_t hash) noexcept {
+    if (hash != event_leave_in_progress || injecting || multiplayer_session_active() ||
+        one_up::flag_registration_owned() || one_up::restricts_session_markers()) return;
+    profile_runtime::PreserveError preserve;
+    try {
+        const auto player = local_native_player_id();
+        const auto activity = native_solo_throwdown_activity(player);
+        const auto type = activity ? type_of(event_force_destroy) : 0;
+        if (!type) return;
+        // Send while the player is still a participant. This native handler
+        // resolves the sender's current event; sending after RemoveParticipant
+        // has run cannot find it. Its normal destruction releases the client
+        // activity manager and emits the native lifecycle notifications.
+        // Keep the original leave! ForceDestroy schedules destruction, while
+        // LeaveInProgressRequested returns the participant confirmation that
+        // releases the client's manager immediately. Consuming Leave skipped
+        // that reset and stranded the native activity state.
+        Instance destroy(type);
+        destroy.send(5, player);
+        logging::log(logging::Level::info, logging::Channel::progression,
+            "Throwdown: solo host {:#x} quitting activity {:#x}; native event destruction requested.", player, activity);
+    } catch (...) {}
+}
+
+bool consume_one_up_throwdown_send(std::uint32_t hash,Address type,Address payload) noexcept {
+    if(!injecting && one_up::restricts_session_markers() &&
+       (hash==event_leave_in_progress || hash==event_force_destroy)) {
+        // The native activity pause modal uses these same Quit Match requests.
+        // Its temporary picker is already gone; end the owned 1-Up match.
+        one_up::queue("leave");
+        return true;
+    }
+    if(injecting || !one_up::flag_registration_owned() || !type || !payload)return false;
+    try {
+        if(hash!=event_force_start && hash!=event_destroy && hash!=event_host_set)return false;
+        const auto f=find_field(type,field_mmid);
+        if(!f || f->size!=4 || !one_up::owns_flag_registration(read<std::uint32_t>(payload+f->offset)))return false;
+        if(hash==event_host_set) {
+            // This registration supplies only the native flag and waiting HUD.
+            // Its queue must not fill from Players 1 and start Spot Battle
+            // before the host presses 1-Up's Start. 1-Up keeps the selected
+            // 1-6 capacity in its own match; the picker uses the stock maximum.
+            const auto params=find_field(type,field_params);
+            if(params && params->kind==kind_struct) {
+                const auto limit=find_field(params->type,field_max_players);
+                if(limit && limit->size==4) {
+                    const auto at=payload+params->offset+limit->offset;
+                    const auto selected=read<std::uint32_t>(at);
+                    if(selected>=1 && selected<=6) {
+                        const std::uint32_t picker_capacity=10;
+                        SIZE_T written{};
+                        if(WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(at),&picker_capacity,sizeof(picker_capacity),&written) && written==sizeof(picker_capacity))
+                            logging::log(logging::Level::info,logging::Channel::ui,"1-Up: held native flag queue open; selected Players {} remains in 1-Up.",selected);
+                    }
+                }
+            }
+            return false;
+        }
+        if(hash==event_force_start) {
+            if(one_up::flag_for_mode()) one_up::request_mode_start();
+            else one_up::queue("start");
+            logging::write(logging::Level::info,logging::Channel::ui,"Throwdown flag: native Start requested.");
+            return true;
+        }
+        if(one_up::flag_for_mode()) one_up::request_mode_stop();
+        else one_up::queue("leave");
+        one_up::flag_registration_left();
+    } catch(...) {}
+    return false;
+}
+bool native_solo_throwdown_waiting() noexcept { return native_solo_queue.load()!=0; }
 
 namespace {
 std::uint64_t now_ms() {
@@ -1783,6 +1887,9 @@ void pump_throwdown_lab(Address vm) noexcept {
                 const auto frame = read<std::uint32_t>(resource + 0x20);
                 const auto locals = read<Address>(read<Address>(vm + 0x30) + ((frame + 15U) & ~15U) + 16);
                 if (locals && graph == graph_queue_filled && l.local_entered.exchange(false, std::memory_order_acq_rel)) {
+                    const auto activity = l.local_entered_activity.exchange(0, std::memory_order_acq_rel);
+                    if (realm() == server_realm && activity)
+                        native_throwdown_activity_started(activity, local_native_player_id());
                     const auto handle = read<std::uint32_t>(locals + queue_filled_handle_local);
                     const auto seed = read<std::uint32_t>(locals + queue_filled_seed_local);
                     { std::lock_guard lock(l.mutex); l.event_handle = handle; }
@@ -1930,13 +2037,20 @@ void throwdown_lab_before_level_transition(unsigned next) noexcept {
     // 14, 22 and 3 leave a level or sublevel, 24 shuts down: the level's bundles are unloaded,
     // and the events' types with them.
     if (next != 14 && next != 22 && next != 3 && next != 24) return;
+    native_solo_queue.store(0);
+    native_throwdown_level_left();
+    one_up::abandon_flag_placement();
     try {
         auto& l = lab();
+        l.local_entered.store(false, std::memory_order_release);
+        l.local_entered_activity.store(0, std::memory_order_release);
         std::lock_guard lock(l.mutex);
         l.world.fetch_add(1, std::memory_order_acq_rel);
         l.types.clear();
     } catch (...) {}
 }
+
+std::uint64_t native_throwdown_world() noexcept { return lab().world.load(std::memory_order_acquire)+1; }
 
 bool throwdown_lab_player(std::uint32_t player_id) noexcept {
     if (!player_id) return false;
@@ -2132,6 +2246,10 @@ std::string throwdown_lab_command(std::string_view arguments, std::optional<std:
         at = end == std::string_view::npos ? arguments.size() : end;
     }
     const auto verb = words.empty() ? std::string_view("status") : words[0];
+    if(verb=="solo") {
+        one_up::queue("solo");
+        return "1-Up solo test queued. Place a 1-Up flag and Ready first; use oneup status for the result.";
+    }
     if (verb == "relay") return throwdown_relay_status();
     const auto number = [&](std::size_t i) { return i < words.size() ? parse_u32(words[i]) : std::nullopt; };
     const auto current = [&] {
@@ -2147,6 +2265,7 @@ std::string throwdown_lab_command(std::string_view arguments, std::optional<std:
                "  throwdown mirror <host id>          replace your placed drop by the same drop hosted by <host id>\n"
                "  throwdown join                      join the current queue as the local player (the Join button)\n"
                "  throwdown start | destroy           force start / destroy the current queue (MMID above)\n"
+               "  throwdown solo                      start a ready one-player 1-Up test\n"
                "  throwdown mmid <value>              use another queue\n"
                "  throwdown trace [seconds]           log every authored graph run\n"
                "  throwdown relay                     multiplayer: linked drops, mirrors and players\n"

@@ -1,10 +1,15 @@
 #include "Extension/UI/NativeMenu/native_menu_lifetime.h"
+#include "Extension/UI/NativeMenu/native_menu_ownership.h"
+#include "Extension/UI/NativeMenu/native_hud_selection.h"
+#include "Extension/UI/NativeMenu/native_hud_values.h"
 #include <cstdio>
 #include <array>
 #include <map>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <functional>
 
 using dingosdk::multiplayer::menu_data::OwnedMenuModels;
 using dingosdk::multiplayer::menu_data::MenuLifetime;
@@ -181,9 +186,124 @@ void action_slots() {
     check(render({"a", "b", "c", "d", "e", "f", "i", "g"}).back() == 7 && actions[7].argument == "g",
         "A command that lost its slot gets another when its button returns");
 }
+void live_hud_binding() {
+    using dingosdk::multiplayer::menu_data::HudRootCandidate;
+    using dingosdk::multiplayer::menu_data::mounted_hud_root;
+    // These identities/order reproduce the captured running Spot Battle HUD:
+    // first the registered authored defaults, then the populated live root.
+    std::array roots{HudRootCandidate{0x1000103210000ULL,false,0},
+                     HudRootCandidate{0x16ced0000ULL,true,3}};
+    check(mounted_hud_root(roots)==0x16ced0000ULL,
+          "Bind the rendered Spot Battle HUD, not its registered template");
+    roots[0].active=true; // Appended 1-Up items must not qualify a template.
+    check(mounted_hud_root(roots,roots[0].handle)==roots[1].handle,
+          "Ignore an earlier mistaken binding with no game-owned HUD contents");
+    std::swap(roots[0],roots[1]);
+    check(mounted_hud_root(roots)==0x16ced0000ULL,
+          "Registry order cannot decide which HUD is rendered");
+    roots[0].active=false;
+    check(mounted_hud_root(roots)==0,"Wait when only inactive/empty HUD roots remain");
+    roots[1]={0x180000000ULL,true,2};
+    check(mounted_hud_root(roots,0x16ced0000ULL)==0x180000000ULL,
+          "Rebind when the previous live HUD retires");
+}
+void native_hud_clock_and_penalties() {
+    using dingosdk::multiplayer::menu_data::native_hud_seconds;
+    using dingosdk::multiplayer::menu_data::earned_one_up_letter;
+    check(native_hud_seconds(3000) == 3 && native_hud_seconds(2980) == 3,
+          "The native animated countdown receives whole seconds, rounded up");
+    check(native_hud_seconds(1000) == 1 && native_hud_seconds(999) == 1 &&
+          native_hud_seconds(1) == 1 && native_hud_seconds(0) == 0,
+          "GO begins only after the synchronized clock reaches zero");
+    check(native_hud_seconds(28000) == 28,
+          "Match the captured native Spot Battle timer's 28-second value");
+    constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+    check(native_hud_seconds(maximum) == maximum / 1000 + 1,
+          "Rounding large clock values cannot overflow");
+    for (unsigned penalties = 0; penalties <= 3; ++penalties) {
+        unsigned earned{};
+        for (unsigned letter = 0; letter < 3; ++letter)
+            earned += earned_one_up_letter(penalties, letter);
+        check(earned == penalties, "Show all three stamps and highlight each earned 1-U-P penalty");
+        check(!earned_one_up_letter(penalties, 3), "There is no fourth penalty stamp");
+    }
+}
+void native_one_up_slider_values() {
+    using namespace dingosdk::multiplayer::menu_data;
+    check(native_slider_choice((1.16f-1.f)/5.f,1,6,1)==1,
+          "The captured fractional Players value snaps to a whole player");
+    check(native_slider_choice((106.8f-10.f)/110.f,10,120,10)==110,
+          "The captured fractional timer snaps to a ten-second choice");
+    for(unsigned players=1;players<=6;++players)
+        check(native_slider_choice(native_slider_position(players,1,6),1,6,1)==players,
+              "All supported player counts round trip through native normalized storage");
+    for(unsigned seconds=10;seconds<=120;seconds+=10)
+        check(native_slider_choice(native_slider_position(seconds,10,120),10,120,10)==seconds,
+              "Native turn times round trip without fractional display values");
+    check(native_slider_choice(native_slider_position(20,10,120),10,120,10)==20,
+          "A fresh 1-Up setup defaults to twenty seconds");
+    check(native_slider_choice(std::numeric_limits<float>::quiet_NaN(),1,6,1)==1 &&
+          native_slider_choice(4.f,1,6,1)==6 && native_slider_choice(-4.f,1,6,1)==1,
+          "Invalid native input cannot create an unsupported player count");
+}
+void wrapped_waiting_notification() {
+    using namespace dingosdk::multiplayer::menu_data;
+    // Reproduce the captured live secondary stack: the outer Foundations
+    // wrapper points to the actual Spot Battle waiting notification.
+    std::map<std::uint64_t,NotificationMountNode> slots{
+        {10,{0x174b30000ULL,0xffb83e48,11}},
+        {11,{0x174a90000ULL,0x1053b9ec,0}},
+        {20,{0x15d8b0000ULL,0x1053b9ec,0}}, // Unmounted RIP-score template.
+        {30,{999,0x0e3be640,11}}, // Unrelated HUD content is not a queue wrapper.
+        {40,{888,0xffb83e48,41}}, {41,{887,0xffb83e48,40}}};
+    const auto read=[&](std::uint64_t handle){return slots.at(handle);};
+    check(mounted_notification(10,read)==NotificationMount{11,0x174a90000ULL},
+          "Resolve the rendered waiting model and its inner presenter through the native wrapper");
+    slots[11]={123,0x608f1aab,0}; // During play, inner slot shows the native Leave button.
+    const auto original=[&](std::uint64_t handle) {
+        return handle==11?NotificationMountNode{0x174a90000ULL,0x1053b9ec,0}:read(handle);
+    };
+    check(mounted_notification(10,original)==NotificationMount{11,0x174a90000ULL},
+          "A compact Leave presentation retains the same queue identity for restoration");
+    check(!mounted_notification(30,read) && !mounted_notification(40,read) &&
+          !mounted_notification(0,read),"Ignore unrelated wrappers, missing mounts and cycles");
+}
+void private_throwdown_graphs() {
+    using dingosdk::multiplayer::menu_data::UiCloneCache;
+    struct Model {std::string name;std::vector<unsigned> children;};
+    // Header/body share a native label; the callback owner points back to the
+    // panel. Another stock panel also uses that same label and must stay stock.
+    std::map<unsigned,Model> nodes{{1,{"Spot Battle",{2,3}}},{2,{"Spot rules",{4}}},
+        {3,{"Footer",{4}}},{4,{"Native label",{1}}},{5,{"Skate Jam",{4}}}};
+    UiCloneCache<unsigned,unsigned> one_up;unsigned next=100,created{};
+    std::function<unsigned(unsigned)> copy=[&](unsigned source) {
+        return one_up.clone(source,[&] {
+            const auto id=++next;nodes[id]=nodes.at(source);++created;return id;
+        },[&](unsigned owned) {
+            const auto original=nodes.at(owned).children;
+            std::vector<unsigned> children;for(const auto child:original)children.push_back(copy(child));
+            nodes.at(owned).children=std::move(children);
+        });
+    };
+    const auto private_panel=copy(1),private_label=copy(4);
+    nodes.at(private_panel).name="1-UP";nodes.at(private_label).name="Three penalties";
+    check(created==4 && private_panel!=1 && private_label!=4,"Clone every referenced model once, including a cycle");
+    check(nodes.at(1).name=="Spot Battle" && nodes.at(4).name=="Native label" && nodes.at(5).children[0]==4,
+        "Changing 1-Up leaves the original Spot Battle and Skate Jam data untouched");
+    check(nodes.at(copy(2)).children[0]==private_label && nodes.at(copy(3)).children[0]==private_label &&
+          nodes.at(private_label).children[0]==private_panel,"Private presenters share only private mutable identities");
+    UiCloneCache<unsigned,unsigned> next_open;
+    const auto reopened=next_open.clone(4,[&]{const auto id=++next;nodes[id]=nodes.at(4);return id;},[](unsigned){});
+    check(reopened!=private_label && nodes.at(reopened).name=="Native label","A later menu starts from clean stock data");
+    using namespace dingosdk::multiplayer::menu_data;
+    const auto original_four=native_slider_choice(.25f,2,10,1);
+    check(original_four==4 && native_slider_choice(native_slider_position(original_four,1,10),1,10,1)==4,
+        "Enabling solo keeps the stock slider's selected player count");
+    check(native_slider_choice(0.f,1,10,1)==1,"The stock Players slider can select exactly one skater");
+}
 int main() {
     try {
-        map_transition(); interrupted_cleanup(); window_close(); native_transition_without_load_request(); action_slots();
+        map_transition(); interrupted_cleanup(); window_close(); native_transition_without_load_request(); action_slots(); live_hud_binding(); native_hud_clock_and_penalties(); native_one_up_slider_values(); wrapped_waiting_notification(); private_throwdown_graphs();
         std::puts("Native menu lifetime: scheduled/native transitions, blocked callbacks, reload, shutdown, partial builds, retries and action slots passed.");
         return 0;
     } catch (const std::exception& e) {

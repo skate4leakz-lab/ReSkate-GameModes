@@ -1,4 +1,5 @@
 #include "session_internal.h"
+#include "Extension/Throwdowns/one_up_runtime.h"
 #include "Extension/Multiplayer/Steam/steam_social.h"
 #include "Extension/Multiplayer/Hud/native_indicators.h"
 #include "Extension/Multiplayer/Hud/native_player_ui.h"
@@ -612,7 +613,7 @@ bool own_mark_command(std::string_view action) {
 }
 } // namespace
 bool queue_command(std::string_view action, std::string_view argument, std::string_view password) {
-    if (launcher::offline_mode() && !own_mark_command(action)) return false;
+    if (launcher::offline_mode() && !own_mark_command(action) && action!="oneup") return false;
     if ((action != "host" && action != "host-config" && action != "join" && action != "join-lobby" && action != "join-friend-lobby" && action != "stop" &&
          action != "distances" && action != "object-placement" && action != "object-limit" && action != "kick" && action != "clear-objects" &&
          action != "nametags" && action != "chat-visible" && action != "chat-filter" &&
@@ -625,7 +626,7 @@ bool queue_command(std::string_view action, std::string_view argument, std::stri
          action != "world-layer-sync" && action != "noclip-allow" && action != "nobail-allow" && action != "boosts-allow" &&
          action != "tuning-enforce" && action != "tp" &&
          action != "tpall" && action != "tphere" && action != "browse" &&
-         action != "server" && action != "party") ||
+         action != "server" && action != "party" && action != "oneup") ||
         argument.size() > (action == "host" || action == "host-config" ? 160U : action == "chat" ? 4 * multiplayer_chat_max_bytes
                            : action == "server" ? max_admin_text : 128U) ||
         password.size() > 64)
@@ -645,7 +646,7 @@ bool queue_command(std::string_view action, std::string_view argument, std::stri
 bool server_vote_open() noexcept { return session_detail::server_vote_open_flag.load(std::memory_order_relaxed); }
 unsigned server_poll_answers() noexcept { return session_detail::server_poll_answers_flag.load(std::memory_order_relaxed); }
 std::string command(std::string_view action, std::string_view argument, std::string_view password) {
-    if (launcher::offline_mode() && !own_mark_command(action))
+    if (launcher::offline_mode() && !own_mark_command(action) && action!="oneup")
         return "Multiplayer is unavailable in offline mode. Start Steam and relaunch ReSkate.";
     const bool configured_host = action == "host-config";
     if (configured_host) action = "host";
@@ -710,6 +711,7 @@ std::string command(std::string_view action, std::string_view argument, std::str
             if (!refused.empty() && (s.mode == Mode::host || s.mode == Mode::join)) add_chat(s, 0, "ReSkate", refused);
             return refused.empty() ? "Message sent." : refused;
         }
+        if (action == "oneup") { one_up::queue(argument); return "1-Up action queued."; }
         if (action == "party") {
             const auto result = party_command(s, argument);
             if (!result.empty() && (s.mode == Mode::host || s.mode == Mode::join)) add_chat(s, 0, "ReSkate", result);

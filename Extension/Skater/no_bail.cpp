@@ -378,6 +378,17 @@ bool set_teleport_on_board(std::uintptr_t component) noexcept {
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
+bool prepare_on_board_teleport(std::uintptr_t client, std::uintptr_t entity) noexcept {
+    LastError error;
+    Owner owner;
+    if(!protection().ready.load(std::memory_order_acquire) || !resolve(client,entity,owner))return false;
+    std::uint8_t board{};
+    if(!read(owner.component+0xc0,board))return false;
+    if(board==1)return true;
+    if(!set_teleport_on_board(owner.component))return false;
+    logging::write(logging::Level::info,logging::Channel::skater,"1-Up: native on-board spawn option prepared.");
+    return true;
+}
 void update_board_lock(std::uintptr_t client, std::uintptr_t entity, bool locked) noexcept {
     LastError error;
     auto& p = protection();

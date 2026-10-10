@@ -14,6 +14,9 @@ void clear_no_bail() noexcept;
 // Releasing it also leaves the skater's teleport option on the board again, since a turn's
 // teleport may have set it off (skater component +0xc0) and the SDK's own teleports keep it.
 void update_board_lock(std::uintptr_t client, std::uintptr_t entity, bool locked) noexcept;
+// Prepare the local skater's native teleport option after validating its owner.
+// This only changes how the next teleport spawns; it does not grant No Bail.
+bool prepare_on_board_teleport(std::uintptr_t client, std::uintptr_t entity) noexcept;
 // The physics state the local skater's selector last chose, for the trainer (air time, bail
 // markers). Publish the skater to watch from the client tick; it expires if ticks stop.
 struct PhysicsStateWatch {

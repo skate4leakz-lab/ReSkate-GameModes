@@ -29,7 +29,8 @@ struct ThrowdownMessage {
         challenge_leave = 14,   // the sender quit its copy
         // Party beacons (analysis/party-re/beacons.md): the sender's beacon in this world, `id` its
         // revision. add = it stands at `location` (placed or moved); else it was removed.
-        beacon = 15
+        beacon = 15,
+        one_up = 16 // versioned 1-Up state/input, authenticated by the session transport
     };
     Kind kind = Kind::offer;
     std::uint64_t leader{}; // Steam ID of the player hosting the throwdown
@@ -50,6 +51,7 @@ struct ThrowdownMessage {
     std::vector<std::uint8_t> criteria, indexes;
     // beacon: the LinearTransform it stands at (right, up, forward, translation; 4 floats each).
     std::array<float, 16> location{};
+    std::vector<std::uint8_t> one_up;
     bool operator==(const ThrowdownMessage &) const = default;
 };
 constexpr std::size_t max_throwdown_series = 48, max_throwdown_params = 1536, max_throwdown_order = 32,

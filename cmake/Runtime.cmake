@@ -21,6 +21,7 @@ add_library(dingosdk_runtime SHARED
     Extension/Multiplayer/Session/session_party.cpp
     Extension/Multiplayer/Session/party_book.cpp
     Extension/UI/NativeMenu/native_menu.cpp
+    Extension/UI/NativeMenu/one_up_menu.cpp
     Extension/UI/NativeMenu/native_menu_rows.cpp
     Extension/UI/NativeMenu/native_menu_multiplayer.cpp
     Extension/UI/NativeMenu/native_menu_dump.cpp
@@ -50,6 +51,11 @@ add_library(dingosdk_runtime SHARED
     Extension/Throwdowns/skate_trick_rule.cpp
     Extension/Throwdowns/graph_throttle.cpp
     Extension/Throwdowns/throwdown_wire.cpp
+    Extension/Throwdowns/one_up_match.cpp
+    Extension/Throwdowns/one_up_wire.cpp
+    Extension/Throwdowns/one_up_runtime.cpp
+    Extension/Throwdowns/one_up_placement.cpp
+    Extension/Throwdowns/one_up_native.cpp
     Extension/Modes/mode_rules.cpp
     Extension/Modes/game_modes.cpp
     Extension/Modes/console_commands.cpp
@@ -217,6 +223,13 @@ file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/menu_fonts.rc"
     "FONT_BODY RCDATA \"${dingosdk_menu_fonts}/Montserrat-SemiBold.ttf\"\n"
     "FONT_BRUSH RCDATA \"${dingosdk_menu_fonts}/PermanentMarker-Regular.ttf\"\n")
 target_sources(dingosdk_runtime PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/menu_fonts.rc")
+# 1-Up's native HUD records and badge (Engine/Vfs/one_up_core_assets.cpp), built into ReSkate.dll
+# when the repository has the bundle; without it 1-Up runs without its own art.
+if(EXISTS "${PROJECT_SOURCE_DIR}/assets/one_up/native_assets.bin")
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/one_up_native_assets.rc"
+        "ONE_UP_NATIVE_ASSETS RCDATA \"${PROJECT_SOURCE_DIR}/assets/one_up/native_assets.bin\"\n")
+    target_sources(dingosdk_runtime PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/one_up_native_assets.rc")
+endif()
 
 # The Bone Cam's X-ray bone sprites (Extension/Modes/bone_sprites.h describes them; the skeleton is
 # a public-domain illustration by Mikael Häggström and LadyofHats, Wikimedia Commons).

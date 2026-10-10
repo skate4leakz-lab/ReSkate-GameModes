@@ -18,6 +18,7 @@
 #include "Extension/Skater/client_source_spawn_internal.h"
 #include "Extension/Skater/no_bail.h"
 #include "Extension/Skater/physics_tuning.h"
+#include "Extension/Throwdowns/one_up_runtime.h"
 #include "Extension/UI/Overlay/overlay.h"
 #include <windows.h>
 #include <shlobj.h>
@@ -960,6 +961,10 @@ void enter_map(const std::string &level) {
 }
 MapData &current_map() { return state().maps[state().map]; }
 bool teleport_allowed(std::string &why) {
+    if (multiplayer::one_up::restricts_session_markers()) {
+        why = "Quit the 1-Up match before using markers or teleporting.";
+        return false;
+    }
     if (multiplayer_session_active() && !session_noclip_allowed()) {
         why = "The host has turned off teleporting in this session.";
         return false;
@@ -1239,7 +1244,7 @@ void observe(std::uintptr_t base, std::uintptr_t client, std::uint64_t now) {
     }
     // A bail: back to the selected marker once the skater has had time to fall.
     if (watch.valid && (!s.wipeouts_known || watch.wipeouts != s.seen_wipeouts)) {
-        if (s.wipeouts_known && s.auto_return) {
+        if (s.wipeouts_known && s.auto_return && !multiplayer::one_up::restricts_session_markers()) {
             const bool marked = current_map().markers[static_cast<std::size_t>(s.slot)].set;
             if (marked) s.return_at = now + static_cast<std::uint64_t>(s.return_delay * 1000.0f);
             say(logging::Level::info, marked ? std::format("Trainer: bail seen; back to marker {} in {:.1f} s.", s.slot + 1, s.return_delay)
@@ -1490,6 +1495,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool playing, const std::s
             refresh_waypoint();
         }
         if (playing) {
+            if (multiplayer::one_up::restricts_session_markers()) s.return_at = 0;
             observe(base, client, now);
             shortcuts();
             update_landing(now);
@@ -1674,6 +1680,8 @@ std::string run(std::string_view verb, const std::vector<std::string> &a) {
     }
     if (v == "marker") {
         const auto action = lower(arg(0));
+        if ((action == "save" || action == "go") && multiplayer::one_up::restricts_session_markers())
+            return "error: markers are disabled during a 1-Up match.";
         const auto slot = slot_argument(a, 1);
         if (!slot) return std::format("error: slots are 1 to {}.", marker_slots);
         if (s.map.empty()) return "error: load a level first.";

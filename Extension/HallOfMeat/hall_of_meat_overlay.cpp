@@ -19,7 +19,7 @@ namespace theme = dingosdk::skate_theme;
 using hall_of_meat::Stat;
 
 // The images: an icon per stat (in Stat's order), then the logo and the card's shapes.
-enum Picture : std::size_t { stat_icons, logo = stat_icons + 8, row_bar, panel, scratches, underline, picture_count };
+enum Picture : std::size_t { stat_icons, logo = stat_icons + 8, row_bar, panel, scratches, underline, checkpoint_ring, checkpoint_bolt, picture_count };
 struct Source {
     const ui::Texture* texture;
     std::uint32_t side;      // fitted into a side x side square, its aspect kept
@@ -29,7 +29,7 @@ constexpr std::array<Source, picture_count> sources{{
     {&ui::stopwatch, 64}, {&ui::wipeout, 64}, {&ui::wipeout_broken, 64}, {&ui::spread_eagle, 64},
     {&ui::airtime, 64}, {&ui::gap_height, 64}, {&ui::flaming_wheel, 64}, {&ui::roll, 64},
     {&ui::thrasher_wordmark, 512}, {&ui::brush_bar, 512}, {&ui::rough_tile, 256}, {&ui::scratches, 512, true},
-    {&ui::streak, 512},
+    {&ui::streak, 512}, {&ui::checkpoint_ring, 256}, {&ui::checkpoint_bolt, 256},
 }};
 using Images = std::array<std::optional<frostbite::Image>, picture_count>;
 
@@ -390,6 +390,19 @@ Shown& shown() {
 }
 } // namespace
 
+bool draw_game_picture_quad(GamePicture picture, const ImVec2 (&corners)[4], ImU32 tint) noexcept {
+    try {
+        Found found;
+        const auto index = picture == GamePicture::checkpoint_ring ? Picture::checkpoint_ring : Picture::checkpoint_bolt;
+        if (!find(index, found)) return false;
+        // Corners: top left, top right, bottom right, bottom left of the picture.
+        ImGui::GetBackgroundDrawList()->AddImageQuad(loaded().atlas->TexID, corners[0], corners[1], corners[2], corners[3], found.uv0,
+                                                     ImVec2(found.uv1.x, found.uv0.y), found.uv1, ImVec2(found.uv0.x, found.uv1.y), tint);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 void prepare_hall_of_meat_images() noexcept {
     try {
         auto& state = reads();

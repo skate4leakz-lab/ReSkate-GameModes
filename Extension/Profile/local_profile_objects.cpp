@@ -1,4 +1,5 @@
 #include "runtime_internal.h"
+#include "Engine/Game/Build/20260929/local_placements.h"
 #include "Extension/Objects/local_placements_runtime.h"
 #include "Extension/Objects/ParkEditor/park_editor_runtime.h"
 #include "Extension/Objects/ParkEditor/park_editor_surface.h"
@@ -50,15 +51,29 @@ bool delete_local_placed_object(std::string_view map, std::uint64_t token) {
     return begin_placement_delete({token});
 }
 bool teleport_local_skater(const std::array<float, 3>& position, std::optional<float> yaw) {
+    // Upright at the spot, facing `yaw` when one was asked for (rows: right, up, forward).
+    const float angle = (yaw && std::isfinite(*yaw) ? *yaw : 0.0f) * 3.14159265f / 180.0f, sy = std::sin(angle), cy = std::cos(angle);
+    return teleport_local_skater_transform({cy, 0, -sy, 0, 0, 1, 0, 0, sy, 0, cy, 0, position[0], position[1], position[2], 1});
+}
+// A whole transform (a native flag's facing basis included). The native teleport manager handles
+// streaming, ground checks and physics reset.
+bool teleport_local_skater_transform(const std::array<float, 16>& transform) {
     std::lock_guard lock(local_runtime().native_mutex);
     auto& r = placements_runtime();
     if (!local_runtime().active || !r.teleport || !r.transition_ctor || !r.transition_destroy) return false;
-    for (const auto v : position)
+    for (const auto v : transform)
         if (!std::isfinite(v) || std::abs(v) > 1e6f) return false;
-    r.position_teleport = position;
-    r.position_teleport_yaw = yaw && std::isfinite(*yaw) ? yaw : std::nullopt;
+    r.position_teleport = transform;
     r.position_teleport_at = GetTickCount64();
     return true;
+}
+bool local_skater_teleport_pending() {
+    std::lock_guard lock(local_runtime().native_mutex);
+    const auto& r = placements_runtime();
+    if (r.position_teleport) return true;
+    std::uintptr_t manager{};
+    std::uint32_t phase{};
+    return read(local_runtime().base + addr::local_placements::teleport_manager, manager) && manager && read(manager, phase) && phase != 0;
 }
 std::optional<float> local_ground_height(float x, float z, float top, float bottom) {
     std::lock_guard lock(local_runtime().native_mutex);

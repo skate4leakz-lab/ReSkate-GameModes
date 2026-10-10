@@ -2,6 +2,8 @@
 #include "native_menu_data.h"
 #include "native_menu_internal.h"
 #include "native_menu_lifetime.h"
+#include "one_up_menu.h"
+#include "Extension/Throwdowns/one_up_placement.h"
 #include "Extension/Modes/game_modes.h"
 #include "Extension/Modes/mode_rules.h"
 #include "Extension/UI/Overlay/overlay.h"
@@ -125,6 +127,11 @@ struct State {
     // instead. Without a grid (it could not be built) our cards join the stock row.
     Value holder, grid;
     Widget original_holder{};
+    // A card just set a game up: its native flag placement opens once the game is there (until then).
+    std::uint64_t flag_after{};
+    // The native 1-UP card (one_up_menu.cpp) when it was on the page: it takes our 1-Up card's
+    // place in the grid. Its description label's text is put back when the grid goes.
+    Original one_up;
 };
 State &state() {
     static auto *value = new State;
@@ -137,6 +144,7 @@ void reset(bool generations_too) {
     s.owner.store(0);
     s.anchor_asset = s.primary_input = 0;
     s.page = s.cards = s.source_label = s.holder = s.grid = {};
+    s.one_up = {};
     s.original_holder = {};
     s.mode_cards.clear();
     s.original_body = s.original_back = s.original_actions = {};
@@ -511,8 +519,14 @@ std::optional<CardList> card_list(const Context &c, Value p) {
             const auto hash = read<std::uint32_t>(read<Address>(value.type));
             if (hash == linear_list.hash && size(value.type) == linear_list.size) {
                 unsigned count{}, stride{};
-                auto bytes = c.array(c.field(value, rows_field), 4, count, stride);
-                if (count != 3 || stride != sizeof(Ref)) return {};
+                auto bytes = c.array(c.field(value, rows_field), 32, count, stride);
+                if (count < 3 || stride != sizeof(Ref)) return {};
+                // A fourth card is 1-Up's (one_up_menu.cpp adds it before we look).
+                if (count > 3) {
+                    Ref fourth{};
+                    std::memcpy(&fourth, bytes.data() + 3 * stride, stride);
+                    if (count != 4 || !fourth.handle || fourth.handle != native_one_up_card()) return {};
+                }
                 // Skate Jam's card navigates through ThrowdownerActive; JamSession is its mode.
                 const std::array<std::string_view, 3> expected{"ThrowdownSkate", "SpotBattle", "ThrowdownerActive"};
                 for (unsigned i = 0; i < 3; ++i) {
@@ -563,6 +577,8 @@ void shrink_all(const Context &c) {
     const auto k = s.grid.handle ? grid_scale : row_scale;
     for (const auto &o : s.originals) shrink(c, o.tile, o.category, o.description, o, k);
     for (const auto &card : s.mode_cards) shrink(c, card.tile, card.category, card.description, s.originals[1], k);
+    if (s.one_up.tile.handle && c.type_of(s.one_up.tile.handle) == s.one_up.tile.type)
+        shrink(c, s.one_up.tile, s.one_up.category, s.one_up.description, s.originals[1], k);
 }
 bool ours(const State &s, Handle handle) {
     return std::any_of(s.mode_cards.begin(), s.mode_cards.end(), [&](const ModeCard &card) { return card.tile.handle == handle; });
@@ -584,6 +600,8 @@ void release(const Context &c) {
             if (s.grid.handle)
                 for (const auto &o : s.originals)
                     if (o.label.handle && c.type_of(o.label.handle) == o.label.type) c.text(c.field(o.label, text_field), o.text);
+            if (s.grid.handle && s.one_up.label.handle && c.type_of(s.one_up.label.handle) == s.one_up.label.type)
+                c.text(c.field(s.one_up.label, text_field), s.one_up.text);
             if (s.cards.handle && c.type_of(s.cards.handle) == s.cards.type) {
                 unsigned count{}, stride{};
                 auto bytes = c.array(c.field(s.cards, rows_field), 32, count, stride);
@@ -679,7 +697,16 @@ void build_grid(const Context &c) {
     auto &s = state();
     std::vector<Ref> tiles;
     for (const auto &o : s.originals) tiles.push_back({0, o.tile.handle});
-    for (const auto &card : s.mode_cards) tiles.push_back({0, card.tile.handle});
+    bool one_up_placed = false;
+    for (const auto &card : s.mode_cards) {
+        // 1-Up's own card goes where ours would be in the registry's order.
+        if (s.one_up.tile.handle && !one_up_placed && modes::card_rank(modes::Mode::one_up) < modes::card_rank(card.mode)) {
+            tiles.push_back({0, s.one_up.tile.handle});
+            one_up_placed = true;
+        }
+        tiles.push_back({0, card.tile.handle});
+    }
+    if (s.one_up.tile.handle && !one_up_placed) tiles.push_back({0, s.one_up.tile.handle});
     const auto &sized = s.originals[1];
     const float tile_w = sized.tile_size[0] * grid_scale.width, tile_h = sized.tile_size[1] * grid_scale.height;
     const float row_w = static_cast<float>(cards_per_row) * tile_w + static_cast<float>(cards_per_row - 1) * card_gap;
@@ -690,6 +717,7 @@ void build_grid(const Context &c) {
     for (const auto &o : s.originals)
         if (o.label.type && size(o.label.type) == label_schema.size) c.text(c.field(o.label, text_field), "");
     for (const auto &card : s.mode_cards) c.text(c.field(card.label, text_field), "");
+    if (s.one_up.label.type && size(s.one_up.label.type) == label_schema.size) c.text(c.field(s.one_up.label, text_field), "");
     std::vector<Handle> anchors;
     // An empty first row keeps the grid clear of the page's title.
     {
@@ -742,7 +770,7 @@ void build_grid(const Context &c) {
 // The grid where the stock row is shown, unless the mode panel is up.
 void mount_grid(const Context &c) {
     auto &s = state();
-    if (s.details || !s.grid.handle || c.type_of(s.holder.handle) != s.holder.type) return;
+    if (s.details || native_one_up_setup_open() || !s.grid.handle || c.type_of(s.holder.handle) != s.holder.type) return;
     if (read<Widget>(c.address(s.holder)).data.handle != s.grid.handle)
         c.set(s.holder, Widget{asset(c, "UI/Foundations/Components/Lists/LinearList/Widget/LinearList_Widget"), {0, s.grid.handle}});
 }
@@ -758,7 +786,8 @@ void publish_cards(const Context &c) {
     std::vector<Ref> wanted;
     for (const auto &ref : refs)
         if (!ours(s, ref.handle)) wanted.push_back(ref);
-    require(wanted.size() == 3, "Game modes card: card list was replaced.");
+    require(wanted.size() == 3 || (wanted.size() == 4 && wanted[3].handle == s.one_up.tile.handle && s.one_up.tile.handle),
+            "Game modes card: card list was replaced.");
     for (const auto &card : s.mode_cards) wanted.push_back({0, card.tile.handle});
     const bool same = refs.size() == wanted.size() && std::equal(refs.begin(), refs.end(), wanted.begin(), [](const Ref &a, const Ref &b) {
         return a.handle == b.handle && a.record == b.record;
@@ -773,9 +802,18 @@ void initialize(const Context &c, Value p, Value list, Value holder) {
     s.owner.store(p.handle);
     s.next_id = 0;
     unsigned count{}, stride{};
-    auto bytes = c.array(c.field(list, rows_field), 3, count, stride);
+    auto bytes = c.array(c.field(list, rows_field), 4, count, stride);
     std::vector<Ref> refs(count);
     std::memcpy(refs.data(), bytes.data(), bytes.size());
+    // The native 1-UP card, kept apart from the three stock ones.
+    if (refs.size() == 4) {
+        const auto tile = reference(c, refs.back());
+        const auto cat = category(c, tile), desc = description(c, cat);
+        const auto label = reference(c, read<Widget>(c.address(c.field(desc, widget))).data);
+        s.one_up = {tile, cat, desc, {}, {}, 0, 0, label,
+                    label.type && size(label.type) == label_schema.size ? c.text(c.field(label, text_field), 2048) : std::string()};
+        refs.pop_back();
+    }
     for (const auto &ref : refs) {
         auto tile = reference(c, ref), cat = category(c, tile), desc = description(c, cat);
         const auto label = reference(c, read<Widget>(c.address(c.field(desc, widget))).data);
@@ -793,6 +831,8 @@ void initialize(const Context &c, Value p, Value list, Value holder) {
     for (const auto mode : modes::card_order) {
         // skate.'s own S.K.A.T.E. card is on the page already; ours is in the ReSkate menu.
         if (mode == modes::Mode::skate) continue;
+        // Nor ours for 1-Up when the native 1-UP card (flag, HUD, its own rules) is there.
+        if (mode == modes::Mode::one_up && s.one_up.tile.handle) continue;
         const auto key = modes::mode_key(mode);
         if (key.empty() || modes::mode_name(mode).empty() || !keys.insert(std::string(key)).second) {
             logging::log(logging::Level::warning, logging::Channel::ui, "Game modes card: mode {} has no usable key or name; no card.",
@@ -943,6 +983,9 @@ void render(const Context &c) {
                                                : std::string("Play area: the whole map"));
             if (spots) note("spots", std::format("Spots placed: {}", m.points));
             action("start", "START GAME", "start");
+            // skate.'s own Throwdown flag: where everyone starts (Deathrace's start gate), with the
+            // game's waiting card and its Start for the leader.
+            row(c, shown, "place-flag", race ? "PLACE START FLAG (START GATE)" : "PLACE START FLAG", "flag");
             if (race) row(c, shown, "place-route", "PLACE ROUTE AND CHECKPOINTS", "place", "points");
             if (spots) row(c, shown, "place-spots", "PLACE SPOTS", "place", "points");
             if (!race) {
@@ -1014,6 +1057,7 @@ namespace {
 bool release_now(std::uintptr_t base, bool generations_too) noexcept;
 }
 bool release_native_modes_card(std::uintptr_t base) noexcept { return release_now(base, true); }
+bool native_modes_card_active() noexcept { return state().page.handle != 0; }
 namespace {
 // After a failure the same page generation is left alone (`generations_too` false), so a card
 // that cannot be built is not rebuilt every few seconds.
@@ -1062,6 +1106,21 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
             s.manager = manager;
             s.base = base;
             if (s.page.handle && c.type_of(s.page.handle) != s.page.type) release(c);
+            // The 1-UP card was added after our cards were built: build them again with it.
+            if (s.page.handle && !s.details && !s.one_up.tile.handle && native_one_up_card() && s.cards.handle &&
+                c.type_of(s.cards.handle) == s.cards.type) {
+                unsigned count{}, stride{};
+                const auto bytes = c.array(c.field(s.cards, rows_field), 32, count, stride);
+                for (unsigned i = 0; i < count && stride == sizeof(Ref); ++i) {
+                    Ref ref{};
+                    std::memcpy(&ref, bytes.data() + i * stride, stride);
+                    if (ref.handle != native_one_up_card()) continue;
+                    const std::pair<Handle, Handle> generation{s.page.handle, s.cards.handle};
+                    release(c);
+                    s.generations.erase(generation);
+                    break;
+                }
+            }
             // `mode grid on|off` changed: build this page's cards again in the other layout.
             if (s.page.handle && !s.details && modes::throwdown_grid() != (s.grid.handle != 0)) {
                 const std::pair<Handle, Handle> generation{s.page.handle, s.cards.handle};
@@ -1091,18 +1150,40 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
             } else {
                 // Keep the cards' callbacks reserved while a panel shows.
                 for (const auto &card : s.mode_cards) callback(c, "card", card.key);
+                // 1-Up's card wears its own blue 1UP badge (built into ReSkate.dll with its HUD art).
+                for (const auto &card : s.mode_cards)
+                    if (card.mode == modes::Mode::one_up)
+                        publish_texture(c, std::array{c.field(card.category, 0x189084da), c.field(card.category, 0xc2917efc)},
+                                        "UI/ReSkate/OneUp/img_OneUp_Blue_1024");
                 shrink_all(c); // the native list can restore authored sizes when it remounts
                 if (s.grid.handle) mount_grid(c);
                 else publish_cards(c);
                 for (const auto &a : pending) {
                     if (a.generation != s.owner.load()) continue;
                     // A mode's card sets that mode up (unless a game is on) and shows its panel.
-                    if (a.command == "card") {
-                        if (!modes::menu_view().in_game) run.push_back({a.generation, "mode", "new " + a.argument, a.pass});
-                        switch_page(c, true);
+                    // A mode's card sets that mode up and goes straight to skate.'s own flag
+                    // placement, like the 1-UP card; with a game on it shows the game's panel.
+                    if (a.command == "card" && a.argument == modes::mode_key(modes::Mode::one_up)) {
+                        // 1-Up is the native one (one_up_menu.cpp): skate.'s own setup and flag.
+                        if (!open_native_one_up_setup()) s.status = "1-Up can't start right now (a game or flag is up).";
+                    } else if (a.command == "card") {
+                        if (!modes::menu_view().in_game) {
+                            run.push_back({a.generation, "mode", "new " + a.argument, a.pass});
+                            s.flag_after = GetTickCount64() + 4000;
+                            s.status = "Place your start flag.";
+                        } else
+                            switch_page(c, true);
                     }
                     else if (a.command == "back") switch_page(c, false);
                     else if (a.command == "mode") run.push_back(a);
+                    // The native flag: Spot Battle's own placement (one_up_placement.cpp) for this game.
+                    else if (a.command == "flag") {
+                        if (one_up::begin_mode_flag_placement()) {
+                            switch_page(c, false);
+                            s.status = "Place your start flag.";
+                        } else
+                            s.status = "The flag can't be placed right now (a 1-Up or another flag is up).";
+                    }
                     // Placing flies the free camera over the world: close Throwdowns the way its own
                     // Back does (ThrowdownerExit), then start placing.
                     else if (a.command == "place") {
@@ -1110,6 +1191,13 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                         if (!navigate(c, "ThrowdownerExit")) s.status = "Close the menu to place.";
                         run.push_back({a.generation, "mode", "place " + a.argument, a.pass});
                     }
+                }
+                if (s.flag_after && modes::flag_game()) {
+                    s.flag_after = 0;
+                    if (!one_up::begin_mode_flag_placement()) switch_page(c, true); // no flag now: the panel
+                } else if (s.flag_after && GetTickCount64() > s.flag_after) {
+                    s.flag_after = 0;
+                    switch_page(c, true); // the game was not set up (the panel says why)
                 }
                 if (s.grid.handle) mount_grid(c); // straight back after Back restored the page
                 if (s.details) render(c);

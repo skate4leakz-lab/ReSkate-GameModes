@@ -103,6 +103,7 @@ struct SkateMenu {
     ImFont* bold = nullptr;
     ImFont* title = nullptr;    // brushed page titles
     ImFont* heading = nullptr;  // tile and section headers
+    ImFont* countdown = nullptr; // full-resolution fallback countdown digits
     ImFont* mono = nullptr;
     // The same faces baked large (printable ASCII only), for text drawn far past the sizes above
     // (the game modes HUD's countdown, callouts and results), which would show the atlas's pixels.

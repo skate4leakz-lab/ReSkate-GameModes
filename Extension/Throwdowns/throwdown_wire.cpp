@@ -1,4 +1,5 @@
 #include "throwdown_wire.h"
+#include "one_up_wire.h"
 #include <cmath>
 #include <bit>
 #include <algorithm>
@@ -83,6 +84,8 @@ bool valid_throwdown(const ThrowdownMessage &m) noexcept {
     case ThrowdownMessage::Kind::beacon:
         return m.leader && std::all_of(m.location.begin(), m.location.end(),
                                        [](float v) { return std::isfinite(v) && std::abs(v) < 1e6f; });
+    case ThrowdownMessage::Kind::one_up:
+        return m.one_up.size() >= 26 && m.one_up.size() <= 1024 && m.one_up.front() == one_up::wire_version;
     }
     return false;
 }
@@ -94,6 +97,7 @@ std::vector<std::uint8_t> encode_throwdown(const ThrowdownMessage &m) {
     w.integer(m.leader, 8);
     w.integer(m.id, 4);
     switch (m.kind) {
+    case ThrowdownMessage::Kind::one_up: w.blob(m.one_up, 2); break;
     case ThrowdownMessage::Kind::offer:
         w.integer(m.series.size(), 1);
         w.bytes.insert(w.bytes.end(), m.series.begin(), m.series.end());
@@ -145,11 +149,12 @@ std::optional<ThrowdownMessage> decode_throwdown(std::span<const std::uint8_t> b
         Reader r{bytes};
         ThrowdownMessage m;
         const auto kind = r.integer(1);
-        if (kind < 1 || kind > 15) return {};
+        if (kind < 1 || kind > 16) return {};
         m.kind = static_cast<ThrowdownMessage::Kind>(kind);
         m.leader = r.integer(8);
         m.id = static_cast<std::uint32_t>(r.integer(4));
         switch (m.kind) {
+        case ThrowdownMessage::Kind::one_up: m.one_up = r.blob(2, 1024); break;
         case ThrowdownMessage::Kind::offer: {
             const auto length = r.integer(1);
             if (!r.ok || length > max_throwdown_series || length > bytes.size() - r.at) return {};

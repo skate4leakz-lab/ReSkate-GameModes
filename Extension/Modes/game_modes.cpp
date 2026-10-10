@@ -9,6 +9,7 @@
 #include "Engine/Core/Platform/memory.h"
 #include "Extension/Multiplayer/Hud/native_party.h"
 #include "trick_gestures.h"
+#include "Extension/Throwdowns/one_up_placement.h"
 #include "Engine/Game/UI/game_view.h"
 #include "Engine/Core/Log/logging.h"
 #include "Extension/Console/commands.h"
@@ -204,6 +205,16 @@ struct State {
     std::mutex hud_mutex;
     overlay::ModesHud hud;
     overlay::ModesMenu menu;
+    NativeMatch native; // for skate.'s own HUD widgets (under hud_mutex)
+    // A native Throwdown flag placed for the game led here (its key), and the way it faces: the
+    // game starts at the flag rather than wherever the leader stands when they press Start.
+    std::uint64_t flag_key{};
+    float flag_yaw{};
+    // For the native menu's thread: the game a flag may be placed for (published each tick), and a
+    // placed flag waiting for the game thread (under hud_mutex).
+    std::atomic<std::uint64_t> flaggable{};
+    std::atomic<bool> counting_down{};
+    std::optional<std::pair<Vec3, float>> pending_flag;
 };
 // `mode grid on|off`: the Throwdowns cards in a grid (seen working in game, modes.13) or one row.
 std::atomic<bool> throwdown_grid_on{true};
@@ -733,6 +744,9 @@ void track_skater(State &s, bool in_world, std::uint64_t now) {
     }
 }
 
+// A game's identity across machines (its leader and id).
+std::uint64_t game_key(const Game &g) { return g.leader * 0x9E3779B97F4A7C15ULL ^ g.id; }
+
 // The countdown: everyone in the game is put at the start, spread out so nobody lands on anyone,
 // in the same order on every machine (where the session allows teleporting; elsewhere they skate
 // there). Deathrace lines up across its start gate; a circle's players stand in a ring around its
@@ -769,9 +783,9 @@ void line_up(State &s) {
     if (g.settings.mode == Mode::race && g.settings.points.size() >= 2) {
         const auto &start = g.settings.points[0];
         const float yaw = gate_heading(g.settings, 0) * 3.14159265f / 180.0f, dx = std::sin(yaw), dz = std::cos(yaw);
-        // Side by side across the gate, a step behind its line.
+        // Side by side across the gate, a few steps behind its line, facing through it.
         const float across = (index - (count - 1.0f) * 0.5f) * 2.5f;
-        spot = {start[0] - dz * across - dx * 1.5f, start[1], start[2] + dx * across - dz * 1.5f};
+        spot = {start[0] - dz * across - dx * 3.0f, start[1], start[2] + dx * across - dz * 3.0f};
     } else {
         Vec3 centre{};
         if (g.settings.area_radius > 0 && !g.settings.corners.empty()) centre = g.settings.corners[0];
@@ -783,7 +797,8 @@ void line_up(State &s) {
         const float ring = count <= 1 ? 0.0f : spread, angle = 6.2831853f * index / std::max(1.0f, count);
         spot = {centre[0] + std::cos(angle) * ring, centre[1], centre[2] + std::sin(angle) * ring};
         // Round the circle everyone faces its middle; alone, the way the leader set it up.
-        teleport_to(spot, ring > 0 ? heading_towards(spot, centre) : s.heading);
+        const bool flagged = s.flag_key == game_key(g);
+        teleport_to(spot, ring > 0 ? heading_towards(spot, centre) : flagged ? s.flag_yaw : s.heading);
         return;
     }
     teleport_to(spot, gate_heading(g.settings, 0)); // down the start gate
@@ -1438,6 +1453,66 @@ void fill_trick_parts(overlay::ModesHud &h, const std::string &trick, std::strin
     }
 }
 
+// The local player's game for skate.'s own HUD widgets: the intro, the 3-2-1, the score block (the
+// leader's value by the crown, the local player's under it, every player's row) with its clock,
+// and the results board.
+NativeMatch native_snapshot(State &s) {
+    NativeMatch n;
+    if (!s.game || !s.game->state) return n;
+    const auto &g = *s.game;
+    const auto &st = *g.state;
+    const auto self = self_id(s);
+    const auto *me = standing(g, self);
+    if (!me && !g.leading) return n; // watching someone else's game: their HUD is theirs
+    const auto mode = g.settings.mode;
+    n.active = true;
+    n.key = game_key(g);
+    n.phase = static_cast<std::uint8_t>(st.phase);
+    n.remaining_ms = st.remaining_ms;
+    n.countdown_ms = countdown_ms;
+    n.clock_ms = timed(mode) ? g.settings.duration_s * 1000 : 0;
+    n.leading = g.leading;
+    n.players = st.standings.size();
+    std::string title(mode_name(mode));
+    for (auto &c : title) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    n.title = title;
+    n.tagline = std::string(mode_tagline(mode));
+    if (n.tagline.empty()) n.tagline = std::string(mode_summary(mode));
+    // The headline over the score block: the mode, and whose turn it is or who is it.
+    n.headline = title;
+    if (st.turn && (mode == Mode::one_up || mode == Mode::skate || mode == Mode::tag)) {
+        std::string who = st.turn == self ? std::string("YOU") : name_of(s, st.turn);
+        for (auto &c : who) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        n.headline += mode == Mode::tag ? "  /  " + who + (st.turn == self ? " ARE IT" : " IS IT") : "  /  " + who;
+    }
+    const auto value_of = [&](const Standing &p) -> std::string {
+        switch (mode) {
+        case Mode::jam:
+        case Mode::meat:
+        case Mode::domination: return grouped(p.score);
+        case Mode::one_up: return grouped(p.score);
+        case Mode::race:
+            return static_cast<std::size_t>(p.score) >= g.settings.points.size() && p.aux ? std::format("{:.1f}s", p.aux / 1000.0)
+                                                                                         : std::format("{}/{}", p.score, g.settings.points.size());
+        case Mode::graffiti: return std::to_string(p.score);
+        case Mode::tag:
+        case Mode::infection:
+        case Mode::hide: return std::format("{:.1f}s", p.score / 10.0);
+        case Mode::skate: return p.aux > 0 ? skate_letters(static_cast<unsigned>(p.aux), g.settings.strikes) : std::string("-");
+        }
+        return grouped(p.score);
+    };
+    for (const auto &p : st.standings) {
+        NativeMatch::Row row{p.player, name_of(s, p.player), st.phase == Phase::setup ? std::string("READY") : value_of(p),
+                             p.player == self, p.up || (st.turn && p.player == st.turn), p.out};
+        n.rows.push_back(std::move(row));
+    }
+    if (!n.rows.empty()) n.best = n.rows.front().value;
+    if (me) n.mine = value_of(*me);
+    if (st.phase == Phase::results && !st.standings.empty()) n.winner = name_of(s, st.standings.front().player);
+    return n;
+}
+
 void build_hud(State &s, std::uint64_t now) {
     overlay::ModesHud h;
     if (s.game) {
@@ -1816,9 +1891,13 @@ void build_hud(State &s, std::uint64_t now) {
                 h.invite_fade = std::clamp(std::min(age / 250.0f, (invite_ms - age) / 1000.0f), 0.0f, 1.0f);
             }
     }
+    auto native = native_snapshot(s);
+    s.counting_down.store(s.game && s.game->state && s.game->state->phase == Phase::countdown && standing(*s.game, self_id(s)));
+    s.flaggable.store(s.game && s.game->leading && (!s.game->state || s.game->state->phase != Phase::results) ? game_key(*s.game) : 0);
     std::lock_guard lock(s.hud_mutex);
     s.hud = std::move(h);
     s.menu = std::move(m);
+    s.native = std::move(native);
 }
 
 std::optional<float> number(const std::vector<std::string> &arguments, std::size_t index) {
@@ -1840,9 +1919,18 @@ std::string help() {
 }
 } // namespace
 
+std::string apply_flag(State &s, const Vec3 &spot, float yaw_degrees);
 std::vector<std::vector<std::uint8_t>> tick(const SessionInput &input) {
     auto &s = state();
     const auto now = now_ms();
+    // A native flag placed from the menu's thread.
+    std::optional<std::pair<Vec3, float>> flag;
+    {
+        std::lock_guard lock(s.hud_mutex);
+        flag = std::exchange(s.pending_flag, std::nullopt);
+    }
+    if (flag)
+        if (auto said = apply_flag(s, flag->first, flag->second); !said.starts_with("error")) notice(s, std::move(said));
     s.session = input.local != 0;
     if (!s.session && !s.lobby_counted.empty()) { // left the lobby: a new one starts a new leaderboard
         s.lobby.clear();
@@ -2209,6 +2297,13 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         return "Game stopped.";
     }
     if (g.referee) return "error: the game has started; only `mode stop` now.";
+    if (v == "flag") {
+        // skate.'s own Throwdown flag (Spot Battle's placement): where everyone starts.
+        s.flaggable.store(game_key(g));
+        return multiplayer::one_up::begin_mode_flag_placement(true)
+            ? std::string("Place your start flag: skate.'s flag placement is opening.")
+            : std::string("error: the flag can't be placed right now (a 1-Up or another flag is up, or no world is loaded).");
+    }
     const auto changed = [&](std::string text) {
         settings_changed(g);
         return text;
@@ -2245,10 +2340,11 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
             return "Close the menu and skate to each corner: D-pad Right (Enter) adds one, D-pad Down (End) finishes.";
         }
         if (what == "points") {
-            if (g.settings.mode == Mode::race) { // a route is skated again from its start
-                g.settings.points.clear();
-                g.settings.yaws.clear();
-                g.settings.widths.clear();
+            if (g.settings.mode == Mode::race) { // a route is skated again from its start (a native flag's stays)
+                const bool flagged = s.flag_key == game_key(g) && !g.settings.points.empty();
+                g.settings.points.resize(flagged ? 1 : 0);
+                g.settings.yaws.resize(flagged && !g.settings.yaws.empty() ? 1 : 0);
+                g.settings.widths.resize(flagged && !g.settings.widths.empty() ? 1 : 0);
                 s.yaw_offset = 0;
                 s.draft_width = std::clamp(g.settings.radius, min_gate_half_width, max_gate_half_width);
                 settings_changed(g);
@@ -2330,7 +2426,8 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         }, "Radius (m)");
     if (v == "start") {
         if (const auto why = missing(g.settings); !why.empty()) return "error: " + why;
-        if (s.skater) {
+        // Started from a native flag: everyone gathers at the flag. Else where the leader stands.
+        if (s.skater && s.flag_key != game_key(g)) {
             g.settings.spawn = s.position;
             g.settings.has_spawn = true;
             settings_changed(g);
@@ -2374,6 +2471,46 @@ bool local_meat_game() noexcept {
            standing(*s.game, self_id(s));
 }
 bool local_session() noexcept { return state().session; }
+
+NativeMatch native_match() {
+    auto &s = state();
+    std::lock_guard lock(s.hud_mutex);
+    return s.native;
+}
+std::uint64_t flag_game() noexcept { return state().flaggable.load(); }
+bool countdown_active() noexcept { return state().counting_down.load(); }
+std::string flag_placed(const std::array<float, 3> &spot, float yaw_degrees) {
+    auto &s = state();
+    if (!s.flaggable.load()) return "error: no game of yours to place a flag for.";
+    std::lock_guard lock(s.hud_mutex);
+    s.pending_flag = std::pair{spot, yaw_degrees};
+    return "Flag placed: the game starts there.";
+}
+std::string apply_flag(State &s, const Vec3 &spot, float yaw_degrees) {
+    if (!s.game || !s.game->leading) return "error: no game of yours to place a flag for.";
+    auto &g = *s.game;
+    if (g.referee) return "error: the game has started already.";
+    g.settings.spawn = spot;
+    g.settings.has_spawn = true;
+    // Deathrace: the flag is the start gate (the route's checkpoints are placed from it on).
+    if (g.settings.mode == Mode::race) {
+        if (g.settings.points.empty()) {
+            g.settings.points.push_back(spot);
+            g.settings.yaws.assign(1, yaw_degrees);
+            g.settings.widths.assign(1, std::clamp(g.settings.radius, min_gate_half_width, max_gate_half_width));
+        } else {
+            g.settings.points.front() = spot;
+            if (g.settings.yaws.empty()) g.settings.yaws.push_back(yaw_degrees);
+            else g.settings.yaws.front() = yaw_degrees;
+        }
+    }
+    s.flag_key = game_key(g);
+    s.flag_yaw = yaw_degrees;
+    settings_changed(g);
+    logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: native flag for {} at ({:.1f}, {:.1f}, {:.1f}), facing {:.0f}.",
+                 mode_name(g.settings.mode), spot[0], spot[1], spot[2], yaw_degrees);
+    return std::format("{} flag placed. Everyone starts here.", mode_name(g.settings.mode));
+}
 
 overlay::ModesHud hud() {
     auto &s = state();
