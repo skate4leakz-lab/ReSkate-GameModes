@@ -35,6 +35,10 @@ inline constexpr bool hunt_like(Mode m) noexcept { return m == Mode::infection |
 std::string_view mode_name(Mode) noexcept;    // "Spot Jam"
 std::string_view mode_key(Mode) noexcept;     // "jam": what `mode new` takes
 std::string_view mode_summary(Mode) noexcept; // one line on how it is played
+std::string_view mode_tagline(Mode) noexcept; // a shorter line, for its card in skate.'s Throwdowns menu
+// The order modes are offered in (Throwdowns cards): the newest and most played first.
+inline constexpr Mode card_order[]{Mode::tag,  Mode::infection, Mode::hide,       Mode::skate,    Mode::race,
+                                   Mode::meat, Mode::jam,       Mode::one_up,     Mode::domination, Mode::graffiti};
 std::optional<Mode> parse_mode(std::string_view) noexcept;
 bool timed(Mode) noexcept; // ends when the clock runs out (1-Up ends on strikes instead)
 

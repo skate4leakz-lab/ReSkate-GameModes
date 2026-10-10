@@ -3,6 +3,7 @@
 #include "native_menu_internal.h"
 #include "native_menu_lifetime.h"
 #include "Extension/Modes/game_modes.h"
+#include "Extension/Modes/mode_rules.h"
 #include "Extension/UI/Overlay/overlay.h"
 #include "Engine/Core/Log/logging.h"
 #include "Engine/Game/Build/20260929/engine.h"
@@ -38,27 +39,30 @@ constexpr std::uint32_t content = 0x716496c8, items = 0x61742cb4, widget = 0x214
     callback_field = 0x9c76b86c, navigation_field = 0xb1e14cd6, page_actions = 0xd2118ca8, title_path = 0x3781b603;
 constexpr std::uint32_t clip_field = 0x4554761c; // LinearList: clip to its bounds (and scroll to focus)
 
-// One card per mode, after the three stock ones. `icon` is the stock card whose art it borrows
-// (0 S.K.A.T.E., 1 Spot Battle, 2 Skate Jam's plain Throwdown mark).
-struct ModeEntry {
-    const char *key, *name, *blurb;
-    unsigned icon;
-};
-constexpr std::array<ModeEntry, 10> mode_entries{{
-    {"tag", "SKATE TAG", "One skater is it. Get close to tag someone else. Least time spent it wins.", 2},
-    {"infection", "INFECTION", "The infected turn into the Grim Reaper and hunt the rest. Survive the longest.", 2},
-    {"hide", "HIDE & SEEK", "Hide while the seeker's screen is black, then stay hidden. Found skaters seek too.", 2},
-    {"skate", "S.K.A.T.E.", "Set a trick, everyone copies it or takes a letter. You pick the tricks that count.", 0},
-    {"race", "DEATHRACE", "Race through every gate in order. First over the finish wins.", 2},
-    {"meat", "HALL OF MEAT", "Bail as hard as you can. Every slam scores its meat.", 1},
-    {"jam", "SPOT JAM", "Land lines inside the area. Every line adds to your score.", 1},
-    {"1up", "1-UP", "Take turns beating the last score or take a strike.", 1},
-    {"domination", "DOMINATION", "Take spots with your best line and hold them to score.", 1},
-    {"graffiti", "GRAFFITI", "Grind it, gap it: what you skate takes your colour. Most tags wins.", 1},
-}};
-// Our card for a mode: a private tile, its category and description, and its description label.
+// The stock card whose art a mode's card borrows: 0 S.K.A.T.E., 1 Spot Battle, 2 Skate Jam's plain
+// Throwdown mark (also the fallback for a mode not listed here).
+unsigned card_art(modes::Mode mode) {
+    using modes::Mode;
+    switch (mode) {
+    case Mode::skate: return 0;
+    case Mode::meat:
+    case Mode::jam:
+    case Mode::one_up:
+    case Mode::domination:
+    case Mode::graffiti: return 1;
+    default: return 2;
+    }
+}
+std::string upper(std::string_view text) {
+    std::string out(text);
+    for (auto &ch : out) ch = static_cast<char>(ch >= 'a' && ch <= 'z' ? ch - 'a' + 'A' : ch);
+    return out;
+}
+// Our card for a mode (from the game modes' own registry, mode_rules.h): a private tile, its
+// category and description, and its description label.
 struct ModeCard {
-    const ModeEntry *mode{};
+    modes::Mode mode{};
+    std::string key, name;
     Value tile, category, description, label;
 };
 using Action = MenuAction;
@@ -529,22 +533,24 @@ void release(const Context &c) {
 }
 // A card for `mode`: a private copy of Spot Battle's tile with the mode's name, description and a
 // stock card's art. Its button calls back with the mode (the native navigation id is cleared).
-ModeCard mode_card(const Context &c, const ModeEntry &mode) {
+ModeCard mode_card(const Context &c, modes::Mode mode) {
     auto &s = state();
     const auto &donor = s.originals[1];
-    ModeCard card{&mode};
+    ModeCard card{mode, std::string(modes::mode_key(mode)), upper(modes::mode_name(mode))};
+    auto blurb = std::string(modes::mode_tagline(mode));
+    if (blurb.empty()) blurb = modes::mode_summary(mode);
     const auto card_widget = read<Widget>(c.address(c.path(donor.tile, {widget, widget})));
     card.tile = make(c, tile_schema);
     c.copy(card.tile, c.address(donor.tile));
     card.category = make(c, category_schema);
     c.copy(card.category, c.address(donor.category));
     for (const auto hash : {0x189084daU, 0xc2917efcU})
-        c.copy(c.field(card.category, hash), c.address(c.field(s.originals[mode.icon].category, hash)));
+        c.copy(c.field(card.category, hash), c.address(c.field(s.originals[card_art(mode)].category, hash)));
     card.description = make(c, anchor_schema);
     c.copy(card.description, c.address(donor.description));
     card.label = make(c, label_schema);
     c.copy(card.label, c.address(s.source_label));
-    c.text(c.field(card.label, text_field), mode.blurb);
+    c.text(c.field(card.label, text_field), blurb);
     c.set(c.field(card.label, 0x042924a4), true);
     auto desc_widget = read<Widget>(c.address(c.field(card.description, widget)));
     desc_widget.data = {0, card.label.handle};
@@ -552,13 +558,13 @@ ModeCard mode_card(const Context &c, const ModeEntry &mode) {
     auto cat_widget = read<Widget>(c.address(c.field(card.category, widget)));
     cat_widget.data = {0, card.description.handle};
     c.set(c.field(card.category, widget), cat_widget);
-    c.text(c.path(card.category, {0x77b8ed0b, text_field}), mode.name);
+    c.text(c.path(card.category, {0x77b8ed0b, text_field}), card.name);
     c.set(c.path(card.category, {0x77b8ed0b, 0x042924a4}), true);
     auto cw = card_widget;
     cw.data = {0, card.category.handle};
     c.set(c.path(card.tile, {widget, widget}), cw);
     c.text(c.field(primary(c, card.tile), navigation_field), "");
-    c.set(c.field(primary(c, card.tile), callback_field), callback(c, "card", mode.key));
+    c.set(c.field(primary(c, card.tile), callback_field), callback(c, "card", card.key));
     return card;
 }
 // The three stock cards, then ours; the row clips to its bounds so it scrolls to the focused card.
@@ -598,7 +604,17 @@ void initialize(const Context &c, Value p, Value list) {
     s.anchor_asset = read<Widget>(c.address(c.path(donor.tile, {widget, widget}))).blueprint;
     s.source_label = reference(c, read<Widget>(c.address(c.field(donor.description, widget))).data);
     require(s.source_label.type && size(s.source_label.type) == label_schema.size, "Game modes card: description label unavailable.");
-    for (const auto &mode : mode_entries) s.mode_cards.push_back(mode_card(c, mode));
+    // One card per registered mode, each once; a mode without a key or name gets none (and says so).
+    std::set<std::string> keys;
+    for (const auto mode : modes::card_order) {
+        const auto key = modes::mode_key(mode);
+        if (key.empty() || modes::mode_name(mode).empty() || !keys.insert(std::string(key)).second) {
+            logging::log(logging::Level::warning, logging::Channel::ui, "Game modes card: mode {} has no usable key or name; no card.",
+                         static_cast<int>(mode));
+            continue;
+        }
+        s.mode_cards.push_back(mode_card(c, mode));
+    }
     s.original_body = make(c, presenter);
     c.copy(s.original_body, c.address(body(c, p)));
     s.original_back = make(c, action_schema);
@@ -691,10 +707,9 @@ void footer_action(const Context &c, Value button_value, const std::string &text
         c.array(actions, bytes, 1);
     }
 }
-const char *mode_title(const std::string &key) {
-    for (const auto &m : mode_entries)
-        if (key == m.key) return m.name;
-    return "GAME";
+std::string mode_title(const std::string &key) {
+    const auto mode = modes::parse_mode(key);
+    return mode ? upper(modes::mode_name(*mode)) : std::string("GAME");
 }
 // The panel's rows from the game modes' menu snapshot.
 void render(const Context &c) {
@@ -708,14 +723,15 @@ void render(const Context &c) {
         for (const auto &offer : m.offers)
             if (!offer.own && offer.open)
                 action("offer-" + std::to_string(offer.id), std::format("JOIN {}'S {}", offer.host, offer.mode), "join " + std::to_string(offer.id));
-        for (const auto &mode : mode_entries) action(std::string("new-") + mode.key, mode.name, std::string("new ") + mode.key);
+        for (const auto &card : s.mode_cards) action("new-" + card.key, card.name, "new " + card.key);
         footer_action(c, s.footer_confirm, "CLOSE", "back");
     } else {
         const char *phase = m.phase == 1 ? "setting up" : m.phase == 2 ? "starting" : m.phase == 3 ? "in progress" : "finished";
         note("game", std::format("{} - {} - {} player{}", mode_title(m.mode), phase, m.players, m.players == 1 ? "" : "s"));
         if (m.leading && m.phase == 1) {
             if (!m.missing.empty()) note("missing", m.missing);
-            const bool wide = m.mode == "tag" || m.mode == "infection" || m.mode == "hide";
+            const auto mode = modes::parse_mode(m.mode);
+            const bool wide = mode && modes::tag_like(*mode);
             action("start", "START GAME", "start");
             action("circle", wide ? "PLAY AREA: 150 M AROUND ME" : "PLAY AREA: 40 M AROUND ME", wide ? "circle 150" : "circle 40");
             action("stop", "CANCEL GAME", "stop");
@@ -838,7 +854,7 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                     if (a.command == "mode") run.push_back(a);
             } else {
                 // Keep the cards' callbacks reserved while a panel shows.
-                for (const auto &mode : mode_entries) callback(c, "card", mode.key);
+                for (const auto &card : s.mode_cards) callback(c, "card", card.key);
                 publish_cards(c);
                 for (const auto &a : pending) {
                     if (a.generation != s.owner.load()) continue;

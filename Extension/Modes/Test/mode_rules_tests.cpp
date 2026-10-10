@@ -440,6 +440,16 @@ void hide_flow() {
     check(decode(encode(st)) == st && parse_mode("hideandseek") == Mode::hide, "a Hide & Seek state round trips");
 }
 
+void card_registry() {
+    for (const auto mode : all_modes) {
+        const auto listed = std::count(std::begin(card_order), std::end(card_order), mode);
+        check(listed == 1, "every mode has exactly one Throwdowns card");
+        check(!mode_key(mode).empty() && !mode_name(mode).empty() && !mode_tagline(mode).empty(), "every mode card has a key, name and line");
+        check(parse_mode(mode_key(mode)) == mode, "a card's key starts its own mode");
+    }
+    check(std::size(card_order) == std::size(all_modes), "no card for a mode that does not exist");
+}
+
 void skate_flow() {
     check(trick_kinds_of("Kickflip") == trick_flips && trick_kinds_of("BS 50-50 Grind") == trick_grinds, "flips and grinds are told apart");
     check(trick_kinds_of("Heelflip + Seatbelt") == (trick_flips | trick_grabs) && trick_kinds_of("Manual") == trick_manuals,
@@ -541,6 +551,7 @@ int main() {
         skate_flow();
         infection_flow();
         hide_flow();
+        card_registry();
         std::cout << "Game modes: area, scoring, wire, Spot Jam, 1-Up, Deathrace, Domination, tag, Graffiti and S.K.A.T.E. flows passed.\n";
         return 0;
     } catch (const std::exception &e) {

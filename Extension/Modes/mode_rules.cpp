@@ -106,6 +106,21 @@ std::string_view mode_summary(Mode m) noexcept {
     }
     return "";
 }
+std::string_view mode_tagline(Mode m) noexcept {
+    switch (m) {
+    case Mode::jam: return "Land lines inside the area. Every line adds to your score.";
+    case Mode::one_up: return "Take turns beating the last score or take a strike.";
+    case Mode::meat: return "Bail as hard as you can. Every slam scores its meat.";
+    case Mode::race: return "Race through every gate in order. First over the finish wins.";
+    case Mode::domination: return "Take spots with your best line and hold them to score.";
+    case Mode::graffiti: return "Grind it, gap it: what you skate takes your colour. Most tags wins.";
+    case Mode::tag: return "One skater is it. Get close to tag someone else. Least time spent it wins.";
+    case Mode::infection: return "The infected turn into the Grim Reaper and hunt the rest. Survive the longest.";
+    case Mode::hide: return "Hide while the seeker's screen is black, then stay hidden. Found skaters seek too.";
+    case Mode::skate: return "Set a trick, everyone copies it or takes a letter. You pick the tricks that count.";
+    }
+    return "";
+}
 std::optional<Mode> parse_mode(std::string_view text) noexcept {
     std::string key;
     for (const char c : text) key += static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
