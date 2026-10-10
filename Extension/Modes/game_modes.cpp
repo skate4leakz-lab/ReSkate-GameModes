@@ -214,6 +214,7 @@ struct State {
     // placed flag waiting for the game thread (under hud_mutex).
     std::atomic<std::uint64_t> flaggable{};
     std::atomic<bool> counting_down{};
+    std::string native_navigation; // `mode nav`, under hud_mutex
     std::optional<std::pair<Vec3, float>> pending_flag;
 };
 // `mode grid on|off`: the Throwdowns cards in a grid (seen working in game, modes.13) or one row.
@@ -2171,6 +2172,12 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         return join_offer(s, offer, now);
     }
     if (v == "tricklog") return trick_log_command(arguments);
+    if (v == "nav") {
+        if (arguments.empty()) return "error: usage: mode nav <native screen name, e.g. Throwdowner>";
+        std::lock_guard lock(s.hud_mutex);
+        s.native_navigation = arguments[0];
+        return "Native navigation " + arguments[0] + " queued.";
+    }
     if (v == "diagram") {
         std::string trick;
         for (const auto &word : arguments) trick += (trick.empty() ? "" : " ") + word;
@@ -2479,6 +2486,11 @@ NativeMatch native_match() {
 }
 std::uint64_t flag_game() noexcept { return state().flaggable.load(); }
 bool countdown_active() noexcept { return state().counting_down.load(); }
+std::string take_native_navigation() {
+    auto &s = state();
+    std::lock_guard lock(s.hud_mutex);
+    return std::exchange(s.native_navigation, std::string());
+}
 std::string flag_placed(const std::array<float, 3> &spot, float yaw_degrees) {
     auto &s = state();
     if (!s.flaggable.load()) return "error: no game of yours to place a flag for.";

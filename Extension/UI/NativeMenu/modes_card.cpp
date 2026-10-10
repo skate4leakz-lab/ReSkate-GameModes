@@ -98,6 +98,8 @@ struct CardScale {
 // four rows fit under the page's title without scrolling; `grid_top` keeps clear of that title.
 constexpr CardScale row_scale{.7f, .9f, .7f}, grid_scale{.64f, .27f, .27f};
 constexpr unsigned cards_per_row = 4;
+// 1-Up's blue badge on its card: off while the grid crash (Skate.exe+0x59d19cf) is narrowed down.
+constexpr bool one_up_badge = false;
 constexpr float card_gap = 20.f, grid_top = 150.f;
 struct State {
     Address manager{}, base{}, anchor_asset{}, primary_input{};
@@ -1105,6 +1107,8 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
             if (s.manager && s.manager != manager) forget(manager);
             s.manager = manager;
             s.base = base;
+            if (const auto name = modes::take_native_navigation(); !name.empty())
+                s.status = navigate(c, name) ? "Navigated." : "Navigation busy.";
             if (s.page.handle && c.type_of(s.page.handle) != s.page.type) release(c);
             // The 1-UP card was added after our cards were built: build them again with it.
             if (s.page.handle && !s.details && !s.one_up.tile.handle && native_one_up_card() && s.cards.handle &&
@@ -1151,10 +1155,11 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                 // Keep the cards' callbacks reserved while a panel shows.
                 for (const auto &card : s.mode_cards) callback(c, "card", card.key);
                 // 1-Up's card wears its own blue 1UP badge (built into ReSkate.dll with its HUD art).
-                for (const auto &card : s.mode_cards)
-                    if (card.mode == modes::Mode::one_up)
-                        publish_texture(c, std::array{c.field(card.category, 0x189084da), c.field(card.category, 0xc2917efc)},
-                                        "UI/ReSkate/OneUp/img_OneUp_Blue_1024");
+                if constexpr (one_up_badge)
+                    for (const auto &card : s.mode_cards)
+                        if (card.mode == modes::Mode::one_up)
+                            publish_texture(c, std::array{c.field(card.category, 0x189084da), c.field(card.category, 0xc2917efc)},
+                                            "UI/ReSkate/OneUp/img_OneUp_Blue_1024");
                 shrink_all(c); // the native list can restore authored sizes when it remounts
                 if (s.grid.handle) mount_grid(c);
                 else publish_cards(c);
