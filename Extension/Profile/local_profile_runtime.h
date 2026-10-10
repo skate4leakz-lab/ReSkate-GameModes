@@ -70,6 +70,9 @@ bool set_local_vote_binding(bool yes, std::uint32_t);
 // One of action_binds (controller_bindings.h), by its place there; 0 clears it.
 bool set_local_action_binding(std::size_t index, std::uint32_t);
 bool set_local_noclip_binding(std::uint32_t);
+bool teleport_local_skater_transform(const std::array<float,16>& transform);
+// Includes the queued request and the native streaming/ground-check transition.
+bool local_skater_teleport_pending();
 bool set_local_forward_velocity_binding(std::uint32_t);
 bool set_local_up_velocity_binding(std::uint32_t);
 bool set_local_offboard_up_velocity_binding(std::uint32_t);

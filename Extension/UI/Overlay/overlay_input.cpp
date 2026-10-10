@@ -5,6 +5,7 @@
 #include "input_capture.h"
 #include "playstation_input.h"
 #include "cursor.h"
+#include "Extension/Throwdowns/one_up_runtime.h"
 
 using namespace dingosdk::overlay::detail;
 namespace dingosdk::overlay::detail {
@@ -252,7 +253,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
             if (message == WM_MOUSEWHEEL) paused_wheel.fetch_add(GET_WHEEL_DELTA_WPARAM(wp), std::memory_order_relaxed);
             return message == WM_INPUT ? DefWindowProcW(window, message, wp, lp) : 0;
         }
-        const bool capture = owns_pointer();
+        const bool countdown=dingosdk::multiplayer::one_up::countdown_locks_input();
+        // Keep console/escape messages available while gameplay devices are
+        // held neutral. Reuse the existing raw-input cleanup path so keys held
+        // before teleport cannot push the board during the starting countdown.
+        if(countdown)release_game_buttons(window,previous);
+        const bool capture = owns_pointer() || (countdown && wp!=VK_ESCAPE && !console_toggle_key(message,wp,lp));
         const bool freecam_capture = s.freecam_controller_active.load(std::memory_order_relaxed);
         if (freecam_capture) release_game_buttons(window, previous);
         if ((capture || freecam_capture) && is_input(message)) {

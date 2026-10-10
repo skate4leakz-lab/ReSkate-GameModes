@@ -1,6 +1,7 @@
 #include "mod_catalog.h"
 
 #include "mod_merge.h"
+#include "one_up_core_assets.h"
 #include "native_db.h"
 #include "Engine/Core/Json/json.h"
 
@@ -124,6 +125,17 @@ Catalog load_catalog(const std::filesystem::path& data_root, const MergeObserver
     auto list = scan_mods(data_root);
     result.root = std::move(list.root);
     result.present = list.present;
+    // 1-Up's native HUD records and badge, built into ReSkate.dll (none when it was built without them).
+    try {
+        if (auto core = one_up_core_assets(data_root)) {
+            result.mods.push_back(std::move(*core));
+            result.present = true;
+            result.notes.push_back("1-Up native assets loaded from ReSkate.dll");
+        }
+    } catch (const std::exception &e) {
+        result.issue = e.what();
+        return result;
+    }
     if (!result.present) return result;
     for (auto& note : list.notes) result.notes.push_back(std::move(note));
     if (!list.issue.empty()) {

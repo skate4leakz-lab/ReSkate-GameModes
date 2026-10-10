@@ -1,6 +1,7 @@
 #include "Server/server_activity.h"
 #include "Engine/Game/Multiplayer/chat_rate.h"
 #include "Extension/Throwdowns/throwdown_wire.h"
+#include "Extension/Throwdowns/one_up_wire.h"
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -46,6 +47,15 @@ bool said(std::string_view text) {
 int main() {
     ActivityLog log([](const std::string &line) { lines.push_back(line); }, name_of);
     const std::array<float, 3> at{606.2f, 198.9f, 1075.5f};
+
+    // Opaque 1-Up traffic must not create a legacy activity with the same id.
+    ActivityLog one_up_log([](const std::string &line) { lines.push_back(line); }, name_of);
+    ThrowdownMessage one_up;
+    one_up.kind = Kind::one_up; one_up.one_up.resize(26); one_up.one_up[0] = dingosdk::multiplayer::one_up::wire_version;
+    one_up_log.throwdown(zee, wire(one_up), &at, 1);
+    one_up_log.throwdown(zee, wire(Kind::close), nullptr, 2);
+    one_up_log.tick(200'000'000);
+    check(lines.empty(), "1-Up does not create phantom legacy activities");
 
     // Spot Battle: a drop, a queue, a start, a turn, and the result once it goes quiet.
     log.throwdown(zee, wire(Kind::offer, "SpotBattle"), &at, 1'000'000);

@@ -3,6 +3,7 @@
 #include "Extension/Multiplayer/Net/protocol.h"
 #include "Extension/Multiplayer/Net/wire_codec.h"
 #include "Extension/Throwdowns/throwdown_wire.h"
+#include "Extension/Throwdowns/one_up_wire.h"
 #include "Engine/Game/World/park_randomization.h"
 #include <chrono>
 #include <cmath>
@@ -737,6 +738,11 @@ void throwdown_codec() {
     check(decode_throwdown(encode_throwdown(beacon)) == beacon, "Beacon failed to round-trip");
     auto nowhere = beacon; nowhere.location[13] = std::numeric_limits<float>::infinity();
     check(!valid_throwdown(nowhere), "A beacon at infinity was valid");
+    ThrowdownMessage one_up_envelope; one_up_envelope.kind = ThrowdownMessage::Kind::one_up;
+    one_up_envelope.leader = leader; one_up_envelope.id = 1; one_up_envelope.one_up.resize(26); one_up_envelope.one_up[0] = one_up::wire_version;
+    check(decode_throwdown(encode_throwdown(one_up_envelope)) == one_up_envelope, "1-Up envelope failed to round-trip");
+    one_up_envelope.one_up[0] = 99;
+    check(!valid_throwdown(one_up_envelope), "Incompatible 1-Up envelope was accepted");
     ThrowdownMessage lifted;
     lifted.kind = ThrowdownMessage::Kind::beacon; lifted.leader = leader; lifted.id = 3;
     check(decode_throwdown(encode_throwdown(lifted)) == lifted, "Beacon removal failed to round-trip");

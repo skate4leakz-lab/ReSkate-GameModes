@@ -5,15 +5,36 @@
 #include "Extension/Multiplayer/Remote/remote_collision.h"
 #include "Extension/Multiplayer/Remote/native_vfx.h"
 #include "Extension/Throwdowns/throwdown_lab.h"
+#include "Extension/Throwdowns/one_up_runtime.h"
 #include "Extension/Throwdowns/throwdown_debug_text.h"
 #include "Extension/Throwdowns/throwdown_relay.h"
 #include "Extension/UI/NativeMenu/native_menu_dump.h"
 #include "Extension/Assets/live_mods.h"
+#include "Engine/Game/Multiplayer/session_tools.h"
 #include <algorithm>
 #include <array>
 
 namespace dingosdk::console {
 void register_multiplayer_commands(Commands &registry) {
+    auto oneup_args=argument("action",Type::text,true); oneup_args.rest=true;
+    auto oneup=action("oneup","1-Up: status, solo (one ready player), start, ready, leave; create <seconds> <players> for local diagnostics",Group::gameplay,{std::move(oneup_args)});
+    oneup.aliases={"dingo oneup"};
+    oneup.run=[](const Model&,const Values& values,const Output& out) {
+        const auto text=values.empty()?std::string("status"):std::get<std::string>(values[0]);
+        if(text.empty() || text=="status" || text=="help") {
+            const auto v=multiplayer::one_up::view();
+            out("1-Up: "+v.status+"\nPlace a flag and ready up, then use oneup start. Players 1 starts solo practice, including in a shared session.\nUse oneup solo for explicit solo practice, or oneup leave to stop.");
+        } else if(text=="create" || text.starts_with("create ")) {
+            if(multiplayer_session_active()) {
+                out("Use Throwdowns to place a 1-Up flag in a shared session."); return;
+            }
+            multiplayer::one_up::queue(text);
+            out("Local 1-Up diagnostic flag queued at your position. Choose Ready, then Start.");
+        } else if(text=="solo" || text=="start" || text=="ready" || text=="leave") {
+            multiplayer::one_up::queue(text); out("1-Up action queued. Use oneup status to see the result.");
+        } else out("Usage: oneup status | solo | start | ready | leave");
+    };
+    registry.add(std::move(oneup));
     struct Command {
         const char *name;
         const char *description;
@@ -219,10 +240,11 @@ void register_multiplayer_commands(Commands &registry) {
     auto lab_args = argument("verb_and_arguments", Type::text, true);
     lab_args.rest = true;
     lab_args.complete = [](const Model &, auto) {
-        return std::vector<std::string>{"status", "ai", "spawn", "join", "start", "destroy", "mmid", "trace", "endturn", "score", "mirror", "attempt", "relay"};
+        return std::vector<std::string>{"status", "ai", "spawn", "join", "start", "solo", "destroy", "mmid", "trace", "endturn", "score", "mirror", "attempt", "relay"};
     };
     auto lab = action("throwdown", "Throwdown lab: add virtual participants, spawn/start/destroy queues (research aid)",
                       Group::console, {std::move(lab_args)});
+    lab.aliases={"dingo throwdown"};
     lab.run = [](const Model &model, const Values &values, const Output &out) {
         std::optional<std::array<float, 3>> skater;
         if (model.debug.skater_position_valid) skater = model.debug.skater_position;

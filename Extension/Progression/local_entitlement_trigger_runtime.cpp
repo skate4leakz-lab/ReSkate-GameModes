@@ -5,6 +5,7 @@
 #include "local_entitlement_trigger_runtime.h"
 #include "Extension/Multiplayer/Hud/native_party.h"
 #include "Extension/Throwdowns/native_throwdowns.h"
+#include "Extension/Throwdowns/one_up_native.h"
 #include <algorithm>
 
 namespace dingosdk::profile_runtime {
@@ -31,10 +32,12 @@ thread_local const ExpressionExecutionScope* expression_scope{};
 // profiler ran, which inflated the hooks in the very samples that measured them, 2026-10-03).
 // The sampler attributes their time.
 void execute_expression_hook(std::uintptr_t vm, std::uint32_t pc) {
+    if(multiplayer::consume_one_up_marker_expression(vm,pc))return;
     // The setup helper only prepares registers. Native calls actually execute
     // in 1416d0b90 / 1416d1a10, including direct ECS interpreter entry paths.
     // Keep the exact cursor and profiler context when entering either runner.
     ExpressionExecutionScope scope(vm);
+    if (!pc) multiplayer::one_up::observe_native_line(vm);
     initialize_starter_from_expression(vm, pc);
     multiplayer::execute_native_party_expression(vm, pc, 0,
         [](std::uintptr_t expression, std::uint32_t cursor, std::uintptr_t) {
@@ -45,7 +48,9 @@ void execute_expression_hook(std::uintptr_t vm, std::uint32_t pc) {
 }
 
 void execute_profiled_expression_hook(std::uintptr_t vm, std::uint32_t pc, std::uintptr_t profiler) {
+    if(multiplayer::consume_one_up_marker_expression(vm,pc))return;
     ExpressionExecutionScope scope(vm);
+    if (!pc) multiplayer::one_up::observe_native_line(vm);
     initialize_starter_from_expression(vm, pc);
     multiplayer::execute_native_party_expression(vm, pc, profiler, local_runtime().execute_profiled_expression);
     deliver_local_challenge_completion(vm, pc);

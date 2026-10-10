@@ -115,7 +115,8 @@ Field Context::member(Address type, std::uint32_t hash) const {
         require(result.offset + size(result.type) <= size(type), "Native menu field exceeds its structure.");
         return result;
     }
-    throw std::runtime_error("Native menu field schema differs.");
+    throw std::runtime_error("Native menu field schema differs (field " + std::to_string(hash) +
+        ", model " + std::to_string(read<std::uint32_t>(meta)) + ").");
 }
 Value Context::field(Value value, std::uint32_t hash) const {
     address(value);
@@ -453,6 +454,12 @@ bool publish_tab_icons(const Context& context, Value tab, std::string_view idle,
     return with_texture_assets(context, std::array{idle, focused}, [&](const auto& assets) {
         context.set(context.field(tab, 0xd4f0f044), assets[0]); // Icon.
         context.set(context.field(tab, 0xbc92d1fa), assets[1]); // FocusIcon.
+    });
+}
+bool publish_texture(const Context& context, std::span<const Value> fields, std::string_view name) {
+    return with_texture_assets(context, std::array{name}, [&](const auto& assets) {
+        for (const auto field : fields)
+            if (read<Address>(context.address(field)) != assets[0]) context.set(field, assets[0]);
     });
 }
 } // namespace dingosdk::multiplayer::menu_data

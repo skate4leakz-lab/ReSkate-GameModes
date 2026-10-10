@@ -2,6 +2,7 @@
 #include "overlay_internal.h"
 #include "input_capture.h"
 #include "held_input.h"
+#include "Extension/Throwdowns/one_up_runtime.h"
 #include "Engine/Game/Input/playstation_report.h"
 #include <hidsdi.h>
 #include <atomic>
@@ -24,10 +25,12 @@ std::atomic<int> paused_wheel{};
 thread_local HRAWINPUT noted_raw_input = nullptr;
 bool block_polled_input() {
     const auto error = GetLastError();
-    // The menu owning the pointer, the free camera, or game modes pausing the game's input
-    // (free-camera placing): the PlayStation HID reports are neutralised with the rest.
+    // The menu owning the pointer, the free camera, game modes pausing the game's input
+    // (free-camera placing) or 1-Up's countdown: the PlayStation HID reports are neutralised with
+    // the rest.
     const bool capture = !overlay_input_access && (game_input_paused() || owns_menu_cursor(state()) ||
-                                                   state().freecam_controller_active.load(std::memory_order_relaxed));
+                                                   state().freecam_controller_active.load(std::memory_order_relaxed) ||
+                                                   multiplayer::one_up::countdown_locks_input());
     SetLastError(error);
     return capture;
 }

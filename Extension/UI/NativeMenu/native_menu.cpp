@@ -1,6 +1,7 @@
 #include "native_menu.h"
 #include "native_menu_internal.h"
 #include "native_menu_dump.h"
+#include "one_up_menu.h"
 #include "modes_card.h"
 #include "Extension/Multiplayer/Session/session.h"
 #include "Engine/Core/Log/logging.h"
@@ -649,6 +650,7 @@ void tick_page(std::uintptr_t base, bool loading) noexcept {
     s.next_render = 0;
 }
 bool prepare_native_menu_level_load(std::uintptr_t base) noexcept {
+    if (!release_native_one_up_menu(base)) return false;
     if (!release_native_modes_card(base)) return false;
     if (std::all_of(page_slots.begin(), page_slots.end(), [](unsigned slot) { return page_state(slot).owned_models.empty(); }))
         return true;
@@ -732,6 +734,7 @@ void native_menu_before_level_transition(std::uintptr_t base, unsigned next) noe
     });
 }
 void tick_native_menu(std::uintptr_t base, bool loading) noexcept {
+    tick_native_one_up_menu(base, loading);
     run_pending_ui_dump(base);
     if (lifetime.blocked()) return;
     tick_native_modes_card(base, loading);

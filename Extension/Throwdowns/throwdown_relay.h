@@ -25,6 +25,7 @@ struct ThrowdownPeer {
     // In the local player's party: only party members are invited into each other's coop
     // challenges.
     bool party{};
+    std::optional<std::array<float, 3>> position;
 };
 struct ThrowdownRelayInput {
     std::uint64_t local{};            // this player's Steam ID; 0 without a session
@@ -37,6 +38,8 @@ struct ThrowdownRelayInput {
     // their mods change scoring or physics: their linked throwdown or coop challenge ends for them (the
     // others already dropped them), and no new one links.
     bool barred{};
+    // Only 1-Up's local-practice copy sets this. Never a network roster.
+    bool local_only{};
 };
 // Multiplayer session tick (game thread). Returns the encoded messages to send to
 // every other player.

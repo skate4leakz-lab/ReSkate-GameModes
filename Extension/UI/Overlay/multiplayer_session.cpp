@@ -10,6 +10,7 @@
 #include <shellapi.h>
 
 namespace dingosdk::overlay::menu::multiplayer_detail {
+void one_up_card(SkateMenu&);
 namespace {
 // Two buttons sharing a row equally.
 bool half_button(const char* label, bool first) {
@@ -484,6 +485,7 @@ void session_page(SkateMenu &menu, const Model &model) {
         send_private(menu, "stop", "", menu.multiplayer_join_password, false);
     end_card();
     if (!mp.active) return;
+    one_up_card(menu);
 
     const auto count = std::to_string(mp.players) + " / " + std::to_string(mp.capacity);
     begin_card(menu, "players", "PLAYERS", count.c_str());

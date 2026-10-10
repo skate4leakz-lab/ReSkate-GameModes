@@ -1,4 +1,9 @@
 #include "native_throwdowns.h"
+#include "native_throwdown_lifetime.h"
+#include "one_up_placement.h"
+#include "one_up_runtime.h"
+#include "one_up_input_contract.h"
+#include "Extension/UI/NativeMenu/native_menu_data.h"
 #include "throwdown_lab.h"
 #include "throwdown_relay.h"
 #include "virtual_player_names.h"
@@ -8,6 +13,7 @@
 #include "Extension/Profile/runtime_internal.h"
 #include "Extension/Progression/local_entitlement_trigger_runtime.h"
 #include "Engine/Game/Build/addresses.h"
+#include "Engine/Game/Build/supported_build.h"
 #include "Engine/Game/Build/20260929/engine.h"
 #include "Engine/Game/Build/20260929/native_party.h"
 #include "Engine/Game/Build/20260929/native_throwdowns.h"
@@ -36,10 +42,12 @@ struct State {
     bool (*others_allowed)(){};
     std::uint64_t (*player_info)(std::uint32_t){};
     std::uint64_t (*service_player_info)(Address, std::uint32_t){};
+    std::uint64_t (*player_in_activity)(std::uint32_t){};
     void (*send_event)(Address, Address, const Address*){};
     Address (*parameters)(Address, Address){};
-    std::atomic<bool> throwdown_active{}; // hosting: created a throwdown
-    std::atomic<bool> throwdown_joined{}; // in one someone else placed
+    NativeThrowdownLifetime lifetime;
+    Address solo_client_activity{};
+    std::uint32_t solo_client_player{}, solo_client_group{};
 };
 State& state() { static auto* value = new State; return *value; }
 struct PendingParameters { Address vm{}, callback{}; };
@@ -79,6 +87,109 @@ std::uint32_t sole_offline_player_id() {
     const auto identity = static_cast<std::int64_t>(read<std::uint32_t>(base + throwdowns::player_identity_offset)) - parent;
     if (player < 0x100000 || identity < -0x10000 || identity > 0x10000) return 0;
     return read<std::uint32_t>(static_cast<Address>(static_cast<std::int64_t>(player) + identity) + 0x68);
+}
+
+// Same client-player lookup and sibling-base adjustment used by the native
+// GetPlayerIsInActivity/GetPlayerMPActivityIdleState functions (834520/834950).
+// Never use the skater or the SDK's UI record as a native player pointer.
+Address client_activity_variables(std::uint32_t uid) {
+    const auto base=state().base;
+    Address context{};
+    reinterpret_cast<Address (*)(Address*)>(base+engine::current_context)(&context);
+    const auto offset=read<std::uint32_t>(base+engine::context_player_manager_offset);
+    if(!context || offset>0x1000000)return 0;
+    const auto manager=read<Address>(context+offset);
+    if(!manager)return 0;
+    const auto first=read<Address>(manager+0x78),last=read<Address>(manager+0x80);
+    if(!first || last<first || last-first>64*8 || (last-first)%8)return 0;
+    const auto delta=static_cast<std::int64_t>(read<std::uint32_t>(base+0x6f7bae0))-
+        static_cast<std::int64_t>(read<std::uint32_t>(base+0x75c3588));
+    if(delta < -0x10000 || delta > 0x10000)return 0;
+    for(auto at=first;at<last;at+=8) {
+        const auto player=read<Address>(at);
+        if(!player)continue;
+        const auto id_function=read<Address>(read<Address>(player)+0x10);
+        if(id_function<base || id_function-base>=supported_build::game_image_size)continue;
+        if(reinterpret_cast<std::uint32_t (*)(Address)>(id_function)(player)==uid)
+            return static_cast<Address>(static_cast<std::int64_t>(player)+delta);
+    }
+    return 0;
+}
+void complete_solo_client_exit() {
+    auto& s=state();
+    if(!s.solo_client_activity && !s.lifetime.host())return;
+    const auto uid=sole_offline_player_id();
+    const auto activity=s.lifetime.solo_activity(uid);
+    if(activity && activity!=s.solo_client_activity) {
+        if(const auto vars=client_activity_variables(uid)) {
+            s.solo_client_activity=activity;s.solo_client_player=uid;
+            s.solo_client_group=read<std::uint32_t>(vars+0x100);
+        }
+    }
+    const auto ended=s.lifetime.take_completed_solo();
+    if(!ended)return;
+    // A new queue or a changed group must not inherit this completed event's
+    // cleanup. The server's confirmed removal/client EnterEnd arms it once.
+    const auto vars=ended==uid && ended==s.solo_client_player && s.solo_client_activity &&
+        !s.lifetime.active() && !one_up::flag_registration_owned()?client_activity_variables(ended):0;
+    const auto group=vars?read<std::uint32_t>(vars+0x100):0;
+    if(vars && group==s.solo_client_group) {
+        const auto in_activity=read<std::uint8_t>(vars+0x104);
+        const auto idle=read<std::uint32_t>(vars+0x108);
+        if(in_activity || idle) {
+            // ClientPlayerVars defaults confirmed by its native constructor
+            // (5df4670). Offline AMP never supplies the final activity reset.
+            const bool inactive=false;
+            const std::uint32_t no_idle=0;
+            SIZE_T written{};
+            const bool reset_activity=WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(vars+0x104),&inactive,sizeof(inactive),&written) && written==sizeof(inactive);
+            const bool reset_idle=WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(vars+0x108),&no_idle,sizeof(no_idle),&written) && written==sizeof(no_idle);
+            logging::log(logging::Level::info,logging::Channel::progression,
+                "Throwdown: confirmed solo exit for player {:#x}; client activity {} -> {}, idle {} -> {} (reset {}/{}).",
+                ended,in_activity,read<std::uint8_t>(vars+0x104),idle,read<std::uint32_t>(vars+0x108),reset_activity,reset_idle);
+        }
+    } else logging::log(logging::Level::warning,logging::Channel::progression,
+        "Throwdown: solo exit for {:#x} did not match the captured client activity; reset skipped.",ended);
+    s.solo_client_activity=0;s.solo_client_player=0;s.solo_client_group=0;
+}
+
+void complete_one_up_controls(Address vm) {
+    if(!one_up::restricts_session_markers() || !vm || realm()!=client_realm)return;
+    const auto resource=read<Address>(vm+0x38),instance=read<Address>(vm+0x30);
+    if(!resource || !instance || read<Address>(instance)!=resource)return;
+    const auto hash=read<std::uint32_t>(resource+0x10);
+    const auto layout=read<std::array<std::uint32_t,10>>(resource+0x20);
+    unsigned output_offset{};
+    bool result=false,matched=false;
+    if(hash==0x32c0b460 && layout==std::array<std::uint32_t,10>{64,32,10,52,4,0,0,3,0,0}) {
+        output_offset=16;matched=true; // SessionMarkerReturn condition
+    } else if((hash==0x870491b0 || hash==0xa5d0ee41) && layout==std::array<std::uint32_t,10>{48,64,68,95,3,0,0,8,720896,0}) {
+        output_offset=8;matched=true; // Marker set/setting rumble conditions
+    } else if(hash==0x3a5e5108 && layout==std::array<std::uint32_t,10>{64,8,37,113,4,0,0,9,786432,0}) {
+        result=true;matched=true; // Native UI activity pause/marker routing
+    } else if(hash==0x6998ec4b && layout==std::array<std::uint32_t,10>{48,288,98,211,3,0,3,327693,1572864,16777472}) {
+        // QuitChallenge is the original pause modal's confirmed Quit Match
+        // action. Its native picker may have retired already; still end 1-Up.
+        one_up::queue("leave");
+    }
+    if(!matched)return;
+    const auto arguments=read<Address>(instance+((layout[0]+15U)&~15U)+8);
+    const auto output=arguments?read<Address>(arguments+output_offset):0;
+    SIZE_T written{};
+    if(output)WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(output),&result,sizeof(result),&written);
+}
+
+std::uint64_t player_in_activity_hook(std::uint32_t uid) {
+    const auto original=state().player_in_activity(uid);
+    if(original || !one_up::restricts_session_markers())return original;
+    profile_runtime::PreserveError preserve;
+    try {
+        // The original pause/marker UI must treat the local 1-Up participant
+        // as playing an activity even after its temporary flag queue retires.
+        // Return the adapter state; do not latch native replicated player vars.
+        if(active() && realm()==client_realm && uid && uid==sole_offline_player_id())return 1;
+    } catch(...) {}
+    return original;
 }
 
 // The throwdowner flow leaves its mode-select state in the same frame unless
@@ -179,15 +290,19 @@ void send_event_hook(Address signature, Address output, const Address* arguments
                 }
                 const auto name = throwdown_event(hash);
                 const auto current_realm = realm();
+                if (current_realm == client_realm) prepare_native_solo_throwdown_leave(hash);
                 if (current_realm == client_realm) observe_throwdown_send(hash, read<Address>(arguments[0]), arguments[1]);
+                // Keep the native registration and waiting HUD. Only its Start
+                // action is diverted to 1-Up; ordinary Throwdowns are unchanged.
+                if(current_realm==client_realm && consume_one_up_throwdown_send(hash,read<Address>(arguments[0]),arguments[1])) return;
                 // CreateThrowdownQueue: the local player now hosts a throwdown.
-                if (hash == 0x7fac81bb && !state().throwdown_active.exchange(true))
+                if (current_realm == client_realm && hash == 0x7fac81bb && state().lifetime.create(sole_offline_player_id()))
                     logging::log(logging::Level::info, logging::Channel::progression, "Throwdown: local player is hosting one.");
                 // AddParticipantToCommunityEvent (the Join button): in one someone else placed,
                 // which the Quit action must also leave. RemoveParticipant: left its queue.
-                if (current_realm == client_realm && hash == 0xdc10392b && !state().throwdown_joined.exchange(true))
+                if (current_realm == client_realm && hash == 0xdc10392b && state().lifetime.join(sole_offline_player_id()))
                     logging::log(logging::Level::info, logging::Channel::progression, "Throwdown: local player joined one.");
-                if (current_realm == client_realm && hash == 0xaa3f9957) state().throwdown_joined.store(false);
+                if (current_realm == client_realm && hash == 0xaa3f9957) state().lifetime.leave_queue();
                 loopback = !name.empty() && empty_target && current_realm == server_realm && sole_offline_player_id();
                 static std::atomic<unsigned> logged{};
                 if (loopback && logged.fetch_add(1) < 16)
@@ -262,7 +377,7 @@ void debug_variable(const char* const* name, const std::uint32_t* fallback, std:
         std::array<char, wanted.size() + 1> value{};
         if (!memory::peek(text, value) || value[wanted.size()] != 0 ||
             std::string_view(value.data(), wanted.size()) != wanted) return;
-        *out = 1;
+        *out = one_up::flag_registration_owned() ? 0U : 1U;
         static std::atomic<bool> logged{};
         if (!logged.exchange(true))
             logging::write(logging::Level::info, logging::Channel::progression,
@@ -354,15 +469,15 @@ namespace {
 struct ModeParameter { const char* mode; const char* parameter; float minimum, maximum, fallback; };
 constexpr std::array mode_parameters{
     ModeParameter{"JamSession", "AllowOffBoard", 0, 1, 1},      ModeParameter{"JamSession", "AllowSessionMarkers", 0, 1, 1},
-    ModeParameter{"JamSession", "MaxPlayers", 2, 10, 4},        ModeParameter{"JamSession", "Privacy", 0, 1, 0},
+    ModeParameter{"JamSession", "MaxPlayers", 1, 10, 4},        ModeParameter{"JamSession", "Privacy", 0, 1, 0},
     ModeParameter{"JamSession", "ScoreFlips", 0, 1, 1},         ModeParameter{"JamSession", "ScoreGrabs", 0, 1, 1},
     ModeParameter{"JamSession", "ScoreGrinds", 0, 1, 1},        ModeParameter{"JamSession", "ScoreGroundTricks", 0, 1, 1},
     ModeParameter{"JamSession", "ScoreSlams", 0, 1, 0},         ModeParameter{"JamSession", "Timer", 60, 300, 180},
     ModeParameter{"JamSession", "WinCondition", 0, 3, 0},       ModeParameter{"JamSession", "Invite", 0, 2, 0},
     ModeParameter{"SpotBattle", "Rounds", 1, 5, 3},             ModeParameter{"SpotBattle", "TurnDuration", 10, 60, 30},
-    ModeParameter{"SpotBattle", "Invite", 0, 2, 0},             ModeParameter{"SpotBattle", "MaxPlayers", 2, 10, 4},
+    ModeParameter{"SpotBattle", "Invite", 0, 2, 0},             ModeParameter{"SpotBattle", "MaxPlayers", 1, 10, 4},
     ModeParameter{"SpotBattle", "Privacy", 0, 1, 0},            ModeParameter{"ThrowdownSkate", "TurnDuration", 10, 60, 30},
-    ModeParameter{"ThrowdownSkate", "Invite", 0, 2, 0},         ModeParameter{"ThrowdownSkate", "MaxPlayers", 2, 10, 4},
+    ModeParameter{"ThrowdownSkate", "Invite", 0, 2, 0},         ModeParameter{"ThrowdownSkate", "MaxPlayers", 1, 10, 4},
     ModeParameter{"ThrowdownSkate", "Privacy", 0, 1, 0}};
 
 // Builds the array exactly as the native response flattener
@@ -403,14 +518,116 @@ std::uint32_t local_native_player_id() noexcept {
     profile_runtime::PreserveError preserve;
     try { return active() ? sole_offline_player_id() : 0; } catch (...) { return 0; }
 }
+bool consume_one_up_marker_expression(Address vm,std::uint32_t pc) noexcept {
+    if(pc || !vm || !one_up::restricts_session_markers())return false;
+    profile_runtime::PreserveError preserve;
+    try {
+        if(!active() || realm()!=client_realm)return false;
+        const auto resource=read<Address>(vm+0x38),instance=read<Address>(vm+0x30);
+        return resource && instance && read<Address>(instance)==resource &&
+            one_up::marker_action(read<std::uint32_t>(resource+0x10),
+                read<std::array<std::uint32_t,10>>(resource+0x20),pc);
+    } catch(...) {return false;}
+}
 
 bool local_throwdown_active() noexcept {
-    return state().throwdown_active.load(std::memory_order_acquire) || state().throwdown_joined.load(std::memory_order_acquire);
+    return state().lifetime.active();
 }
-bool local_throwdown_host() noexcept { return state().throwdown_active.load(std::memory_order_acquire); }
+bool local_throwdown_host() noexcept { return state().lifetime.host(); }
+void native_throwdown_player_limit(std::uint32_t limit) noexcept {
+    try { state().lifetime.player_limit(limit); } catch (...) {}
+}
+Address native_solo_throwdown_activity(std::uint32_t player) noexcept {
+    try { return state().lifetime.solo_activity(player); } catch (...) { return 0; }
+}
+bool native_solo_throwdown_menu_cleanup_pending() noexcept {
+    try { return !one_up::flag_registration_owned() && state().lifetime.menu_cleanup_pending(); } catch (...) { return false; }
+}
+void native_solo_throwdown_menu_cleaned() noexcept {
+    try { state().lifetime.menu_cleaned(); } catch (...) {}
+}
+void release_one_up_native_placeholder() noexcept {
+    try { state().lifetime.clear(); } catch (...) {}
+}
+void native_throwdown_activity_started(Address activity, std::uint32_t player) noexcept {
+    try {
+        if (state().lifetime.activity_started(activity, player))
+            logging::log(logging::Level::info, logging::Channel::progression,
+                "Throwdown: local player {:#x} entered native activity {:#x}.", player, activity);
+    } catch (...) {}
+}
+void native_throwdown_participant_left(Address activity, std::uint32_t player) noexcept {
+    try {
+        if (state().lifetime.participant_left(activity, player))
+            logging::log(logging::Level::info, logging::Channel::progression,
+                "Throwdown: ended after player {:#x} left native activity {:#x}; ownership cleared.", player, activity);
+    } catch (...) {}
+}
+void native_throwdown_level_left() noexcept {
+    try {
+        state().solo_client_activity=0;state().solo_client_player=0;state().solo_client_group=0;
+        if (state().lifetime.clear())
+            logging::write(logging::Level::info, logging::Channel::progression,
+                "Throwdown: ownership cleared before leaving the level.");
+    } catch (...) {}
+}
 
 void complete_native_throwdown_parameters(Address vm) noexcept {
     pump_throwdown_lab(vm);
+    {
+        profile_runtime::PreserveError preserve;
+        try {
+            if(active() && realm()==client_realm)complete_solo_client_exit();
+            complete_one_up_controls(vm);
+        } catch(...) {}
+    }
+    const bool one_up_queue=one_up::flag_registration_owned();
+    const bool solo_queue=!one_up_queue && native_solo_throwdown_waiting();
+    if(one_up_queue || solo_queue) {
+        profile_runtime::PreserveError preserve;
+        try {
+            const auto resource=vm?read<Address>(vm+0x38):0;
+            const auto instance=vm?read<Address>(vm+0x30):0;
+            const auto hash=resource?read<std::uint32_t>(resource+0x10):0;
+            // Authored predicate outputs (EBX GraphPortRegister page 1): the
+            // retail queue normally locks the Toolbox while waiting. 1-Up's
+            // own registration may reopen setup. A stock one-player host queue
+            // may start alone; other queues retain their authored predicates.
+            constexpr std::array<std::uint32_t,10> disabled_layout{64,104,44,177,3,0,2,14,720896,66560};
+            constexpr std::array<std::uint32_t,10> start_layout{144,1360,1565,1445,18,0,7,2293833,5832773,17434624};
+            if(instance && read<Address>(instance)==resource && realm()==client_realm &&
+                ((one_up_queue && hash==0xc3999b06 && read<std::array<std::uint32_t,10>>(resource+0x20)==disabled_layout) ||
+                 (hash==0x1a0c8c31 && read<std::array<std::uint32_t,10>>(resource+0x20)==start_layout))) {
+                const auto frame=read<std::uint32_t>(resource+0x20);
+                const auto arguments=read<Address>(instance+((frame+15U)&~15U)+8);
+                if(arguments) {
+                    bool result=false;
+                    if(hash==0x1a0c8c31) {
+                        if(solo_queue)result=true;
+                        else {
+                            const auto v=one_up::view();
+                            result=v.state.match && v.state.leader==v.local && v.state.phase==one_up::Phase::lobby;
+                        }
+                    }
+                    // Both graphs return through opcode 0x32's borrowed
+                    // output pointer on page 1, not their local scratch page.
+                    const auto output=read<Address>(arguments+(hash==0xc3999b06?8:96));
+                    SIZE_T written{};
+                    if(output) WriteProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(output),&result,sizeof(result),&written);
+                }
+            }
+        } catch(...) {}
+    }
+    if(one_up::flag_placement_active()) {
+        profile_runtime::PreserveError preserve;
+        try {
+            const auto resource=vm?read<Address>(vm+0x38):0;
+            if(resource && realm()==client_realm) {
+                const auto hash=read<std::uint32_t>(resource+0x10);
+                one_up::observe_flag_graph(hash);
+            }
+        } catch(...) {}
+    }
     // The throwdown is over once a client throwdown enters its end state or
     // leaves in progress. (Starting the round destroys the registration point
     // through MPThrowdownCoordinator.OnRequestThrowdownDestroy, so neither that
@@ -421,8 +638,7 @@ void complete_native_throwdown_parameters(Address vm) noexcept {
             const auto resource = vm ? read<Address>(vm + 0x38) : 0;
             switch (resource ? read<std::uint32_t>(resource + 0x10) : 0) {
             case 0x224de9ab: case 0xd373badf: case 0x2ea80cac: case 0x1d82a056: // Client*Throwdown.EnterEnd
-            case 0x91cd7c71:                                                     // ClientThrowdownBase.EnterLeaveInProgress
-                if (state().throwdown_active.exchange(false) | state().throwdown_joined.exchange(false))
+                if (realm() == client_realm && state().lifetime.ended())
                     logging::log(logging::Level::info, logging::Channel::progression,
                         "Throwdown: ended (graph {:#x}).", read<std::uint32_t>(resource + 0x10));
                 break;
@@ -572,6 +788,7 @@ void initialize_native_throwdowns(Address base) noexcept {
     s.attempted = true; s.base = base;
     struct Hook { Address rva; std::array<unsigned char, 19> prefix; void* replacement; void** original; };
     const std::array hooks{
+        Hook{throwdowns::player_in_activity,throwdowns::player_in_activity_prefix,reinterpret_cast<void*>(&player_in_activity_hook),reinterpret_cast<void**>(&s.player_in_activity)},
         Hook{throwdowns::mode_available, throwdowns::mode_available_prefix, reinterpret_cast<void*>(&mode_available_hook), reinterpret_cast<void**>(&s.mode_available)},
         Hook{throwdowns::player_info, throwdowns::player_info_prefix, reinterpret_cast<void*>(&player_info_hook), reinterpret_cast<void**>(&s.player_info)},
         Hook{throwdowns::service_player_info, throwdowns::service_player_info_prefix, reinterpret_cast<void*>(&service_player_info_hook), reinterpret_cast<void**>(&s.service_player_info)},

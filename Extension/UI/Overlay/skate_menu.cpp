@@ -313,6 +313,8 @@ void load_skate_fonts(SkateMenu& menu) {
     menu.bold = font(L"FONT_HEADING", "arialbd.ttf", 17);
     menu.heading = font(L"FONT_HEADING", "arialbd.ttf", 22);
     menu.title = font(L"FONT_BRUSH", "arialbi.ttf", 44);
+    static const ImWchar digits[]{'0','9',0};
+    menu.countdown=embedded_font(L"FONT_BRUSH",240.f,digits);
     menu.mono = font(nullptr, "consola.ttf", 15);
     menu.title_large = font(L"FONT_BRUSH", "arialbi.ttf", 128, ascii);
     menu.heading_large = font(L"FONT_HEADING", "arialbd.ttf", 64, ascii);
