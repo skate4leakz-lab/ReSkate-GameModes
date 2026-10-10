@@ -205,6 +205,9 @@ struct State {
     overlay::ModesHud hud;
     overlay::ModesMenu menu;
 };
+// `mode grid on|off`: the Throwdowns cards in a grid instead of one row (off until it is proven:
+// the first grid crashed the game on opening Throwdowns).
+std::atomic<bool> throwdown_grid_on{false};
 State &state() {
     static auto *value = new State;
     return *value;
@@ -2098,6 +2101,13 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         s.goofy = arguments[0] == "goofy";
         return std::format("Flick diagrams shown for a {} stance.", s.goofy ? "goofy" : "regular");
     }
+    if (v == "grid") {
+        if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off"))
+            return std::format("The Throwdowns grid is {}. Usage: mode grid on|off", throwdown_grid_on.load() ? "on" : "off");
+        throwdown_grid_on.store(arguments[0] == "on");
+        return throwdown_grid_on.load() ? "Throwdowns shows the cards in a grid (reopen Throwdowns)."
+                                        : "Throwdowns shows the cards in one row (reopen Throwdowns).";
+    }
     if (v == "spectate") {
         if (arguments.empty() || (arguments[0] != "on" && arguments[0] != "off"))
             return std::format("S.K.A.T.E. spectating is {}. Usage: mode spectate on|off", s.spectate ? "on" : "off");
@@ -2351,6 +2361,7 @@ bool infected_look(std::uint64_t player) noexcept {
     const auto *p = standing(*s.game, player);
     return p && p->up && !p->out;
 }
+bool throwdown_grid() noexcept { return throwdown_grid_on.load(); }
 bool hidden_player(std::uint64_t player) noexcept {
     const auto &s = state();
     if (!s.game || !playing(*s.game) || s.game->settings.mode != Mode::hide) return false;

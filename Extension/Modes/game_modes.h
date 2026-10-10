@@ -41,6 +41,8 @@ bool infected_look(std::uint64_t player) noexcept;
 // Hide & Seek: whether this other player is hiding now, so their nametag, dot and chat bubbles
 // stay off (game thread).
 bool hidden_player(std::uint64_t player) noexcept;
+// `mode grid on|off`: whether Throwdowns lays the cards out in a grid (any thread).
+bool throwdown_grid() noexcept;
 // `mode <verb> [arguments]` from the console dispatcher (game thread).
 std::string command(std::string_view verb, const std::vector<std::string> &arguments);
 // The HUD's snapshot, with the latest camera (any thread).
