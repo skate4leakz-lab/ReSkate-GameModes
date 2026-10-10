@@ -523,7 +523,7 @@ void draw_panel(ImDrawList *draw, HudState &st, float scale, bool /*native_score
     for (const auto &r : h.rows)
         if (r.self) mine = r.value;
     const float cx = display.x * 0.5f, cy = 124.0f * k, box_h = 32.0f * k, vs = 19.0f * k; // under the compass
-    if (!best.empty()) {
+    if (!best.empty() && best != "ready") { // (not while it is being set up)
         const float bw = text_width(heading, vs, best) + 58.0f * k, mw = mine.empty() ? 0.0f : text_width(heading, vs, mine) + 28.0f * k;
         const float left = cx - (bw + mw) * 0.5f;
         draw->AddRectFilled(ImVec2(left, cy), ImVec2(left + bw, cy + box_h), with_alpha(IM_COL32(8, 8, 10, 255), 0.9f));
