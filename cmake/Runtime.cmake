@@ -26,6 +26,7 @@ add_library(dingosdk_runtime SHARED
     Extension/UI/NativeMenu/native_menu_dump.cpp
     Extension/UI/NativeMenu/native_hub.cpp
     Extension/UI/NativeMenu/native_menu_data.cpp
+    Extension/UI/NativeMenu/modes_card.cpp
     Extension/Multiplayer/Remote/native_skater.cpp
     Extension/Multiplayer/Remote/native_skater_spawn.cpp
     Extension/Multiplayer/Remote/puppet_cost.cpp
