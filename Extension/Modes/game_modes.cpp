@@ -205,9 +205,8 @@ struct State {
     overlay::ModesHud hud;
     overlay::ModesMenu menu;
 };
-// `mode grid on|off`: the Throwdowns cards in a grid instead of one row (off until it is proven:
-// the first grid crashed the game on opening Throwdowns).
-std::atomic<bool> throwdown_grid_on{false};
+// `mode grid on|off`: the Throwdowns cards in a grid (seen working in game, modes.13) or one row.
+std::atomic<bool> throwdown_grid_on{true};
 State &state() {
     static auto *value = new State;
     return *value;

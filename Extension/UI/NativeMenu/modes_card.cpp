@@ -82,6 +82,8 @@ struct Original {
     Value tile, category, description;
     std::array<float, 2> tile_size{}, description_size{};
     float icon_width{}, icon_height{};
+    Value label;      // its description's label
+    std::string text; // and that label's own text, put back when the grid goes
 };
 // Each card at a share of its authored width and height (and icon size). In one row (the default)
 // the cards keep most of their height and the row scrolls left and right; in a grid (`mode grid
@@ -90,9 +92,11 @@ struct Original {
 struct CardScale {
     float width, height, icon;
 };
-constexpr CardScale row_scale{.7f, .9f, .7f}, grid_scale{.62f, .42f, .42f};
+// The grid's cards are short (a name and a logo, no description: seen in game 2026-10-09) so all
+// four rows fit under the page's title without scrolling; `grid_top` keeps clear of that title.
+constexpr CardScale row_scale{.7f, .9f, .7f}, grid_scale{.64f, .27f, .27f};
 constexpr unsigned cards_per_row = 4;
-constexpr float card_gap = 24.f;
+constexpr float card_gap = 20.f, grid_top = 150.f;
 struct State {
     Address manager{}, base{}, anchor_asset{}, primary_input{};
     Value page, cards, source_label;
@@ -573,10 +577,13 @@ void release(const Context &c) {
     s.owned.release(
         [&] {
             if (s.page.handle && c.type_of(s.page.handle) == s.page.type && s.details) switch_page(c, false);
-            // The stock row back where the grid was.
+            // The stock row back where the grid was, with its cards' descriptions.
             if (s.grid.handle && s.holder.handle && c.type_of(s.holder.handle) == s.holder.type &&
                 read<Widget>(c.address(s.holder)).data.handle == s.grid.handle)
                 c.set(s.holder, s.original_holder);
+            if (s.grid.handle)
+                for (const auto &o : s.originals)
+                    if (o.label.handle && c.type_of(o.label.handle) == o.label.type) c.text(c.field(o.label, text_field), o.text);
             if (s.cards.handle && c.type_of(s.cards.handle) == s.cards.type) {
                 unsigned count{}, stride{};
                 auto bytes = c.array(c.field(s.cards, rows_field), 32, count, stride);
@@ -679,7 +686,24 @@ void build_grid(const Context &c) {
     const auto list_widget = asset(c, "UI/Foundations/Components/Lists/LinearList/Widget/LinearList_Widget");
     const auto tile_widget = read<Address>(c.address(c.field(s.cards, 0x55ca89f4)));
     require(tile_widget, "Game modes card: the stock row has no item widget.");
+    // Names and logos only: every card's description is blanked (the stock ones' put back on release).
+    for (const auto &o : s.originals)
+        if (o.label.type && size(o.label.type) == label_schema.size) c.text(c.field(o.label, text_field), "");
+    for (const auto &card : s.mode_cards) c.text(c.field(card.label, text_field), "");
     std::vector<Handle> anchors;
+    // An empty first row keeps the grid clear of the page's title.
+    {
+        auto blank = make(c, label_schema);
+        c.copy(blank, c.address(s.source_label));
+        c.text(c.field(blank, text_field), "");
+        auto spacer = new_anchor(c);
+        c.set(c.field(spacer, widget), Widget{asset(c, "UI/Foundations/Components/Text/Label/Widget/Label_Widget"), {0, blank.handle}});
+        c.set(c.field(spacer, 0x1cff7243), std::array<float, 2>{row_w, grid_top});
+        c.set(c.field(spacer, 0x6efc1a61), false);
+        c.set(c.field(spacer, 0xbe5683d9), false);
+        c.set(c.field(spacer, 0x144aee01), false);
+        anchors.push_back(spacer.handle);
+    }
     for (std::size_t first = 0; first < tiles.size(); first += cards_per_row) {
         auto row = new_list(c);
         c.array(c.field(row, handles_field), std::vector<Handle>{});
@@ -711,7 +735,7 @@ void build_grid(const Context &c) {
     c.set(c.field(grid, 0xafe8434b), false);
     c.set(c.field(grid, 0xc33d3081), true);    // RememberFocusedIndex
     c.array(c.field(grid, handles_field), anchors);
-    c.set(c.field(grid, focus_field), 0);
+    c.set(c.field(grid, focus_field), 1); // the first row of cards, not the spacer
     s.grid = grid;
     logging::log(logging::Level::info, logging::Channel::ui, "Game modes card: {} cards in a grid of {} rows.", tiles.size(), anchors.size());
 }
@@ -754,9 +778,11 @@ void initialize(const Context &c, Value p, Value list, Value holder) {
     std::memcpy(refs.data(), bytes.data(), bytes.size());
     for (const auto &ref : refs) {
         auto tile = reference(c, ref), cat = category(c, tile), desc = description(c, cat);
+        const auto label = reference(c, read<Widget>(c.address(c.field(desc, widget))).data);
         s.originals.push_back({tile, cat, desc, read<std::array<float, 2>>(c.address(c.field(tile, 0x868043e1))),
                                read<std::array<float, 2>>(c.address(c.field(desc, 0x1cff7243))), read<float>(c.address(c.field(cat, 0x495ffd43))),
-                               read<float>(c.address(c.field(cat, 0x24fb5ca8)))});
+                               read<float>(c.address(c.field(cat, 0x24fb5ca8))), label,
+                               label.type && size(label.type) == label_schema.size ? c.text(c.field(label, text_field), 2048) : std::string()});
     }
     const auto &donor = s.originals[1];
     s.anchor_asset = read<Widget>(c.address(c.path(donor.tile, {widget, widget}))).blueprint;
@@ -765,6 +791,8 @@ void initialize(const Context &c, Value p, Value list, Value holder) {
     // One card per registered mode, each once; a mode without a key or name gets none (and says so).
     std::set<std::string> keys;
     for (const auto mode : modes::card_order) {
+        // skate.'s own S.K.A.T.E. card is on the page already; ours is in the ReSkate menu.
+        if (mode == modes::Mode::skate) continue;
         const auto key = modes::mode_key(mode);
         if (key.empty() || modes::mode_name(mode).empty() || !keys.insert(std::string(key)).second) {
             logging::log(logging::Level::warning, logging::Channel::ui, "Game modes card: mode {} has no usable key or name; no card.",
