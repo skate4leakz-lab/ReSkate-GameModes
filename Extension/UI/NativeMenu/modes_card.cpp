@@ -332,8 +332,26 @@ void label_styles(const Context &c, Value label, const char *idle, const char *f
     c.set(c.field(label, 0xfc23a999), record_ref(c, "TextStylesList/B52-SemiB_Black"));
     c.set(c.field(label, 0x25189231), record_ref(c, focused));
 }
+// A new anchored presenter or list, copied from an authored record. Not made from nothing: a model
+// made from its type alone leaves its callbacks unset (-1), and the game calls them (that crashed
+// the game when the first grids were focused).
+Value new_anchor(const Context &c) {
+    auto anchor = record_model(c, "Activities_DetailsMenu_ContentResource/Activities_Details_AnchoredContentPresenter", anchor_schema);
+    // A list item: laid out from the item's start at its own size (the record anchors a page panel).
+    for (const auto axis : {0xde7d30c7U, 0x185a5736U}) {
+        const auto layout = c.field(anchor, axis);
+        c.set(c.field(layout, 0x99bbed5a), 0.f); // AnchorStart
+        c.set(c.field(layout, 0x49943bed), 0.f); // AnchorEnd
+        c.set(c.field(layout, 0x40bfbff4), 0.f); // OffsetStart
+        c.set(c.field(layout, 0x1d233266), 0.f); // OffsetEnd
+        c.set(c.field(layout, 0xfec5e0b1), 0.f); // SizingPivot
+        c.set(c.field(layout, 0xd01f4a21), 1.f); // SizingWeight
+    }
+    return anchor;
+}
+Value new_list(const Context &c) { return record_model(c, "TD_Page_ContentResources/TD_Host_ModeDetailsPanel_Content", linear_list); }
 Value compact_anchor(const Context &c, Value model, const char *blueprint, float height, bool focusable) {
-    auto result = make(c, anchor_schema);
+    auto result = new_anchor(c);
     c.set(c.field(result, widget), Widget{asset(c, blueprint), {0, model.handle}});
     c.set(c.field(result, 0x1cff7243), std::array<float, 2>{1130.f, height});
     c.set(c.field(result, 0x6efc1a61), false);
@@ -663,7 +681,8 @@ void build_grid(const Context &c) {
     require(tile_widget, "Game modes card: the stock row has no item widget.");
     std::vector<Handle> anchors;
     for (std::size_t first = 0; first < tiles.size(); first += cards_per_row) {
-        auto row = make(c, linear_list);
+        auto row = new_list(c);
+        c.array(c.field(row, handles_field), std::vector<Handle>{});
         c.set(c.field(row, 0x55ca89f4), tile_widget);
         c.set(c.field(row, 0x4cb61cac), 0); // Orientation: horizontal
         c.set(c.field(row, 0x64b9a9e8), read<std::int32_t>(c.address(c.field(s.cards, 0x64b9a9e8))));
@@ -673,7 +692,7 @@ void build_grid(const Context &c) {
         c.array(c.field(row, rows_field),
                 std::vector<Ref>(tiles.begin() + static_cast<std::ptrdiff_t>(first),
                                  tiles.begin() + static_cast<std::ptrdiff_t>(std::min(tiles.size(), first + cards_per_row))));
-        auto anchor = make(c, anchor_schema);
+        auto anchor = new_anchor(c);
         c.set(c.field(anchor, widget), Widget{list_widget, {0, row.handle}});
         c.set(c.field(anchor, 0x1cff7243), std::array<float, 2>{row_w, tile_h});
         c.set(c.field(anchor, 0x6efc1a61), false);
@@ -681,7 +700,8 @@ void build_grid(const Context &c) {
         c.set(c.field(anchor, 0x144aee01), true);
         anchors.push_back(anchor.handle);
     }
-    auto grid = make(c, linear_list);
+    auto grid = new_list(c);
+    c.array(c.field(grid, rows_field), std::vector<Ref>{});
     c.set(c.field(grid, 0x55ca89f4), asset(c, "UI/Foundations/Components/Lists/Shared/AnchoredContentPresenterListItem_Widget"));
     c.set(c.field(grid, 0x4cb61cac), 1);       // Orientation: vertical
     c.set(c.field(grid, 0x64b9a9e8), 0);       // the rows' own measures
@@ -789,7 +809,7 @@ void row(const Context &c, std::vector<std::string> &shown, const std::string &i
     const bool button_row = !command.empty();
     if (fresh) {
         r.model = make(c, button_row ? button : label_schema);
-        r.anchor = make(c, anchor_schema);
+        r.anchor = new_anchor(c);
         auto l = button_row ? c.field(r.model, label_field) : r.model;
         c.copy(l, c.address(s.source_label));
         c.set(c.field(l, 0x042924a4), true);
