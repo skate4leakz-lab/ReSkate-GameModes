@@ -1038,6 +1038,7 @@ void official_setup(const Context& c) {
     }
     if(!one_up::native_setup_active() && !game_mode) {
         restore_official(c);
+        s.mode_setup_seen_at=0;
         s.setup_open.store(false); return;
     }
     if(s.reset_setup.exchange(false))s.seconds=20;
@@ -1111,20 +1112,22 @@ void official_setup(const Context& c) {
             // A game mode keeps the panel's own mark, the native Confirm and its flag placement.
             for(const auto notice:ui_models(c,c.field(root.model,0x43967ece),notice_schema.hash))
                 plain_label(c,c.field(notice,0x94703efc),mode_line);
-            // Its advanced-settings button is GAME SETTINGS: the game's own settings page in the
-            // Throwdowns menu (modes_card.cpp: play area, time, route), not the stock customizing.
-            static std::set<Handle> settings_buttons;
+            // Its advanced-settings button is GAME SETTINGS: the page's own Back (skate. ignores a
+            // navigation to Throwdowns from here), after which the Throwdowns menu shows the game's
+            // settings (modes_card.cpp: play area, time, route) instead of the stock customizing.
             for(const auto b:ui_models(c,c.field(root.model,0xbfc64535),button.hash)) {
                 const auto action=c.path(b,{0x0fb0d794,0xa704272a,0xc52416ef,0xa704272a,0xa2b71c93});
-                if(c.text(c.field(action,0xb1e14cd6))=="AdvancedParameters") {
-                    if(settings_buttons.size()>64)settings_buttons.clear();
-                    settings_buttons.insert(b.handle);
-                    c.text(c.field(action,0xb1e14cd6),"");
-                    plain_label(c,c.field(b,0x58c9d354),"GAME SETTINGS");
-                }
-                if(!settings_buttons.contains(b.handle))continue;
-                const auto settings=callback(c,"mode-settings"); // reserved every pass
-                if(read<Address>(c.address(c.field(action,0x9c76b86c)))!=settings)c.set(c.field(action,0x9c76b86c),settings);
+                if(c.text(c.field(action,0xb1e14cd6))!="AdvancedParameters")continue;
+                std::optional<Value> page_back;
+                const auto pages=c.roots({page.hash});
+                for(const auto& page_root:pages) try {
+                    const auto panels=ui_models(c,c.field(page_root.model,content),panel_schema.hash);
+                    if(std::any_of(panels.begin(),panels.end(),[&](Value p){return p.handle==root.model.handle;})) {page_back=back(c,page_root.model);break;}
+                } catch(const std::exception&) {}
+                if(!page_back && pages.size()==1)page_back=back(c,pages.front().model); // the one page up
+                if(!page_back || page_back->type!=action.type)continue; // left as the stock button
+                c.copy(action,c.address(*page_back));
+                plain_label(c,c.field(b,0x58c9d354),"GAME SETTINGS");
             }
             continue;
         }
@@ -2124,7 +2127,6 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
                 if(a.command=="open") { if(one_up::native_setup_active() && s.max_players!=1 && !model().active)queue_command("host","",{}); }
                 else if(a.command=="oneup")one_up::queue(a.argument);
                 else if(a.command=="mode")mode_commands.push_back(a.argument);
-                else if(a.command=="mode-settings")one_up::back_out_of_mode_setup(true);
             }
             gameplay_hud(c,now);
             return;
@@ -2183,7 +2185,6 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
             }
             else if(a.command=="oneup") one_up::queue(a.argument);
             else if(a.command=="mode") mode_commands.push_back(a.argument);
-            else if(a.command=="mode-settings") one_up::back_out_of_mode_setup(true);
         }
         if(s.place_until) {
             const auto v=one_up::view();
