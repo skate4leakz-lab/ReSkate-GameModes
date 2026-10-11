@@ -196,10 +196,10 @@ std::string skate_letters(unsigned letters, unsigned of) {
 std::string missing(const Settings &s) {
     switch (s.mode) {
     case Mode::race:
-        if (s.points.size() < 2) return "Deathrace needs a route: a start and a finish (PLACE ROUTE).";
+        if (s.points.size() < 2) return "Place the checkpoints and finish: GAME SETTINGS in its setup, then Place now.";
         break;
     case Mode::domination:
-        if (s.points.empty()) return "Domination needs at least 1 spot: PLACE SPOTS in its Throwdowns panel.";
+        if (s.points.empty()) return "Place the spots: GAME SETTINGS in its setup, then Place now.";
         break;
 
     default: break;

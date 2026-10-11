@@ -832,7 +832,7 @@ void build_grid(const Context &c) {
     logging::log(logging::Level::info, logging::Channel::ui, "Game modes card: {} cards in a grid of {} rows.", tiles.size(), anchors.size());
 }
 // The logo grid: the twelve Throwdowns as round logos, four across and three down, each with its
-// name tilted under it and a hollow aqua ring when picked. Its widgets, styles, logo textures and
+// name tilted under it and a hollow ring in its logo's colour when picked. Its widgets, styles, logo textures and
 // the grid record itself are private native assets in ReSkate.dll's core bundle (authored by
 // ReSkateStudio's one-up-badge). Each cell is still the card's own tile button, so its action is
 // the card's: the stock three keep their native navigation, ours call back here.
@@ -869,14 +869,35 @@ std::string_view logo_key(modes::Mode mode) {
     return mode == modes::Mode::one_up ? std::string_view("OneUpBadge") : modes::mode_key(mode);
 }
 // Dresses a tile as a grid cell: a private copy of the stock button style with every background
-// empty and the aqua ring on hover and focus, all-white interactivity colors (the art keeps its
+// empty and its coloured ring on hover and focus, all-white interactivity colors (the art keeps its
 // colors when picked), and as content a fixed logo over a tilted name. Returns the logo's model.
-Value picker_logo(const Context &c, Value tile, Value cat, bool stock, const std::string &name) {
+// The colour of a circle's ring: its logo's own ("Pink" etc.; empty: blue), one ring style each.
+std::string_view ring_colour(modes::Mode mode) {
+    using modes::Mode;
+    switch (mode) {
+    case Mode::one_up: return "";
+    case Mode::meat: return "Orange";
+    case Mode::race: return "Red";
+    case Mode::domination: return "Purple";
+    case Mode::graffiti: return "Teal";
+    case Mode::tag: return "Yellow";
+    case Mode::infection: return "Green";
+    case Mode::hide: return "Cyan";
+    default: return "Pink"; // Spot Jam and the stock three
+    }
+}
+Address ring_style(const Context &c, std::string_view colour) {
+    if (!colour.empty()) try {
+            return asset(c, std::format("UI/ReSkate/Throwdowns/LogoHoverRing_{}_FillStyle", colour).c_str());
+        } catch (const std::exception &) {} // an older core bundle: the blue ring
+    return asset(c, "UI/ReSkate/Throwdowns/LogoHoverRing_FillStyle");
+}
+Value picker_logo(const Context &c, Value tile, Value cat, bool stock, const std::string &name, std::string_view colour) {
     const auto button_style = record_model(c, "ButtonStyleList/TileButton.RoughPartial.NoDefaultBG");
     const auto empty = c.path(button_style, {0x2d393a3a, 0xb6c6aace});
     for (const auto key : {0x24996c65U, 0x69cf50caU, 0xe8f882b7U, 0x182004ffU, 0xb0db14beU, 0xfadedb6aU})
         c.copy(c.path(button_style, {0x2d393a3a, key}), c.address(empty));
-    const auto ring = asset(c, "UI/ReSkate/Throwdowns/LogoHoverRing_FillStyle");
+    const auto ring = ring_style(c, colour);
     for (const auto key : {0xf622ea66U, 0x943abf2dU, 0x287f4815U}) c.set(c.path(button_style, {0x343abac3, key}), ring);
     for (const auto flag : {0xc02028cfU, 0xa45fc55dU, 0xb811842aU, 0xe69a9d99U}) c.set(c.field(button_style, flag), false);
     c.set(c.path(tile, {widget, 0x0fb0d794, 0x8cc042ef}), Ref{0, button_style.handle});
@@ -954,7 +975,7 @@ void build_logo_grid(const Context &c) {
     for (unsigned i = 0; i < 3; ++i) {
         s.logo_stock[i] = make(c, tile_schema);
         c.copy(s.logo_stock[i], c.address(s.originals[i].tile));
-        picker_logo(c, s.logo_stock[i], s.originals[i].category, true, stock_names[i]);
+        picker_logo(c, s.logo_stock[i], s.originals[i].category, true, stock_names[i], "Pink");
         // Its own navigation, sent from here once a mode's pending setup has gone (stock_navigation).
         const auto action = primary(c, s.logo_stock[i]);
         s.stock_navigation[i] = c.text(c.field(action, navigation_field));
@@ -965,7 +986,7 @@ void build_logo_grid(const Context &c) {
     for (const auto mode : logo_order) {
         const auto card = std::find_if(s.mode_cards.begin(), s.mode_cards.end(), [&](const ModeCard &m) { return m.mode == mode; });
         if (card == s.mode_cards.end()) continue;
-        const auto logo = picker_logo(c, card->tile, card->category, false, std::string(modes::mode_name(mode)));
+        const auto logo = picker_logo(c, card->tile, card->category, false, std::string(modes::mode_name(mode)), ring_colour(mode));
         mode_art(c, std::array{c.field(logo, 0x6e469d2a)}, mode_logo(mode), logo_key(mode));
         add(card->tile);
     }

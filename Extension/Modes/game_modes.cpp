@@ -2306,12 +2306,13 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         s.game = std::move(g);
         std::string next;
         switch (*mode) {
-        case Mode::race: next = "Open GAME MODES and press PLACE ROUTE: drop the start, the checkpoints and the finish as you skate the course."; break;
-        case Mode::domination: next = "Ride to each spot and use `mode point`, then `mode start`."; break;
-        case Mode::graffiti: next = "Open GAME MODES to set an area if you want one, then START GAME."; break;
-        case Mode::tag: next = "The whole map is the playground; PLACE CIRCLE in GAME MODES fences it in (up to 3 km across). Then START GAME."; break;
-        case Mode::infection: next = "The whole map is the hunting ground; PLACE CIRCLE in GAME MODES fences it in. Then START GAME."; break;
-        case Mode::hide: next = "Pick the hiding time in GAME MODES, PLACE CIRCLE to keep everyone close (recommended), then START GAME."; break;
+        // (Its setup's GAME SETTINGS holds these; the flag starts it.)
+        case Mode::race: next = "GAME SETTINGS in its setup: Place now drops the checkpoints and the finish. Then place your start flag."; break;
+        case Mode::domination: next = "GAME SETTINGS in its setup: Place now drops the spots. Then place your start flag."; break;
+        case Mode::graffiti: next = "GAME SETTINGS in its setup sets an area if you want one. Then place your start flag."; break;
+        case Mode::tag: next = "The whole map is the playground; GAME SETTINGS in its setup fences it in. Then place your start flag."; break;
+        case Mode::infection: next = "The whole map is the hunting ground; GAME SETTINGS in its setup fences it in. Then place your start flag."; break;
+        case Mode::hide: next = "GAME SETTINGS in its setup sets the hiding time and an area (recommended). Then place your start flag."; break;
         case Mode::skate: next = "Pick the tricks that count in GAME MODES (or `mode tricks flips grabs grinds manuals`), then START GAME."; break;
         default: next = "Optional: `mode corner` at each corner of an area. Then `mode start`."; break;
         }

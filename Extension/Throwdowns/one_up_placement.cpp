@@ -281,7 +281,10 @@ void tick_flag_placement(const menu_data::Context& c) {
             // A game mode's flag: its spot and facing go to the game; the registration stays as
             // the world flag with its waiting card until the game counts down, then goes.
             if(!p.handed_off && p.spawn) {
+                // The start faces the flag's own facing (its Z axis, where its ground arrows point).
                 mode_flag={*p.spawn,std::atan2(p.facing[6],p.facing[8])*180.f/3.14159265f};
+                logging::log(logging::Level::info,logging::Channel::ui,"Game mode flag: axes X ({:.2f},{:.2f},{:.2f}) Z ({:.2f},{:.2f},{:.2f}); start faces {:.0f} degrees.",
+                    p.facing[0],p.facing[1],p.facing[2],p.facing[6],p.facing[7],p.facing[8],mode_flag->second);
                 p.handed_off=true; p.status.clear(); release=true;
             }
             const auto m=modes::native_match();

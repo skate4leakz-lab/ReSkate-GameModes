@@ -57,7 +57,7 @@ struct ResultPlayer { Value row, rank, outcome; bool winner{}; };
 // Our rows on skate.'s customize screen (mode_customize): per selector its choices, the command
 // each sends and the one last sent.
 struct CustomizeRow { std::string id; Value selector; std::vector<Handle> choices; std::vector<std::string> commands; int applied=-1; };
-struct Customize { Handle list{}; std::vector<CustomizeRow> rows; };
+struct Customize { Handle list{}; std::vector<CustomizeRow> rows; std::vector<std::byte> items; unsigned stride{}; };
 struct State {
     // Borrowed native marker fields, restored when this match releases them.
     std::map<Handle,std::pair<Value,bool>> marker_originals;
@@ -1047,6 +1047,9 @@ void official_setup(const Context& c) {
         if(const auto mode=modes::parse_mode(menu.mode)) {
             mode_title=upper_text(std::string(modes::mode_name(*mode)));
             mode_line=std::string(modes::mode_summary(*mode));
+            // What it still needs, and where (its GAME SETTINGS), in place of its rules.
+            if(*mode==modes::Mode::race && menu.points<2)mode_line="Place the checkpoints and finish in GAME SETTINGS, then CONFIRM your start.";
+            if(*mode==modes::Mode::domination && !menu.points)mode_line="Place the spots in GAME SETTINGS, then CONFIRM your start.";
         }
     }
     if(!one_up::native_setup_active() && !game_mode) {
@@ -1113,6 +1116,17 @@ void official_setup(const Context& c) {
             if(current.data.handle!=copy.handle) {current.data={0,copy.handle};c.set(slot,current);}
         }
         plain_label(c,title,game_mode?mode_title:std::string("1-UP"));
+        // skate. can fill the setup's stock rows in again after it was dressed (a later setup on the
+        // same panel): any that came back go again.
+        {
+            const auto body=c.field(root.model,0x43967ece);
+            const auto settings=ui_models(c,body,setting_schema.hash);
+            const bool back=std::any_of(settings.begin(),settings.end(),[&](Value setting) {
+                const auto id=c.text(c.path(setting,{0x58c9d354,text_field}));
+                return id=="ID_LABEL_ROUNDS" || (game_mode && (id=="ID_LABEL_TURNTIMER" || id=="ID_LABEL_DURATION" || id=="ID_SETTINGS_PLAYERS"));
+            });
+            if(back)remove_one_up_rounds(c,body,game_mode);
+        }
         if(game_mode) {
             // A game mode keeps the panel's own mark, the native Confirm and its flag placement.
             for(const auto notice:ui_models(c,c.field(root.model,0x43967ece),notice_schema.hash))
@@ -1258,6 +1272,23 @@ std::vector<CustomizeSpec> customize_specs(const overlay::ModesMenu& m,modes::Mo
         }
         out.push_back(std::move(time));
     }
+    // A choice per value, the current one picked (or else the nearest below it).
+    const auto stepped=[&](std::string id,std::string title,std::initializer_list<float> values,float now,auto label,const char* verb) {
+        CustomizeSpec spec{std::move(id),std::move(title)};
+        for(const auto value:values) {
+            if(value<=now+.01f)spec.selected=static_cast<unsigned>(spec.choices.size());
+            spec.choices.push_back(label(value));spec.commands.push_back(std::format("{} {:g}",verb,value));
+        }
+        out.push_back(std::move(spec));
+    };
+    // Hide & Seek: how long everyone has to hide before the seeker looks.
+    if(mode==modes::Mode::hide)
+        stepped("hide-time","Hiding Time",{15,20,30,45,60,90},static_cast<float>(m.turn),[](float v){return std::format("{:g} s",v);},"turn");
+    // Deathrace: every gate's width; Domination: how near a spot counts as holding it.
+    if(race)
+        stepped("gate","Gate Width",{4,6,8,12,16},m.radius,[](float v){return std::format("{:g} m",v*2);},"radius");
+    if(spots)
+        stepped("reach","Spot Size",{4,6,8,12,16},m.radius,[](float v){return std::format("{:g} m",v*2);},"radius");
     // Placing rows: moving to "Place now" closes the menus and starts placing.
     const auto placing=[&](std::string id,std::string title,std::string now,std::string what) {
         out.push_back({std::move(id),std::move(title),{std::move(now),"Place now"},{"","place:"+what},0});
@@ -1278,8 +1309,10 @@ void mode_customize(const Context& c,std::vector<std::string>& commands) {
             const auto list=root.model;
             const auto entries=c.field(list,customize_items);
             unsigned shown_count{},shown_stride{};c.array(entries,256,shown_count,shown_stride);
-            if(const auto known=s.customizes.find(list.handle);known!=s.customizes.end() && shown_count==known->second.rows.size()) {
+            if(const auto known=s.customizes.find(list.handle);known!=s.customizes.end()) {
                 auto& k=known->second;
+                // skate. fills the list in again while the screen loads: our rows go back (the same ones).
+                if(shown_count!=k.rows.size() && shown_stride==k.stride)c.array(entries,k.items,static_cast<unsigned>(k.rows.size()));
                 // Our rows: a selector moved sends its command once.
                 for(auto& r:k.rows) {
                     if(!r.selector.handle || c.type_of(r.selector.handle)!=r.selector.type)continue;
@@ -1372,6 +1405,7 @@ void mode_customize(const Context& c,std::vector<std::string>& commands) {
                 built.rows.push_back(std::move(row));
             }
             c.array(entries,bytes,static_cast<unsigned>(bytes.size()/stride));
+            built.items=std::move(bytes);built.stride=stride;
             logging::log(logging::Level::info,logging::Channel::ui,"Game mode customize: {} rows for {}.",built.rows.size(),m.mode);
             s.customizes[list.handle]=std::move(built);
         }
