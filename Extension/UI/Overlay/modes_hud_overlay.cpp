@@ -856,7 +856,11 @@ void draw_route(ImDrawList *draw, const Camera &cam, const ModesHud &h, float sc
         const float hoop_radius = 2.5f, gate_height = 4.6f;
         // Skate 3's neon blue; the finish gold, the one being placed its placing blue.
         const ImU32 gate_colour = preview ? placing_colour : finish ? IM_COL32(255, 196, 60, 255) : IM_COL32(40, 170, 255, 255);
-        neon_gate(draw, cam, left, right, gate_height, gate_colour, alpha, next || (start && h.next_point < 0), time);
+        // The committed gates are real native checkpoint objects now (race_world.cpp): skate.'s
+        // own tutorial arch, not this drawn one. Only the gate still being aimed (not yet placed,
+        // so no native object exists for it) and the start (the native flag already marks it, so
+        // never drawn here) keep the ImGui frame.
+        if (preview) neon_gate(draw, cam, left, right, gate_height, gate_colour, alpha, next || (start && h.next_point < 0), time);
         const bool hoop = true;
         if (hoop) {
             if (const auto mid = cam.project(up(p, hoop_radius * 1.9f + 0.8f))) {

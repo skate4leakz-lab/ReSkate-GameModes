@@ -55,7 +55,7 @@ struct HookState {
     AnimationUpdate original_animation{};
     DestroyEntity original_destroy{};
     RenderPose original_render_pose{};
-    std::atomic<EntityDestroyed> destroyed_listener{};
+    std::array<std::atomic<EntityDestroyed>,4> destroyed_listeners{}; // a few independent subsystems, not replaced
     std::atomic<AnimationEvaluated> evaluated_listener{};
     std::atomic<RenderPosePublished> render_listener{};
 };

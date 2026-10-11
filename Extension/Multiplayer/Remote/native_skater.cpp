@@ -382,8 +382,8 @@ void animation_hook(std::uintptr_t component, std::uintptr_t update) {
 void destroy_hook(std::uintptr_t entity, std::uintptr_t owner) {
     // Other SDK-created actors share this hook; they must forget the entity
     // before the engine frees it.
-    if (const auto listener = shared().destroyed_listener.load(std::memory_order_acquire))
-        listener(entity);
+    for (auto &slot : shared().destroyed_listeners)
+        if (const auto listener = slot.load(std::memory_order_acquire)) listener(entity);
     // The first slot watching it as either skater or board.
     if (const auto slot = std::min(watching(watched().entity, entity), watching(watched().board, entity));
         slot < max_remote_players) {
@@ -582,7 +582,13 @@ bool install_entity_hooks(std::uintptr_t base, std::string &detail) noexcept {
     }
 }
 void set_entity_destroyed_listener(EntityDestroyed listener) noexcept {
-    shared().destroyed_listener.store(listener, std::memory_order_release);
+    auto &listeners = shared().destroyed_listeners;
+    for (auto &slot : listeners)
+        if (slot.load(std::memory_order_relaxed) == listener) return; // already registered
+    for (auto &slot : listeners) {
+        EntityDestroyed empty = nullptr;
+        if (slot.compare_exchange_strong(empty, listener, std::memory_order_acq_rel)) return;
+    }
 }
 void set_local_hidden_joint(std::uintptr_t component, std::uint16_t joint,
                             const std::array<float, 3> &scale) noexcept {

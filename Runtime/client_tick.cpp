@@ -30,6 +30,7 @@
 #include "Extension/Settings/gameplay_settings_override.h"
 #include "Extension/Settings/named_settings.h"
 #include "Extension/Skater/ai_skaters.h"
+#include "Extension/Modes/race_world.h"
 #include "Extension/Skater/client_source_spawn.h"
 #include "Extension/Skater/skater_slot_override.h"
 #include "Extension/Throwdowns/native_throwdowns.h"
@@ -1255,6 +1256,12 @@ void tick(std::uintptr_t client, std::uintptr_t update) {
         {
             DINGO_PROFILE_ZONE("tick/AI skaters");
             dingosdk::ai_skaters::tick(r.base,client,multiplayer_ready);
+        }
+        {
+            DINGO_PROFILE_ZONE("tick/Deathrace gates");
+            // Same verified client scope as above: skate.'s own tutorial checkpoint arch at each
+            // Deathrace gate, in place of the overlay's drawn ones.
+            dingosdk::modes::race_world::tick(r.base,client,multiplayer_ready);
         }
         {
             DINGO_PROFILE_ZONE("tick/trainer");
