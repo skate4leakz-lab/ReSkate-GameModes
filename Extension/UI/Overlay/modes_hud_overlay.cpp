@@ -1,4 +1,5 @@
 #include "overlay_internal.h"
+#include "input_capture.h"
 #include "Extension/UI/skate_theme.h"
 #include "Extension/HallOfMeat/hall_of_meat_overlay.h"
 #include <cmath>
@@ -22,11 +23,7 @@ std::atomic<unsigned> native_parts{};
 std::atomic<std::uint64_t> native_said{};
 }
 void set_modes_hud_feed(ModesHudFeed feed) noexcept { modes_hud_feed.store(feed); }
-namespace {
-std::atomic<std::uint64_t> throwdown_menu_said{};
-bool throwdown_menu_open() noexcept { return GetTickCount64() - throwdown_menu_said.load() < 500; }
-}
-void set_native_throwdown_menu(bool open) noexcept { throwdown_menu_said.store(open ? GetTickCount64() : 0); }
+
 void set_native_modes_hud(NativeModesHud parts) noexcept {
     native_parts.store((parts.score ? 1u : 0u) | (parts.countdown ? 2u : 0u) | (parts.results ? 4u : 0u));
     native_said.store(GetTickCount64());
@@ -1696,7 +1693,7 @@ void draw_modes_hud() {
     const float scale = std::clamp(display.y / 1080.0f, 0.8f, 2.0f);
     auto *draw = ImGui::GetBackgroundDrawList();
     // Other players' games show whether or not the player is in one.
-    const bool menu = throwdown_menu_open(); // a Throwdown menu has the screen's corners
+    const bool menu = game_menu_open(); // one of skate.'s menus has the screen's corners
     if (!menu) {
         draw_offers(draw, h.hud, scale);
         draw_invite(draw, h.hud, scale);

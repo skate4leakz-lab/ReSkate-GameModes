@@ -24,6 +24,9 @@ extern std::atomic<std::uint64_t> game_input_paused_until;
 inline bool game_input_paused() noexcept { return GetTickCount64() < game_input_paused_until.load(std::memory_order_relaxed); }
 // Mouse wheel movement (WHEEL_DELTA units) the game did not get while its input was paused.
 extern std::atomic<int> paused_wheel;
+// skate. has one of its menus up: it takes the raw mouse away from play while one is (its
+// registration removed) and gives it back when play resumes.
+bool game_menu_open() noexcept;
 // How the game read its controllers while a card held its input (prompt_input_active), for the
 // log when the hold ends: which of the ways the overlay can keep input from it the game used.
 struct PromptReads {

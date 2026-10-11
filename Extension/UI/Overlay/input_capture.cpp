@@ -483,6 +483,7 @@ struct RawMouse {
     bool known{}, overridden{};
 };
 RawMouse& raw_mouse() { static auto* value = new RawMouse; return *value; }
+std::atomic<bool> game_mouse_registered{};
 constexpr DWORD cursor_blocking_flags = RIDEV_NOLEGACY | RIDEV_CAPTUREMOUSE | RIDEV_NOHOTKEYS;
 bool is_mouse(const RAWINPUTDEVICE& device) { return device.usUsagePage == 1 && device.usUsage == 2; }
 
@@ -499,6 +500,7 @@ BOOL WINAPI captured_register_raw(PCRAWINPUTDEVICE devices, UINT count, UINT siz
             if (!is_mouse(device)) continue;
             if (device.dwFlags & RIDEV_REMOVE) mouse.known = false;
             else { mouse.game = device; mouse.known = true; }
+            game_mouse_registered.store(mouse.known, std::memory_order_relaxed);
             // While the overlay owns the pointer the cursor must keep moving.
             if (mouse.overridden && !(device.dwFlags & RIDEV_REMOVE)) device.dwFlags &= ~cursor_blocking_flags;
         }
@@ -949,3 +951,7 @@ bool key_down(int virtual_key) noexcept {
     return (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
 }
 } // namespace dingosdk::overlay
+
+namespace dingosdk::overlay::detail {
+bool game_menu_open() noexcept { return !game_mouse_registered.load(std::memory_order_relaxed); }
+} // namespace dingosdk::overlay::detail

@@ -1533,7 +1533,6 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                 if (s.details) render(c);
             }
         }
-        overlay::set_native_throwdown_menu(s.page.handle || native_one_up_setup_open() || native_mode_customize_open());
         for (const auto &a : run) {
             std::vector<std::string> words;
             std::size_t start = 0;
