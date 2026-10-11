@@ -355,6 +355,7 @@ void set_skate_hud_feed(SkateHudFeed) noexcept;
 // game's leader marked out drawn over the world (the area, checkpoints or spots, Graffiti's
 // zones in their taggers' colours). Read every presented frame; inactive = nothing to draw.
 struct ModesHudRow {
+    std::uint64_t id{}; // their Steam ID (for their profile picture)
     std::string name, value;
     std::uint32_t color{0xffffffffU}; // IM_COL32
     bool self{}, up{}, out{};

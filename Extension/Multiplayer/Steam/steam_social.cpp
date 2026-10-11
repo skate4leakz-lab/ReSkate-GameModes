@@ -210,4 +210,50 @@ std::shared_ptr<const SteamSocialSnapshot> steam_social_snapshot() {
     next = now + 10000;
     return current;
 }
+
+bool steam_avatar(std::uint64_t steam_id, std::vector<std::uint8_t> &rgba, std::uint32_t &width, std::uint32_t &height) {
+    struct Avatars {
+        HMODULE module{};
+        void *(*friends)(){};
+        void *(*utils)(){};
+        bool (*request)(void *, std::uint64_t, bool){};
+        int (*medium)(void *, std::uint64_t){};
+        bool (*size)(void *, int, std::uint32_t *, std::uint32_t *){};
+        bool (*pixels)(void *, int, std::uint8_t *, int){};
+    };
+    static Avatars api;
+    static std::mutex mutex;
+    if (!steam_id || launcher::offline_mode()) return false;
+    try {
+        std::lock_guard lock(mutex);
+        const auto loaded = GetModuleHandleW(L"steam_api64.dll");
+        if (!loaded) return false;
+        if (api.module != loaded) {
+            api.friends = symbol<decltype(api.friends)>(loaded, "SteamAPI_SteamFriends_v017");
+            api.utils = symbol<decltype(api.utils)>(loaded, "SteamAPI_SteamUtils_v010");
+            api.request = symbol<decltype(api.request)>(loaded, "SteamAPI_ISteamFriends_RequestUserInformation");
+            api.medium = symbol<decltype(api.medium)>(loaded, "SteamAPI_ISteamFriends_GetMediumFriendAvatar");
+            api.size = symbol<decltype(api.size)>(loaded, "SteamAPI_ISteamUtils_GetImageSize");
+            api.pixels = symbol<decltype(api.pixels)>(loaded, "SteamAPI_ISteamUtils_GetImageRGBA");
+            api.module = loaded;
+        }
+        auto *const friends = api.friends(), *const utils = api.utils();
+        if (!friends || !utils) return false;
+        const int image = api.medium(friends, steam_id);
+        if (image <= 0) {
+            // 0: Steam does not have it yet (ask for the user's details), -1: still loading.
+            if (image == 0) (void)api.request(friends, steam_id, false);
+            return false;
+        }
+        std::uint32_t w{}, h{};
+        if (!api.size(utils, image, &w, &h) || !w || !h || w > 256 || h > 256) return false;
+        rgba.resize(std::size_t{w} * h * 4);
+        if (!api.pixels(utils, image, rgba.data(), static_cast<int>(rgba.size()))) return false;
+        width = w;
+        height = h;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 }

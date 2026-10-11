@@ -24,4 +24,8 @@ struct SteamSocialSnapshot {
 // presence, or sends friend/invite requests. Poll only on the client thread.
 // The local player has no `session` here: the session model knows theirs.
 std::shared_ptr<const SteamSocialSnapshot> steam_social_snapshot();
+// A Steam user's profile picture (their medium avatar, 64 x 64 RGBA), once Steam has it: the first
+// asks fetch it, so ask again until it is there. False while it is not (offline, no Steam, still
+// loading, no avatar). Any thread.
+bool steam_avatar(std::uint64_t steam_id, std::vector<std::uint8_t> &rgba, std::uint32_t &width, std::uint32_t &height);
 }

@@ -17,6 +17,7 @@ add_library(dingosdk_overlay STATIC
     Extension/UI/Overlay/perf_overlay.cpp
     Extension/UI/Overlay/skate_hud_overlay.cpp
     Extension/UI/Overlay/one_up_overlay.cpp
+    Extension/UI/Overlay/avatar_sheet.cpp
     Extension/UI/Overlay/modes_hud_overlay.cpp
     Extension/UI/Overlay/modes_page.cpp
     Extension/UI/Overlay/bone_cam_overlay.cpp Extension/UI/Overlay/bone_cam_3d.cpp

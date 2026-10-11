@@ -19,4 +19,8 @@ bool native_lines_available() noexcept;
 void update_native_scoring_rule(std::uintptr_t base, std::uint64_t world, bool active) noexcept;
 void arm_native_lines(Token, bool allow_start, Time turn_at) noexcept;
 std::vector<NativeLine> take_native_lines();
+// Every line skate. banked since the last call (landed, timer or stall ending it), with the score its
+// own HUD showed, multiplier included: the game modes score lines with these.
+struct BankedLine { double score{}; };
+std::vector<BankedLine> take_banked_lines();
 } // namespace dingosdk::multiplayer::one_up

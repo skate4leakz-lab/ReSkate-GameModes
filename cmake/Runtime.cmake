@@ -236,8 +236,12 @@ target_sources(dingosdk_runtime PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/m
 # 1-Up's native HUD records and badge (Engine/Vfs/one_up_core_assets.cpp), built into ReSkate.dll
 # when the repository has the bundle; without it 1-Up runs without its own art.
 if(EXISTS "${PROJECT_SOURCE_DIR}/assets/one_up/native_assets.bin")
-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/one_up_native_assets.rc"
-        "ONE_UP_NATIVE_ASSETS RCDATA \"${PROJECT_SOURCE_DIR}/assets/one_up/native_assets.bin\"\n")
+    set(dingosdk_one_up_rc "ONE_UP_NATIVE_ASSETS RCDATA \"${PROJECT_SOURCE_DIR}/assets/one_up/native_assets.bin\"\n")
+    # The bundle's second half (split to stay under GitHub's file size limit).
+    if(EXISTS "${PROJECT_SOURCE_DIR}/assets/one_up/native_assets_2.bin")
+        string(APPEND dingosdk_one_up_rc "ONE_UP_NATIVE_ASSETS_2 RCDATA \"${PROJECT_SOURCE_DIR}/assets/one_up/native_assets_2.bin\"\n")
+    endif()
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/one_up_native_assets.rc" "${dingosdk_one_up_rc}")
     target_sources(dingosdk_runtime PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/one_up_native_assets.rc")
 endif()
 

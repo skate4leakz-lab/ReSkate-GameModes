@@ -72,6 +72,7 @@ void destroy_graphics() {
     s.ui_was_interactive = false;
     s.frames.clear();
     s.card_texture.Reset(); s.card_upload.Reset();
+    s.avatar_texture.Reset(); s.avatar_upload.Reset(); avatar_sheet_lost();
     card_image_lost();
     s.commands.Reset(); s.rtvs.Reset(); s.srvs.Reset(); s.fence.Reset(); s.device.Reset();
     if (s.fence_event) CloseHandle(s.fence_event);
@@ -234,7 +235,7 @@ bool setup_graphics() {
         return false;
     }
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap.NumDescriptors = 2; // ImGui's atlas, then the map download card's icon (upload_card_image)
+    heap.NumDescriptors = 3; // ImGui's atlas, the map download card's icon (upload_card_image), the avatar sheet
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     graphics_result = s.device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&s.srvs));
     if (FAILED(graphics_result)) {
@@ -452,13 +453,9 @@ void draw_menu() {
 // texture in the SRV heap's second slot. Recorded on the frame's command list ahead of ImGui's
 // draws, so the copy is done before anything samples it. Nothing here is fatal: without the
 // icon the card shows a plain tile.
-void upload_card_image(State& s) {
-    CardPixels pixels;
-    if (!take_card_pixels(pixels) || pixels.rgba.empty() || !s.device || !s.srvs) return;
-    // Frames still on the GPU may sample the icon this one replaces.
-    if (s.card_texture && s.next_fence && !completed(s.next_fence, render_fence_timeout_ms)) return;
-    s.card_texture.Reset();
-    s.card_upload.Reset();
+// An RGBA picture made into a texture in the SRV heap's `slot`, its copy recorded on the frame's
+// command list ahead of ImGui's draws. Its GPU handle once made (0 on any failure).
+UINT64 upload_rgba(State& s, const CardPixels& pixels, UINT slot, ComPtr<ID3D12Resource>& texture_out, ComPtr<ID3D12Resource>& upload_out) {
     D3D12_RESOURCE_DESC texture{};
     texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     texture.Width = pixels.width;
@@ -489,10 +486,10 @@ void upload_card_image(State& s) {
                                                  IID_PPV_ARGS(&made))) ||
         FAILED(s.device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                                  IID_PPV_ARGS(&upload))))
-        return;
+        return 0;
     void* mapped{};
     const D3D12_RANGE none{};
-    if (FAILED(upload->Map(0, &none, &mapped)) || !mapped) return;
+    if (FAILED(upload->Map(0, &none, &mapped)) || !mapped) return 0;
     for (UINT row = 0; row < pixels.height; ++row)
         std::memcpy(static_cast<unsigned char*>(mapped) + layout.Offset + std::size_t{row} * layout.Footprint.RowPitch,
                     pixels.rgba.data() + std::size_t{row} * pixels.width * 4, std::size_t{pixels.width} * 4);
@@ -514,18 +511,38 @@ void upload_card_image(State& s) {
     const auto step = s.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     auto cpu = s.srvs->GetCPUDescriptorHandleForHeapStart();
     auto gpu = s.srvs->GetGPUDescriptorHandleForHeapStart();
-    cpu.ptr += step;
-    gpu.ptr += step;
+    cpu.ptr += step * slot;
+    gpu.ptr += step * slot;
     D3D12_SHADER_RESOURCE_VIEW_DESC view{};
     view.Format = texture.Format;
     view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     view.Texture2D.MipLevels = 1;
     s.device->CreateShaderResourceView(made.Get(), &view, cpu);
-    s.card_texture = std::move(made);
-    s.card_upload = std::move(upload);
+    texture_out = std::move(made);
+    upload_out = std::move(upload);
+    return gpu.ptr;
+}
+
+void upload_card_image(State& s) {
+    CardPixels pixels;
+    if (!take_card_pixels(pixels) || pixels.rgba.empty() || !s.device || !s.srvs) return;
+    // Frames still on the GPU may sample the icon this one replaces.
+    if (s.card_texture && s.next_fence && !completed(s.next_fence, render_fence_timeout_ms)) return;
+    s.card_texture.Reset();
+    s.card_upload.Reset();
     // Drawable from the next frame on: this frame's draws were made before the copy was recorded.
-    card_image_uploaded(static_cast<ImTextureID>(gpu.ptr), pixels.serial);
+    if (const auto gpu = upload_rgba(s, pixels, 1, s.card_texture, s.card_upload)) card_image_uploaded(static_cast<ImTextureID>(gpu), pixels.serial);
+}
+// Players' profile pictures (avatar_sheet.cpp), uploaded again whenever a new one lands.
+void upload_avatar_sheet(State& s) {
+    if (!s.device || !s.srvs) return;
+    if (s.avatar_texture && s.next_fence && !completed(s.next_fence, 0)) return; // next frame
+    CardPixels pixels;
+    if (!take_avatar_sheet(pixels)) return;
+    s.avatar_texture.Reset();
+    s.avatar_upload.Reset();
+    if (const auto gpu = upload_rgba(s, pixels, 2, s.avatar_texture, s.avatar_upload)) avatar_sheet_uploaded(static_cast<ImTextureID>(gpu), pixels.serial);
 }
 
 void render(IDXGISwapChain* presented, UINT flags) {
@@ -673,6 +690,7 @@ void render(IDXGISwapChain* presented, UINT flags) {
         ImGui::SetCurrentContext(previous); s.failed = true; restore_input(true); return;
     }
     upload_card_image(s);
+    upload_avatar_sheet(s);
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = frame.buffer.Get();

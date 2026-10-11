@@ -452,6 +452,21 @@ void objective(ImDrawList *draw, const std::string &text, float scale, float y) 
 }
 
 void crown(ImDrawList *draw, ImVec2 top_centre, float width, ImU32 colour);
+// A player's Steam profile picture in a circle ringed in their colour; their colour alone until
+// Steam has the picture.
+void avatar_disc(ImDrawList *draw, std::uint64_t id, ImVec2 centre, float radius, ImU32 colour, float alpha = 1.0f) {
+    want_avatar(id);
+    ImTextureID texture{};
+    ImVec2 uv0, uv1;
+    draw->AddCircleFilled(centre, radius, with_alpha(colour, alpha), 32);
+    if (avatar_image(id, texture, uv0, uv1)) {
+        const float inner = radius * 0.86f;
+        draw->AddImageRounded(texture, ImVec2(centre.x - inner, centre.y - inner), ImVec2(centre.x + inner, centre.y + inner), uv0, uv1,
+                              with_alpha(IM_COL32(255, 255, 255, 255), alpha), inner);
+    } else {
+        draw->AddCircleFilled(centre, radius * 0.8f, with_alpha(IM_COL32(255, 255, 255, 255), 0.25f * alpha), 32);
+    }
+}
 // skate.'s own Throwdown HUD (as a stock Spot Battle draws it, recorded 2026-10-10). Top left: the
 // mode in the brush face, what to do in white, every player on a bar (the local player's magenta,
 // others dark: rank, their colour, name, score), and "Your Turn!" on a dark pill. Top centre: the
@@ -496,9 +511,7 @@ void draw_panel(ImDrawList *draw, HudState &st, float scale, bool /*native_score
         const float ts = 15.0f * k, ty = lo.y + (bar_h - ts) * 0.5f;
         const auto rank = std::to_string(i + 1);
         draw->AddText(heading, ts, ImVec2(lo.x + 10.0f * k, ty), white, rank.c_str());
-        const ImVec2 disc(lo.x + 42.0f * k, lo.y + bar_h * 0.5f);
-        draw->AddCircleFilled(disc, 9.0f * k, white, 24);
-        draw->AddCircleFilled(disc, 7.5f * k, r.color, 24);
+        avatar_disc(draw, r.id, ImVec2(lo.x + 42.0f * k, lo.y + bar_h * 0.5f), 9.5f * k, r.color);
         const float vw = text_width(heading, ts, r.value);
         std::string name = r.name;
         while (name.size() > 1 && text_width(heading, ts, name) > bar_w - 70.0f * k - vw - 14.0f * k) name.pop_back();
@@ -633,7 +646,7 @@ void draw_centre(ImDrawList *draw, HudState &st, float scale, bool native_countd
     if (!h.line.empty()) {
         const float size = 30.0f * scale, w = text_width(heading, size, h.line);
         band(draw, ImVec2(mid - w * 0.5f - 120.0f * scale, bottom - 6.0f * scale), ImVec2(mid + w * 0.5f + 120.0f * scale, bottom + size + 8.0f * scale), 0.45f, 0);
-        soft_text(draw, heading, size, ImVec2(mid - w * 0.5f, bottom), accent, h.line);
+        soft_text(draw, heading, size, ImVec2(mid - w * 0.5f, bottom), IM_COL32(255, 255, 255, 255), h.line);
         bottom -= 50.0f * scale;
     }
     if (!h.warning.empty()) {
@@ -1523,9 +1536,7 @@ void draw_results(ImDrawList *draw, const ModesHud &h, float scale) {
         const auto rank = std::to_string(i + 1);
         draw->AddText(heading, rank_size * 0.85f, ImVec2(lo.x + 24.0f * scale, lo.y + (row_h - rank_size * 0.85f) * 0.5f), with_alpha(ink, a), rank.c_str());
         // Their colour as the avatar disc, their name, their score.
-        const ImVec2 disc(lo.x + 86.0f * scale, lo.y + row_h * 0.5f);
-        draw->AddCircleFilled(disc, 15.0f * scale, with_alpha(IM_COL32(255, 255, 255, 255), a), 32);
-        draw->AddCircleFilled(disc, 13.0f * scale, with_alpha(row.color, a), 32);
+        avatar_disc(draw, row.id, ImVec2(lo.x + 86.0f * scale, lo.y + row_h * 0.5f), 17.0f * scale, row.color, a);
         const float vs = 21.0f * scale, ns = 21.0f * scale;
         const float vw = text_width(heading, vs, row.value);
         std::string name = row.name;
@@ -1559,7 +1570,14 @@ void draw_results(ImDrawList *draw, const ModesHud &h, float scale) {
         // The name plate: their colour square, their name, YOU under it.
         const ImVec2 lo(500.0f * scale, display.y - 190.0f * scale), hi(lo.x + 300.0f * scale, lo.y + 64.0f * scale);
         draw->AddRectFilled(lo, hi, with_alpha(IM_COL32(16, 16, 20, 255), 0.88f * a));
+        // Their profile picture as the plate's square (their colour until Steam has it).
         draw->AddRectFilled(lo, ImVec2(lo.x + 64.0f * scale, hi.y), with_alpha(self->color, a));
+        want_avatar(self->id);
+        ImTextureID picture{};
+        ImVec2 uv0, uv1;
+        if (avatar_image(self->id, picture, uv0, uv1))
+            draw->AddImage(picture, ImVec2(lo.x + 3.0f * scale, lo.y + 3.0f * scale), ImVec2(lo.x + 61.0f * scale, hi.y - 3.0f * scale), uv0, uv1,
+                           with_alpha(IM_COL32(255, 255, 255, 255), a));
         std::string name = self->name;
         while (name.size() > 1 && text_width(heading, 22.0f * scale, name) > 210.0f * scale) name.pop_back();
         if (name != self->name) name += "...";

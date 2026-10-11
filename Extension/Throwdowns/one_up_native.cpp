@@ -57,6 +57,11 @@ struct Runtime {
     Capture armed, running;
     std::uint64_t line{};
     std::vector<NativeLine> events;
+    // Every line skate. banks (its own score, the one its HUD shows), for the game modes; the two
+    // listeners that both see a line's end are told apart by time and score.
+    std::vector<BankedLine> banked;
+    double last_banked{};
+    std::uint64_t last_banked_at{};
 };
 Runtime& runtime() { static auto* r = new Runtime; return *r; }
 // These handles belong to the scoring world, not to a temporary menu page.
@@ -262,6 +267,11 @@ void observe_native_line(Address vm) noexcept {
         // stall timeout qualifies. LineScore is copied once, without multiplying it again.
         const bool landed = reason == 1 || reason == 6;
         logging::log(logging::Level::debug, logging::Channel::progression, "1-Up native line finalized: reason {}, score {}, eligible {}.", reason, score, landed);
+        if (landed && score > 0 && !(score == r.last_banked && now - r.last_banked_at < 500) && r.banked.size() < 64) {
+            r.banked.push_back({score});
+            r.last_banked = score;
+            r.last_banked_at = now;
+        }
         if (r.line && r.running.token == r.armed.token && now >= r.running.at && now - r.running.at <= 125000 && r.events.size() < 128)
             r.events.push_back({r.running.token, r.line, score, static_cast<std::uint32_t>(now - r.running.at), true, landed});
         r.running = {}; r.line = 0;
@@ -274,4 +284,5 @@ void observe_native_line(Address vm) noexcept {
     }
 }
 std::vector<NativeLine> take_native_lines() { auto& r = runtime(); std::lock_guard lock(r.mutex); return std::exchange(r.events, {}); }
+std::vector<BankedLine> take_banked_lines() { auto& r = runtime(); std::lock_guard lock(r.mutex); return std::exchange(r.banked, {}); }
 } // namespace dingosdk::multiplayer::one_up

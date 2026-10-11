@@ -10,6 +10,8 @@
 #include "Extension/Multiplayer/Hud/native_party.h"
 #include "trick_gestures.h"
 #include "Extension/Throwdowns/one_up_placement.h"
+#include "Extension/Throwdowns/one_up_native.h"
+#include "Extension/Multiplayer/Steam/steam_social.h"
 #include "Engine/Game/UI/game_view.h"
 #include "Engine/Core/Log/logging.h"
 #include "Extension/Console/commands.h"
@@ -214,6 +216,8 @@ struct State {
     // placed flag waiting for the game thread (under hud_mutex).
     std::atomic<std::uint64_t> flaggable{};
     std::atomic<bool> counting_down{};
+    std::atomic<std::uint64_t> reopen_setup_at{}; // placing ended while setting up: back to the setup page then
+    bool was_placing{};
     std::string native_navigation; // `mode nav`, under hud_mutex
     std::optional<std::pair<Vec3, float>> pending_flag;
 };
@@ -654,6 +658,11 @@ void track_bail(State &s, std::uint32_t physics, float vertical, std::uint64_t n
     }
 }
 
+// skate.'s own line scores (its bottom-left HUD's, read from the game) score lines whenever they are
+// available; Graffiti keeps its own lines (it paints what each one skated).
+bool native_scoring(const State &s) {
+    return multiplayer::one_up::native_lines_available() && !(s.game && s.game->settings.mode == Mode::graffiti);
+}
 void track_skater(State &s, bool in_world, std::uint64_t now) {
     const auto t = trainer::telemetry();
     const float dt = s.last_tick && now > s.last_tick ? std::min(0.25f, (now - s.last_tick) / 1000.0f) : 0.0f;
@@ -702,7 +711,7 @@ void track_skater(State &s, bool in_world, std::uint64_t now) {
             // Down a stair set or a gap: landed a metre or more below the takeoff.
             const bool gap = t.last.takeoff[1] - t.last.landing[1] >= gap_drop;
             if (gap && s.line.tags.size() < max_line_tags) s.line.tags.push_back({TagKind::gap, {t.last.takeoff, t.last.landing}});
-            popup(s, "+" + grouped(score) + (gap ? "  gap" : ""));
+            if (!native_scoring(s)) popup(s, "+" + grouped(score) + (gap ? "  gap" : ""));
         }
     }
     // Grinds and slides: the path the board slides along is a trick in the line, and in Graffiti
@@ -730,17 +739,20 @@ void track_skater(State &s, bool in_world, std::uint64_t now) {
             s.line.landed = now;
             s.line.at = path.back();
             if (s.line.tags.size() < max_line_tags) s.line.tags.push_back({TagKind::grind, thin_path(path)});
-            popup(s, "+" + grouped(score) + "  grind");
+            if (!native_scoring(s)) popup(s, "+" + grouped(score) + "  grind");
         }
         path.clear();
     }
     // A line ends once the skater has been on the ground a moment, or steps off the board.
     if (s.line.tricks && !t.airborne && !s.bail.active && s.line.grind.empty() &&
         (now - s.line.landed >= line_grace_ms || t.physics_state >= offboard_states_first)) {
-        const auto score = line_score(s.line.sum, s.line.tricks);
-        report(s, Event::line, score, static_cast<std::int32_t>(s.line.tricks), s.line.at, s.line.tags);
-        popup(s, std::format("{} line: {}", s.line.tricks == 1 ? std::string("1 trick") : std::format("{} trick", s.line.tricks),
-                             grouped(score)));
+        // With skate.'s own scores the line is banked when skate. banks it (track_native_lines).
+        if (!native_scoring(s)) {
+            const auto score = line_score(s.line.sum, s.line.tricks);
+            report(s, Event::line, score, static_cast<std::int32_t>(s.line.tricks), s.line.at, s.line.tags);
+            popup(s, std::format("{} line: {}", s.line.tricks == 1 ? std::string("1 trick") : std::format("{} trick", s.line.tricks),
+                                 grouped(score)));
+        }
         s.line = {};
     }
 }
@@ -1530,7 +1542,10 @@ void build_hud(State &s, std::uint64_t now) {
         case Phase::setup:
             if (g.leading) {
                 const auto why = missing(g.settings);
-                h.status = why.empty() ? std::format("Ready with {} skater{}. Press START when everyone's in.", st ? st->standings.size() : 1,
+                // START is the flag's: before it is down, the setup page in Throwdowns places it.
+                const bool flagged = s.flag_key == game_key(g);
+                if (why.empty() && !flagged) h.status = "Place your start flag: open Throwdowns, pick this game and PLACE START FLAG.";
+                else h.status = why.empty() ? std::format("Ready with {} skater{}. Hold START on the flag when everyone's in.", st ? st->standings.size() : 1,
                                                      st && st->standings.size() == 1 ? "" : "s")
                                        : why;
             } else {
@@ -1588,7 +1603,7 @@ void build_hud(State &s, std::uint64_t now) {
         if (mode == Mode::skate) { // no trick lines in S.K.A.T.E.: the attempt as it is done, then how it went
             if (phase == Phase::playing && s.skate.mine && !s.skate.sent && !s.skate.parts.empty()) h.line = skate_trick(s.skate);
             else if (!s.popup.empty() && now - s.popup_at < popup_ms && me && phase == Phase::playing) h.line = s.popup;
-        } else if (s.line.tricks && me && phase == Phase::playing)
+        } else if (s.line.tricks && me && phase == Phase::playing && !native_scoring(s))
             h.line = std::format("{} trick line  -  {}", s.line.tricks, grouped(line_score(s.line.sum, s.line.tricks)));
         else if (!s.popup.empty() && now - s.popup_at < popup_ms && me && phase == Phase::playing)
             h.line = s.popup;
@@ -1638,6 +1653,8 @@ void build_hud(State &s, std::uint64_t now) {
             for (const auto &p : st->standings) {
                 overlay::ModesHudRow row;
                 row.name = name_of(s, p.player);
+                // Their Steam ID, for their profile picture (alone, the local player's is the account's).
+                row.id = p.player == self && !s.local ? multiplayer::steam_social_snapshot()->local.id : p.player;
                 row.color = player_colour(st, p.player);
                 row.self = p.player == self;
                 row.up = p.up;
@@ -1775,6 +1792,7 @@ void build_hud(State &s, std::uint64_t now) {
             row.color = sample[i].second;
             row.value = values[i];
             row.self = i == 1;
+            if (row.self) row.id = multiplayer::steam_social_snapshot()->local.id;
             h.rows.push_back(std::move(row));
         }
         h.winner = h.rows.front().name;
@@ -1892,6 +1910,15 @@ void build_hud(State &s, std::uint64_t now) {
                 h.invite_fade = std::clamp(std::min(age / 250.0f, (invite_ms - age) / 1000.0f), 0.0f, 1.0f);
             }
     }
+    // Placing (a custom area, the route, the spots) just ended while the game is set up: back to
+    // its setup page in Throwdowns.
+    const bool placing_now = s.placing != State::Placing::none;
+    // (A moment later: the free camera is still letting go of the game's input.)
+    if (s.was_placing && !placing_now && s.game && s.game->leading && !s.game->referee) {
+        s.reopen_setup_at.store(now + 2500);
+        popup(s, "Set! Open Throwdowns to finish setting up.");
+    }
+    s.was_placing = placing_now;
     auto native = native_snapshot(s);
     s.counting_down.store(s.game && s.game->state && s.game->state->phase == Phase::countdown && standing(*s.game, self_id(s)));
     s.flaggable.store(s.game && s.game->leading && (!s.game->state || s.game->state->phase != Phase::results) ? game_key(*s.game) : 0);
@@ -1956,6 +1983,10 @@ std::vector<std::vector<std::uint8_t>> tick(const SessionInput &input) {
     }
     try {
         track_skater(s, input.in_world, now);
+        // Lines skate. banked, at its own score: the game's line for everyone playing.
+        for (const auto &line : multiplayer::one_up::take_banked_lines())
+            if (native_scoring(s) && s.game && playing(*s.game) && standing(*s.game, self_id(s)) && s.skater)
+                report(s, Event::line, static_cast<std::int32_t>(std::min(line.score, 2.0e9)), 1, s.position);
         run_placing(s, now);
         run_invites(s, now);
         if (s.game) {
@@ -2490,6 +2521,11 @@ NativeMatch native_match() {
 }
 std::uint64_t flag_game() noexcept { return state().flaggable.load(); }
 bool countdown_active() noexcept { return state().counting_down.load(); }
+bool take_reopen_setup() noexcept {
+    auto &at = state().reopen_setup_at;
+    auto when = at.load();
+    return when && GetTickCount64() >= when && at.compare_exchange_strong(when, 0);
+}
 std::string take_native_navigation() {
     auto &s = state();
     std::lock_guard lock(s.hud_mutex);

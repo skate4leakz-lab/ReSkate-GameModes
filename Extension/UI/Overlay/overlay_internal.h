@@ -174,6 +174,7 @@ struct State {
     // The map download card's icon (map_download_card.cpp), in the SRV heap's second slot, and
     // the buffer it was uploaded from, which lives until the next one replaces it.
     ComPtr<ID3D12Resource> card_texture, card_upload;
+    ComPtr<ID3D12Resource> avatar_texture, avatar_upload; // players' profile pictures (avatar_sheet.cpp)
     ComPtr<ID3D12GraphicsCommandList> commands;
     ComPtr<ID3D12Fence> fence;
     HANDLE fence_event = nullptr;
@@ -293,6 +294,14 @@ struct CardPixels {
 bool take_card_pixels(CardPixels& pixels);
 void card_image_uploaded(ImTextureID texture, unsigned serial);
 void card_image_lost();
+// Players' Steam profile pictures (avatar_sheet.cpp). want_avatar asks for one (any thread); the
+// render thread takes the sheet when a new picture lands, uploads it and says so; avatar_image is
+// where a loaded one is on it.
+void want_avatar(std::uint64_t steam_id) noexcept;
+bool take_avatar_sheet(CardPixels& pixels);
+void avatar_sheet_uploaded(ImTextureID texture, unsigned serial) noexcept;
+void avatar_sheet_lost() noexcept;
+bool avatar_image(std::uint64_t steam_id, ImTextureID& texture, ImVec2& uv0, ImVec2& uv1) noexcept;
 // Game debug text (game_text_overlay.cpp): polled every presented frame.
 bool game_text_pending();
 void draw_game_text();

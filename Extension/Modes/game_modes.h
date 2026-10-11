@@ -75,6 +75,9 @@ NativeMatch native_match();
 // The local player's game is counting down to GO: they start on their board and their controls
 // wait for GO, as at the start of skate.'s own Throwdowns (any thread).
 bool countdown_active() noexcept;
+// Placing a play area, route or spots for a game being set up has just ended: its Throwdowns
+// setup page opens again (taken once; the native menu tick).
+bool take_reopen_setup() noexcept;
 // `mode nav <name>` (development): a native screen change the Throwdowns menu tick sends (taken once).
 std::string take_native_navigation();
 // Native flag placement for a game set up here (one_up_placement.cpp, from the mode's Throwdowns

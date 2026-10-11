@@ -98,8 +98,24 @@ struct CardScale {
 // four rows fit under the page's title without scrolling; `grid_top` keeps clear of that title.
 constexpr CardScale row_scale{.7f, .9f, .7f}, grid_scale{.64f, .27f, .27f};
 constexpr unsigned cards_per_row = 4;
-// 1-Up's blue badge on its card: off while the grid crash (Skate.exe+0x59d19cf) is narrowed down.
-constexpr bool one_up_badge = false;
+// Each mode's round logo on its card (art packed into ReSkate.dll's core bundle with 1-Up's). The
+// grid crashes of 2026-10-10 all came with Throwdowns opened by our own navigation, not the badge.
+constexpr bool mode_logos = true;
+std::string_view mode_logo(modes::Mode mode) {
+    using modes::Mode;
+    switch (mode) {
+    case Mode::one_up: return "UI/ReSkate/OneUp/img_OneUp_Blue_1024";
+    case Mode::jam: return "UI/ReSkate/Throwdowns/img_jam_Placeholder";
+    case Mode::meat: return "UI/ReSkate/Throwdowns/img_meat_Placeholder";
+    case Mode::race: return "UI/ReSkate/Throwdowns/img_race_Placeholder";
+    case Mode::domination: return "UI/ReSkate/Throwdowns/img_domination_Placeholder";
+    case Mode::graffiti: return "UI/ReSkate/Throwdowns/img_graffiti_Placeholder";
+    case Mode::tag: return "UI/ReSkate/Throwdowns/img_tag_Placeholder";
+    case Mode::infection: return "UI/ReSkate/Throwdowns/img_infection_Placeholder";
+    case Mode::hide: return "UI/ReSkate/Throwdowns/img_hide_Placeholder";
+    default: return {};
+    }
+}
 constexpr float card_gap = 20.f, grid_top = 150.f;
 struct State {
     Address manager{}, base{}, anchor_asset{}, primary_input{};
@@ -131,6 +147,11 @@ struct State {
     Widget original_holder{};
     // A card just set a game up: its native flag placement opens once the game is there (until then).
     std::uint64_t flag_after{};
+    // Throwdowns was opened by us to come back to the setup page (after placing): the cards stay
+    // in the stock row (the grid on a page we opened ourselves crashed the game, 2026-10-10) and the
+    // setup page shows at once. Until that time.
+    std::uint64_t reopen_until{};
+    bool row_only{}; // this page's cards stay in the stock row (we opened it)
     // The native 1-UP card (one_up_menu.cpp) when it was on the page: it takes our 1-Up card's
     // place in the grid. Its description label's text is put back when the grid goes.
     Original one_up;
@@ -147,6 +168,7 @@ void reset(bool generations_too) {
     s.anchor_asset = s.primary_input = 0;
     s.page = s.cards = s.source_label = s.holder = s.grid = {};
     s.one_up = {};
+    s.row_only = false;
     s.original_holder = {};
     s.mode_cards.clear();
     s.original_body = s.original_back = s.original_actions = {};
@@ -854,7 +876,9 @@ void initialize(const Context &c, Value p, Value list, Value holder) {
     s.holder = holder;
     s.original_holder = read<Widget>(c.address(holder));
     describe_row(c);
-    if (modes::throwdown_grid()) {
+    const bool reopening = s.reopen_until && GetTickCount64() < s.reopen_until;
+    s.row_only = reopening;
+    if (modes::throwdown_grid() && !reopening) {
         try {
             build_grid(c);
         } catch (const std::exception &e) {
@@ -868,6 +892,12 @@ void initialize(const Context &c, Value p, Value list, Value holder) {
     else publish_cards(c);
     s.generations.emplace(p.handle, list.handle);
     logging::log(logging::Level::info, logging::Channel::ui, "Game modes card: {} mode cards added to the Throwdowns menu.", s.mode_cards.size());
+    // Opened while the player sets a game up (after placing its area, route or spots): straight to
+    // that game's setup page (Back shows the cards).
+    if (const auto m = modes::menu_view(); reopening || (m.in_game && m.leading && m.phase <= 1)) {
+        s.reopen_until = 0;
+        switch_page(c, true);
+    }
 }
 
 // One row of the mode panel: a button (with a command) or a plain label.
@@ -957,6 +987,16 @@ std::string mode_title(const std::string &key) {
 void render(const Context &c) {
     auto &s = state();
     const auto m = modes::menu_view();
+    // The panel names the mode being set up, its line under it (the stock panel's description).
+    if (const auto mode = modes::parse_mode(m.mode); mode && m.in_game) {
+        plain_label(c, c.field(s.header, 0x00f3b15e), upper(modes::mode_name(*mode)));
+        auto line = std::string(modes::mode_tagline(*mode));
+        if (line.empty()) line = std::string(modes::mode_summary(*mode));
+        plain_label(c, c.field(s.panel_notice, 0x94703efc), line);
+    } else {
+        plain_label(c, c.field(s.header, 0x00f3b15e), "GAME MODES");
+        plain_label(c, c.field(s.panel_notice, 0x94703efc), "Pick a mode, set it up, then place your start flag.");
+    }
     std::vector<std::string> shown{"rules"};
     const auto note = [&](const std::string &id, const std::string &text) { row(c, shown, id, text); };
     const auto action = [&](const std::string &id, const std::string &text, std::string verb) { row(c, shown, id, text, "mode", std::move(verb)); };
@@ -990,17 +1030,17 @@ void render(const Context &c) {
             if (!race) {
                 // The play area: a circle round the start (sized here, or placed and sized by hand),
                 // corners, or the whole map.
-                note("area", m.area_radius > 0 ? std::format("Play area: circle {:.0f} m across", m.area_radius * 2)
-                             : m.corners >= 3  ? std::format("Play area: {} corners", m.corners)
-                                               : std::string("Play area: the whole map"));
+                // The play area as it is now; pressing steps through the sizes (then the whole map).
                 static constexpr float small_sizes[]{15, 25, 40, 75, 0}, wide_sizes[]{50, 100, 200, 400, 0};
                 const auto &sizes = wide ? wide_sizes : small_sizes;
-                std::size_t at = 0;
+                std::size_t at = std::size(sizes) - 1; // a custom size or corners: the next press starts the list
                 for (std::size_t i = 0; i < std::size(sizes); ++i)
-                    if (std::abs(sizes[i] - m.area_radius) < 0.5f) at = i;
+                    if (std::abs(sizes[i] - m.area_radius) < 0.5f && (sizes[i] > 0 || m.corners < 3)) at = i;
                 const float next = sizes[(at + 1) % std::size(sizes)];
-                action("area-size", next > 0 ? std::format("PLAY AREA SIZE: {:.0f} M  >", next * 2) : std::string("PLAY AREA SIZE: WHOLE MAP  >"),
-                       next > 0 ? std::format("circle {:.0f}", next) : std::string("corner clear"));
+                const auto now_text = m.area_radius > 0 ? std::format("PLAY AREA: {:.0f} M ACROSS", m.area_radius * 2)
+                                    : m.corners >= 3     ? std::format("PLAY AREA: {} CORNERS", m.corners)
+                                                         : std::string("PLAY AREA: WHOLE MAP");
+                action("area-size", now_text + "  >", next > 0 ? std::format("circle {:.0f}", next) : std::string("corner clear"));
                 row(c, shown, "place-circle", "CUSTOM PLAY AREA (PLACE AND SIZE IT)", "place", "circle");
             }
             if (timed) {
@@ -1009,7 +1049,7 @@ void render(const Context &c) {
                 for (std::size_t i = 0; i < std::size(times); ++i)
                     if (times[i] == m.duration) at = i;
                 const auto next = times[(at + 1) % std::size(times)];
-                action("time", std::format("TIME: {}:{:02}  >", next / 60, next % 60), std::format("time {}", next));
+                action("time", std::format("TIME: {}:{:02}  >", m.duration / 60, m.duration % 60), std::format("time {}", next));
             }
             action("start", "START GAME", "start");
             action("stop", "CANCEL GAME", "stop");
@@ -1021,9 +1061,9 @@ void render(const Context &c) {
             action("leave", "LEAVE GAME", "leave");
             footer_action(c, s.footer_confirm, "LEAVE GAME", "mode", "leave");
         }
-        note("more", "More settings: GAME MODES in the ReSkate menu (Insert).");
     }
-    if (!s.status.empty()) note("status", s.status);
+    // Only what went wrong (the buttons themselves show what was set).
+    if (s.status.starts_with("error: ")) note("status", s.status.substr(7));
     // Footer: Back and Confirm, reconciled after native mounting clears the list.
     const auto mounted = read<Address>(c.address(c.field(s.footer_list, handles_field)));
     const auto mounted_count = mounted ? read<std::uint32_t>(mounted - 4) & 0x7fffffff : 0;
@@ -1144,7 +1184,7 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                 }
             }
             // `mode grid on|off` changed: build this page's cards again in the other layout.
-            if (s.page.handle && !s.details && modes::throwdown_grid() != (s.grid.handle != 0)) {
+            if (s.page.handle && !s.details && !s.row_only && modes::throwdown_grid() != (s.grid.handle != 0)) {
                 const std::pair<Handle, Handle> generation{s.page.handle, s.cards.handle};
                 release(c);
                 s.generations.erase(generation);
@@ -1173,11 +1213,10 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                 // Keep the cards' callbacks reserved while a panel shows.
                 for (const auto &card : s.mode_cards) callback(c, "card", card.key);
                 // 1-Up's card wears its own blue 1UP badge (built into ReSkate.dll with its HUD art).
-                if constexpr (one_up_badge)
+                if constexpr (mode_logos)
                     for (const auto &card : s.mode_cards)
-                        if (card.mode == modes::Mode::one_up)
-                            publish_texture(c, std::array{c.field(card.category, 0x189084da), c.field(card.category, 0xc2917efc)},
-                                            "UI/ReSkate/OneUp/img_OneUp_Blue_1024");
+                        if (const auto logo = mode_logo(card.mode); !logo.empty())
+                            publish_texture(c, std::array{c.field(card.category, 0x189084da), c.field(card.category, 0xc2917efc)}, logo);
                 shrink_all(c); // the native list can restore authored sizes when it remounts
                 if (s.grid.handle) mount_grid(c);
                 else publish_cards(c);

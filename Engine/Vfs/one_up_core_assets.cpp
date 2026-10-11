@@ -6,6 +6,7 @@
 #include <mutex>
 #include <span>
 #include <stdexcept>
+#include <vector>
 
 namespace dingosdk::mods {
 namespace {
@@ -45,12 +46,19 @@ std::optional<Mod> one_up_core_assets(const std::filesystem::path& data_root) {
     }
     if(!module)return {};
     struct Release {HMODULE module;bool borrowed;~Release(){if(!borrowed)FreeLibrary(module);}} release{module,borrowed};
-    const auto resource=FindResourceW(module,L"ONE_UP_NATIVE_ASSETS",RT_RCDATA);
-    if(!resource)return {};
-    const auto loaded=LoadResource(module,resource);
-    const auto pointer=loaded?LockResource(loaded):nullptr;
-    if(!pointer)throw std::runtime_error("ReSkate core assets could not be loaded");
-    auto bytes=std::span(static_cast<const std::byte*>(pointer),SizeofResource(module,resource));
+    // The bundle can come in two parts (each under GitHub's file limit): joined here.
+    std::vector<std::byte> joined;
+    for(const auto* name:{L"ONE_UP_NATIVE_ASSETS",L"ONE_UP_NATIVE_ASSETS_2"}) {
+        const auto resource=FindResourceW(module,name,RT_RCDATA);
+        if(!resource)continue;
+        const auto loaded=LoadResource(module,resource);
+        const auto pointer=loaded?LockResource(loaded):nullptr;
+        if(!pointer)throw std::runtime_error("ReSkate core assets could not be loaded");
+        const auto part=static_cast<const std::byte*>(pointer);
+        joined.insert(joined.end(),part,part+SizeofResource(module,resource));
+    }
+    if(joined.empty())return {};
+    auto bytes=std::span<const std::byte>(joined);
     if(bytes.size()<12 || std::memcmp(bytes.data(),"RS1UP001",8))throw std::runtime_error("ReSkate core asset format differs");
     bytes=bytes.subspan(8);const auto count=take<std::uint32_t>(bytes);
     if(!count || count>64)throw std::runtime_error("ReSkate core asset count differs");
