@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string>
 
 namespace dingosdk::multiplayer {
 // Offline stand-ins for the answers throwdowns normally get from the backend
@@ -11,6 +12,9 @@ void initialize_native_throwdowns(std::uintptr_t base) noexcept;
 // backend's client_strings_v1 fills, once the string database is loaded. Rechecked every
 // 2 s, since a language change or a backend refresh clears that store.
 void apply_throwdown_strings(std::uintptr_t base) noexcept;
+// A game mode on a native Skate Jam: the Jam's title and objective read as the mode's (empty: the
+// Jam's own again). Stored with the next apply_throwdown_strings.
+void set_mode_jam_text(std::string title, std::string objective) noexcept;
 // True while a client ThrowdownRegistration graph is asking IsOnline (0) or
 // IsSessionReady (1) in hosted offline play. Every other graph stays native.
 bool native_throwdown_ready(unsigned predicate) noexcept;

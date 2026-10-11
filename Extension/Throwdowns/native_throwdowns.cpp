@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstring>
 #include <format>
+#include <mutex>
 #include <set>
 #include <string_view>
 
@@ -732,7 +733,30 @@ Address string_database(Address base) {
     }
     return 0;
 }
+// The Jam's own text, put back when no game mode is on it.
+constexpr const char *jam_title_id = "ID_ACTIVITY_JAMSESSION_TITLE", *jam_title_text = "Skate Jam";
+constexpr const char *objective_id = "ID_ACTIVITY_TD_DESC",
+                     *objective_text = "Do [font effect=AttentionOutline color=Attention]Skate Tricks[/font] to earn points!";
+struct ModeJamText {
+    std::mutex mutex;
+    std::string title, objective;
+    bool changed{};
+};
+ModeJamText &mode_jam_text() {
+    static auto *value = new ModeJamText;
+    return *value;
+}
 } // namespace
+void set_mode_jam_text(std::string title, std::string objective) noexcept {
+    try {
+        auto &t = mode_jam_text();
+        std::lock_guard lock(t.mutex);
+        if (t.title == title && t.objective == objective) return;
+        t.title = std::move(title);
+        t.objective = std::move(objective);
+        t.changed = true;
+    } catch (...) {}
+}
 void apply_throwdown_strings(Address base) noexcept {
     namespace loc = addr::localization;
     static ULONGLONG next{};
@@ -742,7 +766,13 @@ void apply_throwdown_strings(Address base) noexcept {
     static Address database{};
     static std::set<std::uint32_t> ours;
     const auto now = GetTickCount64();
-    if (!base || refused || now < next) return;
+    bool text_changed{};
+    {
+        auto &t = mode_jam_text();
+        std::lock_guard lock(t.mutex);
+        text_changed = t.changed;
+    }
+    if (!base || refused || (now < next && !text_changed)) return;
     next = now + 2000;
     try {
         if (!verified) {
@@ -778,6 +808,16 @@ void apply_throwdown_strings(Address base) noexcept {
             if (set(store, entry.id, entry.text, 0)) {
                 ours.insert(hash);
                 ++added;
+            }
+        }
+        // A game mode's title and objective over the Jam's (the store overrides the database).
+        {
+            auto &t = mode_jam_text();
+            std::lock_guard lock(t.mutex);
+            if (t.changed || changed) {
+                const bool title_set = set(store, jam_title_id, t.title.empty() ? jam_title_text : t.title.c_str(), 0);
+                const bool objective_set = set(store, objective_id, t.objective.empty() ? objective_text : t.objective.c_str(), 0);
+                if (title_set && objective_set) t.changed = false;
             }
         }
         if (added && !logged) {

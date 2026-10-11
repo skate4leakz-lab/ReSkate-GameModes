@@ -790,12 +790,16 @@ void sync_native_jam(State &s, std::uint64_t now) {
         const auto seconds = timed(g->settings.mode) ? g->settings.duration_s : 3600u;
         const auto players = static_cast<std::uint32_t>(std::max<std::size_t>(2, st->standings.size()));
         if (multiplayer::start_mode_jam({spot[0], spot[1], spot[2]}, seconds, players)) {
+            multiplayer::set_mode_jam_text(std::string(mode_name(g->settings.mode)), std::string(mode_summary(g->settings.mode)));
             s.jam_game = game_key(*g);
             s.jam_score = -1;
             logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: {} runs on a native Skate Jam ({} s).",
                          mode_name(g->settings.mode), seconds);
         }
     }
+    // The Jam's own title and objective again once no game of ours shows on it (its end screen included).
+    const bool on_end_screen = g && s.jam_ended_game == game_key(*g) && st && st->phase == Phase::results;
+    if (!s.jam_game && !on_end_screen) multiplayer::set_mode_jam_text({}, {});
     if (s.jam_game && me && multiplayer::mode_jam_running() && (me->score != s.jam_score || now >= s.jam_score_at + 3000))
         if (const auto local = multiplayer::local_native_player_id(); local && multiplayer::queue_throwdown_score(local, me->score)) {
             s.jam_score = me->score;
