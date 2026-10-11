@@ -58,6 +58,8 @@ struct ResultPlayer { Value row, rank, outcome; bool winner{}; };
 // each sends and the one last sent.
 struct CustomizeRow { std::string id; Value selector; std::vector<Handle> choices; std::vector<std::string> commands; int applied=-1; };
 struct Customize { Handle list{}; std::vector<CustomizeRow> rows; std::vector<std::byte> items; unsigned stride{}; };
+constexpr unsigned world_marker_count=24;
+constexpr unsigned placement_prompt_count=6;
 struct State {
     // Borrowed native marker fields, restored when this match releases them.
     std::map<Handle,std::pair<Value,bool>> marker_originals;
@@ -80,6 +82,17 @@ struct State {
     bool hud_initialized{}, hud_countdown_visible{}, hud_intro_visible{}, hud_clock_shown{}, hud_results_visible{};
     int hud_kind=-1; // the feed the widgets were built for: 1 1-Up, 0 a game mode
     std::map<Handle,Customize> customizes; // by list: skate. keeps more than one
+    // Native world markers (mode_world_markers): skate.'s own Notice widgets, screen-projected over
+    // route points, capture spots, taggers and the one being placed, instead of drawn text.
+    struct WorldMarker{Value notice,anchor,item;};
+    std::array<WorldMarker,world_marker_count> world_markers;
+    std::vector<Value> world_marker_items; // this frame's mounted markers, newest-first order
+    // The bottom placing band (mode_placement_hud): native Label rows for the hint and each
+    // control, instead of the drawn D-pad icon and text band.
+    Value placement_hint,placement_line;
+    std::array<Value,placement_prompt_count> placement_rows;
+    Value placement_list,placement_anchor,placement_item;
+    std::string placement_status; // built text, so unchanged frames skip rebuilding the list
     std::uint64_t official_serial{}; // the flag placement the native setup was dressed for
     std::atomic<bool> hud_ready{};
     std::uint64_t hud_ended_at{}, hud_go_until{};
@@ -485,6 +498,8 @@ constexpr std::int32_t hud_score_id=0x31555071, hud_countdown_id=0x31555072, hud
 constexpr std::int32_t hud_results_id=0x31555074;
 constexpr std::int32_t hud_clock_id=0x31555075;
 constexpr std::int32_t hud_strike_id=0x31555800;
+constexpr std::int32_t hud_marker_id=0x31555900;
+constexpr std::int32_t hud_placement_id=0x31555a00;
 void clear_hud_state() {
     auto& s=state();s.hud_ready.store(false);s.hud_ended_at=0;s.hud_go_until=0;s.hud_countdown_token={};
     s.hud_root={};s.hud_stack={};s.hud_notice={};s.hud_anchor={};s.hud_item={};
@@ -506,7 +521,7 @@ void publish_hud_items(const Context& c,bool score,bool countdown,bool intro=fal
     std::vector<std::byte> next;
     for(unsigned i=0;i<count;++i) {
         std::int32_t id{};std::memcpy(&id,old.data()+i*stride+offset,4);
-        if(id!=hud_score_id && id!=hud_countdown_id && id!=hud_intro_id && id!=hud_results_id && id!=hud_clock_id && !(id>=hud_strike_id && id<hud_strike_id+6))next.insert(next.end(),old.begin()+i*stride,old.begin()+(i+1)*stride);
+        if(id!=hud_score_id && id!=hud_countdown_id && id!=hud_intro_id && id!=hud_results_id && id!=hud_clock_id && id!=hud_placement_id && !(id>=hud_strike_id && id<hud_strike_id+6) && !(id>=hud_marker_id && id<hud_marker_id+world_marker_count))next.insert(next.end(),old.begin()+i*stride,old.begin()+(i+1)*stride);
     }
     for(const auto item:{score?s.hud_item:Value{},score && s.hud_clock_shown?s.hud_clock_item:Value{},countdown?s.hud_timer_item:Value{},intro?s.hud_intro_item:Value{},results?s.hud_results_item:Value{}})if(item.handle) {
         const auto start=next.size();next.resize(start+stride);
@@ -515,6 +530,14 @@ void publish_hud_items(const Context& c,bool score,bool countdown,bool intro=fal
     if(score)for(const auto id:s.hud_player_ids)if(const auto& player=s.hud_players.at(id);player.out && player.strike_item.handle) {
         const auto start=next.size();next.resize(start+stride);
         require(memory::peek_bytes(c.address(player.strike_item),next.data()+start,stride),"Native elimination stroke unavailable.");
+    }
+    if(score)for(const auto item:s.world_marker_items)if(item.handle) {
+        const auto start=next.size();next.resize(start+stride);
+        require(memory::peek_bytes(c.address(item),next.data()+start,stride),"Native world marker unavailable.");
+    }
+    if(score && s.placement_item.handle && !s.placement_status.empty()) {
+        const auto start=next.size();next.resize(start+stride);
+        require(memory::peek_bytes(c.address(s.placement_item),next.data()+start,stride),"Native placement band unavailable.");
     }
     if(next!=old)c.array(target,next,static_cast<unsigned>(next.size()/stride));
 }
@@ -1770,6 +1793,107 @@ void mount_hud(const Context& c,Value model,Address blueprint,Value& anchor,Valu
         }
         anchor=next_anchor;item=next_item;
 }
+
+// What skate.'s own gameplay HUD shows over the world instead of ReSkate drawing it: a Notice
+// widget screen-projected over each route point / capture spot (labelled, with distance), the one
+// still being placed, and whoever is "it" or tagged in Skate Tag / Infection. Mounted the same way
+// as the score block above; updated every tick since the projection moves with the camera.
+void mode_world_markers(const Context& c,const overlay::ModesHud& feed) {
+    auto& s=state();s.world_marker_items.clear();
+    if(!(feed.vertical_fov>1 && feed.vertical_fov<175) || !feed.blind.empty() || feed.results)return;
+    const auto& camera=feed.camera;
+    static float aspect=16.f/9.f;
+    DWORD process{};const auto window=GetForegroundWindow();GetWindowThreadProcessId(window,&process);
+    RECT client{};
+    if(process==GetCurrentProcessId() && GetClientRect(window,&client) && client.bottom>client.top)
+        aspect=static_cast<float>(client.right-client.left)/static_cast<float>(client.bottom-client.top);
+    const auto position=[&](const std::array<float,3>& p)->std::optional<std::array<float,2>> {
+        const std::array<float,3> delta{p[0]-camera[12],p[1]+1.5f-camera[13],p[2]-camera[14]};
+        const auto dot=[&](unsigned i){return delta[0]*camera[i]+delta[1]*camera[i+1]+delta[2]*camera[i+2];};
+        const float depth=-dot(8);if(depth<=.1f)return {};
+        const float focal=1.f/(2.f*std::tan(feed.vertical_fov*3.14159265f/360.f));
+        const float x=.5f+dot(0)*focal/depth/aspect,y=.5f-dot(4)*focal/depth;
+        if(!std::isfinite(x) || !std::isfinite(y))return {};
+        return std::array<float,2>{std::clamp(x,.08f,.92f),std::clamp(y,.08f,.9f)};
+    };
+    const auto mark=[&](const std::array<float,3>& at,const std::string& text) {
+        if(s.world_marker_items.size()>=s.world_markers.size())return;
+        const auto xy=position(at);if(!xy)return;
+        const auto index=static_cast<unsigned>(s.world_marker_items.size());auto& marker=s.world_markers[index];
+        if(!marker.notice.handle)marker.notice=record_model(c,"TD_Page_ContentResources/TD_Notice_MenuDescriptionTitle",notice_schema);
+        auto caption=text;
+        if(feed.have_me) {
+            float distance{};for(unsigned axis=0;axis<3;++axis)distance+=(at[axis]-feed.me[axis])*(at[axis]-feed.me[axis]);
+            caption+="  "+std::to_string(static_cast<int>(std::sqrt(distance)))+" m";
+        }
+        plain_label(c,c.field(marker.notice,0x94703efc),caption);
+        label_styles(c,c.field(marker.notice,0x94703efc),"TextStylesList/H52-XBold_White","TextStylesList/H52-XBold_White");
+        c.set(c.field(marker.notice,0x13be0d51),std::array<float,2>{320.f,82.f});
+        mount_hud(c,marker.notice,asset(c,"UI/Foundations/Components/Notices/BasicNotice_Widget"),marker.anchor,marker.item,hud_marker_id+static_cast<int>(index),true);
+        c.set(c.field(marker.anchor,0x1cff7243),std::array<float,2>{320.f,82.f});
+        for(unsigned axis=0;axis<2;++axis)for(const auto field:{0x99bbed5aU,0x49943bedU})
+            c.set(c.path(marker.anchor,{axis?0x185a5736U:0xde7d30c7U,field}),(*xy)[axis]);
+        s.world_marker_items.push_back(marker.item);
+    };
+    for(unsigned i=0;i<feed.points.size();++i) {
+        if(feed.route && !feed.placing && static_cast<int>(i)<feed.next_point)continue;
+        const bool finish=feed.route && i+1==feed.points.size() && feed.points.size()>=2 && !feed.placing;
+        std::string label=feed.route?(i==0?"START":finish?"FINISH":"CHECKPOINT "+std::to_string(i)):"CAPTURE "+std::to_string(i+1);
+        if(static_cast<int>(i)==feed.next_point)label="NEXT: "+label;
+        mark(feed.points[i],label);
+    }
+    if(feed.placing)mark(feed.cursor,feed.route?"PLACE NEXT GATE":"PLACE HERE");
+    for(const auto& player:feed.players)if(!player.self && player.it)mark(player.at,player.name+(feed.infection?"  INFECTED":"  IT"));
+    for(const auto& tag:feed.tags)if(!tag.path.empty())mark(tag.path[tag.path.size()/2],"TAGGED");
+}
+
+// The band at the bottom while placing (a route, an area, spots): the hint line and each control,
+// as skate.'s own HUD text (TD_HUD_Header_Label), instead of ReSkate's drawn D-pad icon and band.
+void mode_placement_hud(const Context& c,const overlay::ModesHud& feed) {
+    auto& s=state();
+    if(!feed.placing || (feed.prompts.empty() && feed.hint.empty() && feed.line.empty())) {
+        if(s.placement_list.handle)publish_hud_items(c,false,false); // unmounted by the id filter alone
+        s.placement_status.clear();
+        return;
+    }
+    const auto label_widget=asset(c,"UI/Foundations/Components/Text/Label/Widget/Label_Widget");
+    const auto list_widget=asset(c,"UI/Foundations/Components/Lists/LinearList/Widget/LinearList_Widget");
+    std::string built=feed.hint+"|"+feed.line;
+    for(const auto& prompt:feed.prompts)built+="|"+prompt.key+":"+prompt.label;
+    if(built==s.placement_status && s.placement_list.handle)return;
+    s.placement_status=built;
+    const auto row=[&](Value& label,const std::string& text) {
+        if(!label.handle) {
+            label=record_model(c,"TD_Hud_ContentResources/TD_HUD_Header_Label");
+            label_styles(c,label,"TextStylesList/H52-XBold_White","TextStylesList/H52-XBold_White");
+            c.set(c.field(label,0x87ad624c),2); // centred
+        }
+        plain_label(c,label,text);
+    };
+    std::vector<Widget> rows;
+    if(!feed.hint.empty()) {row(s.placement_hint,feed.hint);rows.push_back({label_widget,{0,s.placement_hint.handle}});}
+    if(!feed.line.empty()) {
+        if(!s.placement_line.handle) {
+            s.placement_line=record_model(c,"TD_Hud_ContentResources/TD_HUD_Header_Label");
+            label_styles(c,s.placement_line,"TextStylesList/H52-XBold_White","TextStylesList/H52-XBold_White");
+            c.set(c.field(s.placement_line,0x87ad624c),2);
+        }
+        plain_label(c,s.placement_line,feed.line);
+        rows.push_back({label_widget,{0,s.placement_line.handle}});
+    }
+    for(unsigned i=0;i<feed.prompts.size() && i<s.placement_rows.size();++i) {
+        const auto& prompt=feed.prompts[i];
+        row(s.placement_rows[i],prompt.key+":  "+prompt.label);
+        rows.push_back({label_widget,{0,s.placement_rows[i].handle}});
+    }
+    hud_list(c,s.placement_list,rows,false,44.f,6.f,0.f,760.f);
+    mount_hud(c,s.placement_list,list_widget,s.placement_anchor,s.placement_item,hud_placement_id,true);
+    c.set(c.field(s.placement_anchor,0x1cff7243),std::array<float,2>{760.f,44.f*static_cast<float>(rows.size())+6.f*static_cast<float>(rows.size())});
+    for(const auto field:{0x99bbed5aU,0x49943bedU}) {
+        c.set(c.path(s.placement_anchor,{0xde7d30c7,field}),.5f);
+        c.set(c.path(s.placement_anchor,{0x185a5736,field}),.86f);
+    }
+}
 // What skate.'s own HUD widgets show: a 1-Up match, or else the local player's game mode (Spot Jam,
 // Deathrace, Skate Tag...: Extension/Modes). The same native intro, 3-2-1, score block with its
 // clock, elimination stamps or scores, and results board serve both.
@@ -2353,6 +2477,12 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
                 else if(a.command=="oneup")one_up::queue(a.argument);
                 else if(a.command=="mode")mode_commands.push_back(a.argument);
             }
+            try {
+                const auto feed=modes::hud();
+                mode_world_markers(c,feed);
+                mode_placement_hud(c,feed);
+                publish_hud_items(c,s.hud_ready.load(),s.hud_countdown_visible,s.hud_intro_visible);
+            } catch(const std::exception& e) { logging::log(logging::Level::warning,logging::Channel::ui,"Game mode world markers: {}",e.what()); }
             gameplay_hud(c,now);
             return;
         }
