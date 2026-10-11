@@ -757,6 +757,11 @@ void set_mode_jam_text(std::string title, std::string objective) noexcept {
         t.changed = true;
     } catch (...) {}
 }
+std::string mode_jam_title() {
+    auto &t = mode_jam_text();
+    std::lock_guard lock(t.mutex);
+    return t.title;
+}
 void apply_throwdown_strings(Address base) noexcept {
     namespace loc = addr::localization;
     static ULONGLONG next{};

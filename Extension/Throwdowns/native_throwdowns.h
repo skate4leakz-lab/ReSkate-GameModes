@@ -15,6 +15,7 @@ void apply_throwdown_strings(std::uintptr_t base) noexcept;
 // A game mode on a native Skate Jam: the Jam's title and objective read as the mode's (empty: the
 // Jam's own again). Stored with the next apply_throwdown_strings.
 void set_mode_jam_text(std::string title, std::string objective) noexcept;
+std::string mode_jam_title(); // the game mode's title over the Jam's, empty when none
 // True while a client ThrowdownRegistration graph is asking IsOnline (0) or
 // IsSessionReady (1) in hosted offline play. Every other graph stays native.
 bool native_throwdown_ready(unsigned predicate) noexcept;

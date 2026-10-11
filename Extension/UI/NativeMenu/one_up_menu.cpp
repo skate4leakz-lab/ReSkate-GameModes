@@ -1415,6 +1415,19 @@ void mode_customize(const Context& c,std::vector<std::string>& commands) {
         if(GetTickCount64()>=next_report) {next_report=GetTickCount64()+10000;logging::log(logging::Level::info,logging::Channel::ui,"Game mode customize: skipped a list ({}).",e.what());}
     }
 }
+// A game mode on a native Skate Jam: the Jam's headers (its intro banner, HUD, Throwdown Panel and
+// end screen) take the mode's title. skate. fills them from its own mode record ("Skate Jam").
+void mode_jam_titles(const Context& c) {
+    const auto title=multiplayer::mode_jam_title();
+    if(title.empty())return;
+    for(const auto& root:c.roots({header_schema.hash})) try {
+        for(const auto field:{0x00f3b15eU,0x44688629U}) {
+            const auto label=c.field(root.model,field);
+            const auto text=c.text(c.field(label,text_field),64);
+            if(text=="Skate Jam" || text=="SKATE JAM")plain_label(c,label,title);
+        }
+    } catch(const std::exception&) {}
+}
 void stock_solo_controls(const Context& c) {
     auto& s=state();
     for(const auto& root:c.roots({panel_schema.hash})) {
@@ -2328,6 +2341,7 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
             // Native navigation retires the card page before setup mounts.
             // Continue adapting the independent native panel in that interval.
             official_setup(c);
+            mode_jam_titles(c);
             try { mode_customize(c,mode_commands); }
             catch(const std::exception& e) { s.customizes.clear(); logging::log(logging::Level::warning,logging::Channel::ui,"Game mode customize: {}",e.what()); }
             stock_solo_controls(c);
@@ -2407,6 +2421,7 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
                 s.setup_status="Could not place 1-Up. Load the map, finish your current Throwdown, and try Confirm again. "+model().status;
             }
         }
+        mode_jam_titles(c);
         try { official_setup(c); }
         catch(const std::exception& e) {
             static std::uint64_t setup_retry_log{};
