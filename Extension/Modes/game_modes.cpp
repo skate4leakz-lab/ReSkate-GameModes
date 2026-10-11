@@ -2551,9 +2551,14 @@ std::string apply_flag(State &s, const Vec3 &spot, float yaw_degrees) {
             g.settings.yaws.assign(1, yaw_degrees);
             g.settings.widths.assign(1, std::clamp(g.settings.radius, min_gate_half_width, max_gate_half_width));
         } else {
-            g.settings.points.front() = spot;
-            if (g.settings.yaws.empty()) g.settings.yaws.push_back(yaw_degrees);
-            else g.settings.yaws.front() = yaw_degrees;
+            // A route placed before the flag: the flag becomes its start gate, in front of it, facing
+            // the way the flag points (the route itself is kept).
+            const float width = std::clamp(g.settings.radius, min_gate_half_width, max_gate_half_width);
+            g.settings.yaws.resize(g.settings.points.size(), yaw_degrees);
+            g.settings.widths.resize(g.settings.points.size(), width);
+            g.settings.points.insert(g.settings.points.begin(), spot);
+            g.settings.yaws.insert(g.settings.yaws.begin(), yaw_degrees);
+            g.settings.widths.insert(g.settings.widths.begin(), width);
         }
     }
     // A circle play area is the flag's: centred on where the game starts.
@@ -2563,7 +2568,9 @@ std::string apply_flag(State &s, const Vec3 &spot, float yaw_degrees) {
     settings_changed(g);
     // Deathrace and Domination go on to the rest of their course: from the flag (the start gate),
     // the checkpoints and the finish, or the spots, with the free-camera placer.
-    if (g.settings.mode == Mode::race || g.settings.mode == Mode::domination) {
+    // (Only when there is no route or spots yet: ones placed first are kept as they are.)
+    const bool route_ready = g.settings.mode == Mode::race ? g.settings.points.size() >= 2 : !g.settings.points.empty();
+    if ((g.settings.mode == Mode::race || g.settings.mode == Mode::domination) && !route_ready) {
         const auto placing = command("place", {"points"});
         return std::format("{} flag placed. {}", mode_name(g.settings.mode), placing);
     }
