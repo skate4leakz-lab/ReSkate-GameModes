@@ -7,6 +7,7 @@
 #include "Engine/Core/Log/logging.h"
 #include <Windows.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <mutex>
 #include <optional>
@@ -97,9 +98,11 @@ bool begin_mode_flag_placement(bool open_menu) {
     prepare_throwdown_injection();
     return true;
 }
-bool back_out_of_mode_setup() noexcept {
+std::atomic<bool> settings_menu_wanted{};
+bool back_out_of_mode_setup(bool open_menu) noexcept {
     auto& p=placement(); std::lock_guard lock(p.mutex);
     if(!p.for_mode || p.step!=Step::setup || !p.setup_seen) return false;
+    if(open_menu) settings_menu_wanted.store(true);
     // Already navigated away: cleanup only removes what the setup registered, sending no exit.
     p.exited=true; p.cancelling=true; p.step=Step::cleanup; p.changed=GetTickCount64(); p.until=p.changed+15000;
     logging::write(logging::Level::info,logging::Channel::ui,"Game mode flag: setup left without Confirm; placement ended.");
@@ -340,6 +343,10 @@ void tick_flag_placement(const menu_data::Context& c) {
     }
     if(destroy && prepare_throwdown_injection() && queue_throwdown_destroy(destroy)) {
         std::lock_guard lock(p.mutex); if(p.mmid==destroy) p.destroy_queued=true;
+    }
+    if(command.empty() && settings_menu_wanted.exchange(false)) {
+        navigate(c,"Throwdowner");
+        return;
     }
     if(!command.empty()) {
         // Publication can run expression callbacks. Arm the expected step

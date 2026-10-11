@@ -1111,30 +1111,20 @@ void official_setup(const Context& c) {
             // A game mode keeps the panel's own mark, the native Confirm and its flag placement.
             for(const auto notice:ui_models(c,c.field(root.model,0x43967ece),notice_schema.hash))
                 plain_label(c,c.field(notice,0x94703efc),mode_line);
-            // Its advanced-settings button is GAME SETTINGS: the page's own Back, to the Throwdowns
-            // menu, which then shows the game's settings (modes_card.cpp: play area, time, route).
-            // (Looked up once per panel; a page that cannot be walked leaves the stock button.)
-            static std::map<Handle,std::string> back_navigations;
-            if(fresh || !back_navigations.contains(root.model.handle)) {
-                if(back_navigations.size()>64)back_navigations.clear();
-                auto& found=back_navigations[root.model.handle];
-                for(const auto& page_root:c.roots({page.hash})) try {
-                    const auto panels=ui_models(c,c.field(page_root.model,content),panel_schema.hash);
-                    if(std::none_of(panels.begin(),panels.end(),[&](Value p){return p.handle==root.model.handle;}))continue;
-                    found=c.text(c.field(back(c,page_root.model),0xb1e14cd6));
-                    break;
-                } catch(const std::exception&) {}
-            }
-            const auto& back_navigation=back_navigations[root.model.handle];
-            if(fresh)for(const auto b:ui_models(c,c.field(root.model,0xbfc64535),button.hash))
-                logging::log(logging::Level::info,logging::Channel::ui,"Game mode setup: button {} (Back is {}).",
-                    c.text(c.field(c.path(b,{0x0fb0d794,0xa704272a,0xc52416ef,0xa704272a,0xa2b71c93}),0xb1e14cd6)),back_navigation);
+            // Its advanced-settings button is GAME SETTINGS: the game's own settings page in the
+            // Throwdowns menu (modes_card.cpp: play area, time, route), not the stock customizing.
+            static std::set<Handle> settings_buttons;
             for(const auto b:ui_models(c,c.field(root.model,0xbfc64535),button.hash)) {
                 const auto action=c.path(b,{0x0fb0d794,0xa704272a,0xc52416ef,0xa704272a,0xa2b71c93});
-                const auto nav=c.text(c.field(action,0xb1e14cd6));
-                if(back_navigation.empty() || nav!="AdvancedParameters")continue;
-                c.text(c.field(action,0xb1e14cd6),back_navigation);
-                plain_label(c,c.field(b,0x58c9d354),"GAME SETTINGS");
+                if(c.text(c.field(action,0xb1e14cd6))=="AdvancedParameters") {
+                    if(settings_buttons.size()>64)settings_buttons.clear();
+                    settings_buttons.insert(b.handle);
+                    c.text(c.field(action,0xb1e14cd6),"");
+                    plain_label(c,c.field(b,0x58c9d354),"GAME SETTINGS");
+                }
+                if(!settings_buttons.contains(b.handle))continue;
+                const auto settings=callback(c,"mode-settings"); // reserved every pass
+                if(read<Address>(c.address(c.field(action,0x9c76b86c)))!=settings)c.set(c.field(action,0x9c76b86c),settings);
             }
             continue;
         }
@@ -2134,6 +2124,7 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
                 if(a.command=="open") { if(one_up::native_setup_active() && s.max_players!=1 && !model().active)queue_command("host","",{}); }
                 else if(a.command=="oneup")one_up::queue(a.argument);
                 else if(a.command=="mode")mode_commands.push_back(a.argument);
+                else if(a.command=="mode-settings")one_up::back_out_of_mode_setup(true);
             }
             gameplay_hud(c,now);
             return;
@@ -2192,6 +2183,7 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
             }
             else if(a.command=="oneup") one_up::queue(a.argument);
             else if(a.command=="mode") mode_commands.push_back(a.argument);
+            else if(a.command=="mode-settings") one_up::back_out_of_mode_setup(true);
         }
         if(s.place_until) {
             const auto v=one_up::view();
