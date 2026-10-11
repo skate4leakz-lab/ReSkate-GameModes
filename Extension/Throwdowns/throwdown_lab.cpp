@@ -158,6 +158,7 @@ struct Job {
     std::uint64_t token{};
     std::vector<std::uint8_t> placement, settings;
     std::array<std::uint8_t, 28> trick{}; // attempt (flag = landed)
+    std::uint32_t duration{};             // spawn at `position`: seconds (0: two minutes)
 };
 struct Lab {
     Address base{};
@@ -194,6 +195,9 @@ struct Lab {
     std::atomic<bool> setter_missed{};
     int round_letters{}; // letters when the round began (-1: unknown)
     std::array<Address, 4> leaderboards{}; // leaderboards the local client wrote to, newest first
+    // A game mode runs on a native Skate Jam (start_mode_jam): its own trick scores are kept
+    // off the leaderboard (the mode writes its scores there), and it starts once spawned.
+    std::atomic<bool> mode_jam{}, mode_jam_start{};
     struct Sent { std::uint32_t event, sender; std::uint64_t ms; };
     std::mutex sent_mutex;
     std::deque<Sent> sent; // tracked client events not yet handled, oldest first
@@ -903,6 +907,9 @@ void leaderboard_score_hook(Address leaderboard, bool flag, std::uint32_t player
         profile_runtime::PreserveError preserve;
         const auto graph = executing_graph();
         const bool throwdown = std::ranges::find(throwdown_score_graphs, graph) != throwdown_score_graphs.end();
+        // Under a game mode the Jam's own trick scores stay off its board (the row it opens with
+        // 0 is kept): the mode's scores go there instead.
+        if (throwdown && score != 0.0f && lab().mode_jam.load(std::memory_order_acquire)) return;
         try {
             const auto local = local_native_player_id();
             if (throwdown && player && player == local) {
@@ -1094,7 +1101,8 @@ std::string run_job(const Job& job) {
             vector(field_spawn, 4);
             vector(field_teleport, 3);
             if (const auto f = find_field(p->type, field_series); f && f->kind == kind_string) assign_string(at + f->offset, job.series);
-            if (const auto f = find_field(p->type, field_duration); f && f->size == 4) *reinterpret_cast<std::int32_t*>(at + f->offset) = 120;
+            if (const auto f = find_field(p->type, field_duration); f && f->size == 4)
+                *reinterpret_cast<std::int32_t*>(at + f->offset) = job.duration ? static_cast<std::int32_t>(job.duration) : 120;
             if (const auto f = find_field(p->type, field_bounds_scale); f && f->size == 4) *reinterpret_cast<float*>(at + f->offset) = 1.0f;
         } else {
             StreamReader reader{params};
@@ -2004,6 +2012,12 @@ void pump_throwdown_lab(Address vm) noexcept {
                     "Throwdown lab: server ran DebugSpawnThrowdownWithParams ({} realm); queue MMID {:#x}.",
                     realm_name(realm()), mmid);
                 if (spawn && spawn->token) throwdown_relay_spawned(spawn->token, mmid, spawn->max_players);
+                // A game mode's Jam starts as soon as it exists.
+                if (mmid && (!spawn || !spawn->token) && l.mode_jam_start.exchange(false)) {
+                    std::lock_guard lock(l.mutex);
+                    l.jobs.push_back({Job::Kind::start});
+                    l.pending.store(true, std::memory_order_release);
+                }
             }
         } catch (...) {}
     }
@@ -2226,6 +2240,33 @@ bool queue_throwdown_destroy_event(std::uint32_t player) noexcept {
 }
 bool queue_throwdown_end_turn(std::uint32_t player) noexcept {
     return player && live_event_handle() && queue_relay_job({Job::Kind::end_turn, player}, event_request_turn_end);
+}
+bool start_mode_jam(const std::array<float, 3> &spot, std::uint32_t seconds, std::uint32_t players) noexcept {
+    auto &l = lab();
+    const auto local = local_native_player_id();
+    if (!local || !prepare_throwdown_injection()) return false;
+    Job job{Job::Kind::spawn, local, std::clamp<std::uint32_t>(players, 2, 16)};
+    job.position = spot;
+    job.series = "JamSession";
+    job.duration = std::clamp<std::uint32_t>(seconds, 30, 3600);
+    l.leaderboard_live.store(false, std::memory_order_release); // (an earlier throwdown's)
+    l.mode_jam.store(true, std::memory_order_release);
+    l.mode_jam_start.store(true, std::memory_order_release);
+    if (queue_relay_job(std::move(job), event_debug_spawn)) return true;
+    l.mode_jam.store(false);
+    l.mode_jam_start.store(false);
+    return false;
+}
+void end_mode_jam(bool destroy) noexcept {
+    auto &l = lab();
+    if (!l.mode_jam.exchange(false)) return;
+    l.mode_jam_start.store(false);
+    if (destroy)
+        if (const auto local = local_native_player_id()) queue_throwdown_destroy_event(local);
+}
+bool mode_jam_running() noexcept {
+    auto &l = lab();
+    return l.mode_jam.load(std::memory_order_acquire) && l.leaderboard_live.load(std::memory_order_acquire);
 }
 bool queue_throwdown_score(std::uint32_t player, std::int32_t score) noexcept {
     if (!player || !lab().leaderboard_live.load(std::memory_order_acquire)) return false;

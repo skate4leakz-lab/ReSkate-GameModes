@@ -11,6 +11,8 @@
 #include "trick_gestures.h"
 #include "Extension/Throwdowns/one_up_placement.h"
 #include "Extension/Throwdowns/one_up_native.h"
+#include "Extension/Throwdowns/native_throwdowns.h"
+#include "Extension/Throwdowns/throwdown_lab.h"
 #include "Extension/Multiplayer/Steam/steam_social.h"
 #include "Engine/Game/UI/game_view.h"
 #include "Engine/Core/Log/logging.h"
@@ -219,6 +221,12 @@ struct State {
     std::atomic<bool> counting_down{};
     std::atomic<std::uint64_t> reopen_setup_at{}; // placing ended while setting up: back to the setup page then
     bool was_placing{};
+    // The native Skate Jam this game runs on (sync_native_jam): the game's key, and the local
+    // player's score as last written to its leaderboard, and when.
+    std::uint64_t jam_game{};
+    std::uint64_t jam_ended_game{}; // a game whose Jam ran to its own end screen (that shows its results)
+    std::int32_t jam_score = -1;
+    std::uint64_t jam_score_at{};
     std::string native_navigation; // `mode nav`, under hud_mutex
     std::optional<std::pair<Vec3, float>> pending_flag;
 };
@@ -760,6 +768,40 @@ void track_skater(State &s, bool in_world, std::uint64_t now) {
 
 // A game's identity across machines (its leader and id).
 std::uint64_t game_key(const Game &g) { return g.leader * 0x9E3779B97F4A7C15ULL ^ g.id; }
+// A game runs on skate.'s own Skate Jam, so skate. draws it: its HUD rows (rank, crown), its
+// Throwdown Panel (QUIT) and its end screen. The Jam starts at GO where the game starts, as
+// long as the game; the local player's score is written to its leaderboard (the Jam's own trick
+// scores are kept off it). A game that ends before the Jam does ends it; a timed one runs on to
+// the Jam's own end screen. (1-Up and S.K.A.T.E. have their own native turns.)
+void sync_native_jam(State &s, std::uint64_t now) {
+    const Game *g = s.game ? &*s.game : nullptr;
+    const auto *st = g && g->state ? &*g->state : nullptr;
+    const bool jam_mode = g && g->settings.mode != Mode::one_up && g->settings.mode != Mode::skate;
+    const auto *me = g ? standing(*g, self_id(s)) : nullptr;
+    const bool playing_here = jam_mode && st && st->phase == Phase::playing && me;
+    if (s.jam_game && (!g || game_key(*g) != s.jam_game || !st || st->phase != Phase::playing)) {
+        const bool natural_end = g && game_key(*g) == s.jam_game && st && st->phase == Phase::results && timed(g->settings.mode);
+        multiplayer::end_mode_jam(!natural_end);
+        if (natural_end) s.jam_ended_game = s.jam_game;
+        s.jam_game = 0;
+    }
+    if (playing_here && !s.jam_game) {
+        const auto spot = g->settings.has_spawn ? g->settings.spawn : s.position;
+        const auto seconds = timed(g->settings.mode) ? g->settings.duration_s : 3600u;
+        const auto players = static_cast<std::uint32_t>(std::max<std::size_t>(2, st->standings.size()));
+        if (multiplayer::start_mode_jam({spot[0], spot[1], spot[2]}, seconds, players)) {
+            s.jam_game = game_key(*g);
+            s.jam_score = -1;
+            logging::log(logging::Level::info, logging::Channel::runtime, "Game modes: {} runs on a native Skate Jam ({} s).",
+                         mode_name(g->settings.mode), seconds);
+        }
+    }
+    if (s.jam_game && me && multiplayer::mode_jam_running() && (me->score != s.jam_score || now >= s.jam_score_at + 3000))
+        if (const auto local = multiplayer::local_native_player_id(); local && multiplayer::queue_throwdown_score(local, me->score)) {
+            s.jam_score = me->score;
+            s.jam_score_at = now;
+        }
+}
 
 // The countdown: everyone in the game is put at the start, spread out so nobody lands on anyone,
 // in the same order on every machine (where the session allows teleporting; elsewhere they skate
@@ -1923,6 +1965,9 @@ void build_hud(State &s, std::uint64_t now) {
         popup(s, "Set! Open Throwdowns to finish setting up.");
     }
     s.was_placing = placing_now;
+    sync_native_jam(s, now);
+    h.native_jam = (s.jam_game && multiplayer::mode_jam_running()) ||
+                   (s.game && s.jam_ended_game == game_key(*s.game) && s.game->state && s.game->state->phase == Phase::results);
     auto native = native_snapshot(s);
     s.counting_down.store(s.game && s.game->state && s.game->state->phase == Phase::countdown && standing(*s.game, self_id(s)));
     s.flaggable.store(s.game && s.game->leading && (!s.game->state || s.game->state->phase != Phase::results) ? game_key(*s.game) : 0);

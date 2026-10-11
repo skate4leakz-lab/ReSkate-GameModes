@@ -58,6 +58,14 @@ bool queue_throwdown_destroy(std::uint32_t mmid) noexcept;
 // `player`'s total in the running throwdown: its leaderboard row and the server's own
 // score list. False until the local client has opened this throwdown's leaderboard.
 bool queue_throwdown_score(std::uint32_t player, std::int32_t score) noexcept;
+// A game mode on skate.'s own Skate Jam (its HUD, Throwdown Panel and results): a Jam hosted by
+// the local player at `spot`, `seconds` long, started as soon as the server has it. While it runs
+// the Jam's own trick scores stay off its leaderboard; the mode writes its scores there
+// (queue_throwdown_score). end_mode_jam: the mode is done with it (`destroy`: end it now, else
+// it runs to its own end screen). Game thread.
+bool start_mode_jam(const std::array<float, 3> &spot, std::uint32_t seconds, std::uint32_t players) noexcept;
+void end_mode_jam(bool destroy) noexcept;
+bool mode_jam_running() noexcept; // started and its leaderboard open
 // One leaderboard write as `player`'s own client made it: board index in the event's
 // leaderboard manager, added or set. False until this throwdown's leaderboard exists.
 bool queue_throwdown_row(std::uint32_t player, std::uint8_t board, bool add, std::int32_t value) noexcept;

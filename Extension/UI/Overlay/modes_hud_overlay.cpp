@@ -1710,10 +1710,11 @@ void draw_modes_hud() {
     draw_tag_players(draw, h.hud, scale);
     draw_heat(draw, h.hud, scale);
     if (h.hud.results) {
-        if (!native.results) draw_results(draw, h.hud, scale);
+        if (!native.results && !h.hud.native_jam) draw_results(draw, h.hud, scale);
         return;
     }
-    if (!menu) draw_panel(draw, h, scale, native.score);
+    // On skate.'s own Skate Jam its HUD shows the game: our panel stays away.
+    if (!menu && !h.hud.native_jam) draw_panel(draw, h, scale, native.score);
     draw_centre(draw, h, scale, native.countdown || native.score);
     draw_trick_diagram(draw, h.hud, scale);
     if (h.hud.placing && h.hud.aiming) {

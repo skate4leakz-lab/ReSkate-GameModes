@@ -395,6 +395,7 @@ struct ModesHudTrickPart {
 };
 struct ModesHud {
     bool active{};        // in a game (the panel, the area and the rest); offers draw either way
+    bool native_jam{};    // skate.'s own Skate Jam HUD, panel and results show this game instead
     std::string trick_title;                  // S.K.A.T.E.: "COPY THIS", over the trick's diagram
     std::vector<ModesHudTrickPart> trick_parts;
     bool goofy{};                             // mirror the flicks for a goofy stance
