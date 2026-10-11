@@ -100,7 +100,7 @@ constexpr CardScale row_scale{.7f, .9f, .7f}, grid_scale{.64f, .27f, .27f};
 constexpr unsigned cards_per_row = 4;
 // Each mode's round logo on its card (art packed into ReSkate.dll's core bundle with 1-Up's). The
 // grid crashes of 2026-10-10 all came with Throwdowns opened by our own navigation, not the badge.
-constexpr bool mode_logos = true;
+constexpr bool mode_logos = false; // crashed Throwdowns when the player opened it (2.0.3-modes.3): the logo textures do not fit card icons
 std::string_view mode_logo(modes::Mode mode) {
     using modes::Mode;
     switch (mode) {
