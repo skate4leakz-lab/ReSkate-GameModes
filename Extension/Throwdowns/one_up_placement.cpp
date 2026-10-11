@@ -97,6 +97,14 @@ bool begin_mode_flag_placement(bool open_menu) {
     prepare_throwdown_injection();
     return true;
 }
+bool back_out_of_mode_setup() noexcept {
+    auto& p=placement(); std::lock_guard lock(p.mutex);
+    if(!p.for_mode || p.step!=Step::setup || !p.setup_seen) return false;
+    // Already navigated away: cleanup only removes what the setup registered, sending no exit.
+    p.exited=true; p.cancelling=true; p.step=Step::cleanup; p.changed=GetTickCount64(); p.until=p.changed+15000;
+    logging::write(logging::Level::info,logging::Channel::ui,"Game mode flag: setup left without Confirm; placement ended.");
+    return true;
+}
 bool flag_for_mode() noexcept { auto& p=placement(); std::lock_guard lock(p.mutex); return p.step!=Step::idle && p.for_mode; }
 void request_mode_start() noexcept { auto& p=placement(); std::lock_guard lock(p.mutex); if(p.for_mode) p.mode_start_requested=true; }
 void request_mode_stop() noexcept { auto& p=placement(); std::lock_guard lock(p.mutex); if(p.for_mode) p.mode_stop_requested=true; }

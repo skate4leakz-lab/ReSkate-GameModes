@@ -150,7 +150,23 @@ Value Context::element(Value array, unsigned index) const {
 Value Context::create(Schema schema, std::uint64_t id) const {
     const auto t = type(schema);
     const auto h = game::native_data().models.create(manager, t, id, game::native_name_hash("ReSkate.NativeMultiplayerMenu"), false, 2);
-    Value result{h, t}; address(result); return result;
+    Value result{h, t}; address(result); initialize_text(result); return result;
+}
+void Context::initialize_text(Value value) const {
+    if (kind(value.type) == 7) {
+        if (!read<Address>(address(value))) text(value, "");
+        return;
+    }
+    if (kind(value.type) != 2) return; // Asset/DataRef pointers and counted arrays are not inline structures.
+    const auto meta=read<Address>(value.type), fields=read<Address>(meta+0x60);
+    const auto count=read<std::uint16_t>(meta+0x2a);
+    require(count<=128 && (!count || fields), "Native menu text field table differs.");
+    for(unsigned i=0;i<count;++i) {
+        const auto entry=fields+i*24;
+        const auto child_type=read<Address>(entry+16);
+        if(kind(child_type)!=2 && kind(child_type)!=7)continue;
+        initialize_text(field(value,read<std::uint32_t>(entry)));
+    }
 }
 void Context::destroy(Value value) const {
     // The engine may already have removed a previous pause-menu generation.
@@ -172,12 +188,17 @@ void Context::copy(Value target, Address source) const {
     std::vector<std::byte> bytes(size(target.type));
     require(memory::read_bytes(source, bytes.data(), bytes.size()), "Native menu template is unavailable.");
     publish(target, bytes.data());
+    // Some authored records carry null optional CString defaults. The VM's
+    // typed read calls strlen even for empty text; give our model copies an
+    // engine-owned empty string before they are attached to a widget.
+    initialize_text(target);
 }
 void Context::text(Value target, const std::string& text) const {
     require(kind(target.type) == 7 && text.size() <= 2048, "Native menu text schema differs.");
     Address native{};
     game::native_data().values.assign(&native, text.c_str(), static_cast<std::uint32_t>(text.size()));
     struct Release { Address base; Address& value; ~Release() { if (value) reinterpret_cast<void (*)(Address*)>(base + engine::native_text_release)(&value); } } release{base, native};
+    require(native!=0,"Native menu string construction returned null.");
     set(target, native);
 }
 std::string Context::text(Value value, std::size_t maximum) const {

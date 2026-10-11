@@ -36,6 +36,7 @@ public:
     Value create(Schema schema, std::uint64_t id) const;
     void destroy(Value owned_root) const;
     void publish(Value target, const void* bytes) const;
+    void initialize_text(Value value) const;
     void copy(Value target, Address source) const;
     template<class T> void set(Value target, const T& value) const {
         static_assert(std::is_trivially_copyable_v<T>);

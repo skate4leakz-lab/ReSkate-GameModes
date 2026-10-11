@@ -36,7 +36,7 @@ namespace build = game::build::v20260929;
 constexpr Schema tile_schema{0xdeb20e0f, 1200}, category_schema{0x628aa99c, 320}, anchor_schema{0x0e3be640, 192},
     label_schema{0xbfe23948, 104}, action_schema{0x85b7eac0, 72}, panel_schema{0xd29bbf63, 576},
     header_schema{0x4efe5e19, 312}, panel_style_schema{0x1b6c904d, 272}, notice_schema{0x7290e514, 256},
-    texture_schema{0x370c9975, 144}, page_action_schema{0x896f8a1a, 784};
+    texture_schema{0x370c9975, 144}, page_action_schema{0x896f8a1a, 784}, content_tile_schema{0xcbe47f59, 1184};
 constexpr std::uint32_t content = 0x716496c8, items = 0x61742cb4, widget = 0x214d4984, rows_field = 0x67223da7,
     text_field = 0x4d8e01b9, handles_field = 0xf2c90867, focus_field = 0x55511280, label_field = 0x58c9d354,
     callback_field = 0x9c76b86c, navigation_field = 0xb1e14cd6, page_actions = 0xd2118ca8, title_path = 0x3781b603;
@@ -145,8 +145,15 @@ struct State {
     // instead. Without a grid (it could not be built) our cards join the stock row.
     Value holder, grid;
     Widget original_holder{};
+    // The logo grid (build_logo_grid): `grid` is then the native GridList of round logos, shown as
+    // the page's body through `logo_anchor`; `logo_stock` are private copies of the stock cards.
+    Value logo_anchor;
+    std::array<Value, 3> logo_stock;
     // A card just set a game up: its native flag placement opens once the game is there (until then).
     std::uint64_t flag_after{};
+    // The mode's stock setup (its flag placement) was up: when it closes with the game still being
+    // set up (GAME SETTINGS, or Back), the game's settings page shows.
+    bool flag_setup_seen{};
     // Throwdowns was opened by us to come back to the setup page (after placing): the cards stay
     // in the stock row (the grid on a page we opened ourselves crashed the game, 2026-10-10) and the
     // setup page shows at once. Until that time.
@@ -166,7 +173,8 @@ void reset(bool generations_too) {
     auto &s = state();
     s.owner.store(0);
     s.anchor_asset = s.primary_input = 0;
-    s.page = s.cards = s.source_label = s.holder = s.grid = {};
+    s.page = s.cards = s.source_label = s.holder = s.grid = s.logo_anchor = {};
+    s.logo_stock = {};
     s.one_up = {};
     s.row_only = false;
     s.original_holder = {};
@@ -192,6 +200,15 @@ Value back(const Context &c, Value page_value) {
     return c.path(page_value, {0x10810f0b, 0x0fb0d794, 0xa704272a, 0xc52416ef, 0xa704272a, 0xa2b71c93});
 }
 Value body(const Context &c, Value p) { return c.field(c.element(c.path(p, {content, items}), 0), content); }
+// The page's body presenter, unless native navigation has its content array empty for a moment
+// (an ordinary transition while the next view is installed).
+std::optional<Value> mounted_body(const Context &c, Value p) {
+    if (!p.handle || c.type_of(p.handle) != p.type) return {};
+    const auto children = c.path(p, {content, items});
+    const auto pointer = read<Address>(c.address(children));
+    if (!pointer || !(read<std::uint32_t>(pointer - 4) & 0x7fffffff)) return {};
+    return c.field(c.element(children, 0), content);
+}
 Value make(const Context &c, Schema schema, Address authored_type = 0) {
     auto &s = state();
     const auto id = (s.owner.load() ^ 0x524d4f4400000000ULL) + ++s.next_id;
@@ -219,8 +236,11 @@ template <std::size_t I> void activate() noexcept {
         if (I < s.used && s.descriptors[I].action.generation && s.descriptors[I].action.generation == s.owner.load() &&
             s.pending.size() < 8 && std::none_of(s.pending.begin(), s.pending.end(), [&](const Action &a) {
                 return a.command == s.descriptors[I].action.command && a.argument == s.descriptors[I].action.argument;
-            }))
+            })) {
+            logging::log(logging::Level::info, logging::Channel::ui, "Game modes card: button {} -> {} {}.", I, s.descriptors[I].action.command,
+                         s.descriptors[I].action.argument);
             s.pending.push_back(s.descriptors[I].action);
+        }
     } catch (...) {}
 }
 template <std::size_t... I> auto functions(std::index_sequence<I...>) { return std::array{&activate<I>...}; }
@@ -302,7 +322,9 @@ Address asset(const Context &c, const char *name) {
         std::pair{"StackPanelStylesList/", "UI/Foundations/Components/StackVariations/StackPanel/StackPanelStylesList"},
         std::pair{"TD_Page_ContentResources/", "UI/Features/Throwdowns/TD_Page_ContentResources"},
         std::pair{"TextStylesList/", "UI/Foundations/Styles/Lists/TextStylesList"},
-        std::pair{"ButtonStyleList/", "UI/Foundations/Styles/Lists/ButtonStyleList"}};
+        std::pair{"InteractivityColorStylesList/", "UI/Foundations/Styles/Lists/InteractivityColorStylesList"},
+        std::pair{"ButtonStyleList/", "UI/Foundations/Styles/Lists/ButtonStyleList"},
+        std::pair{"Throwdown_ModeSelect_ContentResources/", "UI/Features/Throwdowns/ContentResources/Throwdown_ModeSelect_ContentResources"}};
     for (const auto &[prefix, path] : containers)
         if (std::string_view(name).starts_with(prefix)) {
             const Address list = find_loaded(path);
@@ -342,6 +364,13 @@ Value record_model(const Context &c, const char *name, Schema schema) {
     auto result = make(c, schema, type);
     c.copy(result, data);
     return result;
+}
+// The same, its schema taken from the record's own type.
+Value record_model(const Context &c, const char *name) {
+    const auto record = asset(c, name), type = read<Address>(record + 0x18);
+    require(read<Address>(record + 8) == c.base + build::native_menu::asset_record_type && type && kind(type) == 2,
+            "Game modes card: template schema differs.");
+    return record_model(c, name, {read<std::uint32_t>(read<Address>(type)), static_cast<std::uint16_t>(size(type))});
 }
 Ref record_ref(const Context &c, const char *name) { return {asset(c, name), 0}; }
 void clear_value(const Context &c, Value value) {
@@ -570,22 +599,26 @@ std::optional<CardList> card_list(const Context &c, Value p) {
     } catch (...) {}
     return {};
 }
-void switch_page(const Context &c, bool details) {
+// False while the page is between views (its body empty for a moment): nothing changes then.
+bool switch_page(const Context &c, bool details) {
     auto &s = state();
+    const auto slot = mounted_body(c, s.page);
+    if (!slot) return false;
     if (details) {
         compact_panel(c);
-        c.set(body(c, s.page), Widget{asset(c, "UI/Foundations/Templates/Layouts/Anchored/AnchoredContentPresenter_Widget"), {0, s.panel_anchor.handle}});
+        c.set(*slot, Widget{asset(c, "UI/Foundations/Templates/Layouts/Anchored/AnchoredContentPresenter_Widget"), {0, s.panel_anchor.handle}});
         c.set(c.field(back(c, s.page), callback_field), callback(c, "back"));
         c.text(c.field(back(c, s.page), navigation_field), "");
         c.text(c.path(s.page, {title_path, text_field}), "");
     } else {
-        c.copy(body(c, s.page), c.address(s.original_body));
+        c.copy(*slot, c.address(s.original_body));
         c.copy(back(c, s.page), c.address(s.original_back));
         c.copy(c.field(s.page, page_actions), c.address(c.field(s.original_actions, page_actions)));
         c.text(c.path(s.page, {title_path, text_field}), s.original_title);
         s.displayed.clear();
     }
     s.details = details;
+    return true;
 }
 // Shows a card at the shared smaller size (its authored sizes are `o`'s), publishing only changes.
 void shrink(const Context &c, Value tile, Value cat, Value desc, const Original &o, CardScale k) {
@@ -598,6 +631,7 @@ void shrink(const Context &c, Value tile, Value cat, Value desc, const Original 
 }
 void shrink_all(const Context &c) {
     auto &s = state();
+    if (s.logo_anchor.handle) return; // the logo grid's cells keep their own fixed size
     const auto k = s.grid.handle ? grid_scale : row_scale;
     for (const auto &o : s.originals) shrink(c, o.tile, o.category, o.description, o, k);
     for (const auto &card : s.mode_cards) shrink(c, card.tile, card.category, card.description, s.originals[1], k);
@@ -617,11 +651,15 @@ void release(const Context &c) {
     s.owned.release(
         [&] {
             if (s.page.handle && c.type_of(s.page.handle) == s.page.type && s.details) switch_page(c, false);
+            // The page's own body back where the logo grid was.
+            if (s.logo_anchor.handle)
+                if (const auto slot = mounted_body(c, s.page); slot && read<Widget>(c.address(*slot)).data.handle == s.logo_anchor.handle)
+                    c.copy(*slot, c.address(s.original_body));
             // The stock row back where the grid was, with its cards' descriptions.
             if (s.grid.handle && s.holder.handle && c.type_of(s.holder.handle) == s.holder.type &&
                 read<Widget>(c.address(s.holder)).data.handle == s.grid.handle)
                 c.set(s.holder, s.original_holder);
-            if (s.grid.handle)
+            if (s.grid.handle && !s.logo_anchor.handle)
                 for (const auto &o : s.originals)
                     if (o.label.handle && c.type_of(o.label.handle) == o.label.type) c.text(c.field(o.label, text_field), o.text);
             if (s.grid.handle && s.one_up.label.handle && c.type_of(s.one_up.label.handle) == s.one_up.label.type)
@@ -791,10 +829,166 @@ void build_grid(const Context &c) {
     s.grid = grid;
     logging::log(logging::Level::info, logging::Channel::ui, "Game modes card: {} cards in a grid of {} rows.", tiles.size(), anchors.size());
 }
+// The logo grid: the twelve Throwdowns as round logos, four across and three down, each with its
+// name tilted under it and a hollow aqua ring when picked. Its widgets, styles, logo textures and
+// the grid record itself are private native assets in ReSkate.dll's core bundle (authored by
+// ReSkateStudio's one-up-badge). Each cell is still the card's own tile button, so its action is
+// the card's: the stock three keep their native navigation, ours call back here.
+//
+// A mode's logo, from its private exported category record when it has one (the record holds the
+// loaded image before the texture renderer has registered it), else by texture name.
+void mode_art(const Context &c, std::span<const Value> fields, std::string_view logo, std::string_view key) {
+    if (logo.empty()) return;
+    try {
+        if (!key.empty()) {
+            const auto name = std::string("Throwdown_ModeSelect_ContentResources/") + std::string(key);
+            const auto record = asset(c, name.c_str());
+            const auto type = read<Address>(record + 0x18), data = read<Address>(record + 0x20);
+            require(read<Address>(record + 8) == c.base + build::native_menu::asset_record_type && type && data &&
+                        read<std::uint32_t>(read<Address>(type)) == category_schema.hash,
+                    "logo record schema differs");
+            const auto image = read<Address>(data + c.member(type, 0x189084da).offset);
+            require(image && (read<Address>(image + 8) == c.base + build::native_menu::texture_asset_type ||
+                              read<Address>(image + 8) == c.base + build::native_menu::image_asset_type),
+                    "logo record image is not loaded");
+            for (const auto field : fields)
+                if (read<Address>(c.address(field)) != image) c.set(field, image);
+            return;
+        }
+        require(publish_texture(c, fields, logo), "logo has not registered yet");
+    } catch (const std::exception &e) {
+        static std::set<std::string, std::less<>> reported;
+        if (reported.insert(std::string(logo)).second)
+            logging::log(logging::Level::warning, logging::Channel::ui, "Game modes card: logo {} unavailable ({}).", logo, e.what());
+    }
+}
+// The logo record's key for a mode (1-Up's badge has its own name).
+std::string_view logo_key(modes::Mode mode) {
+    return mode == modes::Mode::one_up ? std::string_view("OneUpBadge") : modes::mode_key(mode);
+}
+// Dresses a tile as a grid cell: a private copy of the stock button style with every background
+// empty and the aqua ring on hover and focus, all-white interactivity colors (the art keeps its
+// colors when picked), and as content a fixed logo over a tilted name. Returns the logo's model.
+Value picker_logo(const Context &c, Value tile, Value cat, bool stock, const std::string &name) {
+    const auto button_style = record_model(c, "ButtonStyleList/TileButton.RoughPartial.NoDefaultBG");
+    const auto empty = c.path(button_style, {0x2d393a3a, 0xb6c6aace});
+    for (const auto key : {0x24996c65U, 0x69cf50caU, 0xe8f882b7U, 0x182004ffU, 0xb0db14beU, 0xfadedb6aU})
+        c.copy(c.path(button_style, {0x2d393a3a, key}), c.address(empty));
+    const auto ring = asset(c, "UI/ReSkate/Throwdowns/LogoHoverRing_FillStyle");
+    for (const auto key : {0xf622ea66U, 0x943abf2dU, 0x287f4815U}) c.set(c.path(button_style, {0x343abac3, key}), ring);
+    for (const auto flag : {0xc02028cfU, 0xa45fc55dU, 0xb811842aU, 0xe69a9d99U}) c.set(c.field(button_style, flag), false);
+    c.set(c.path(tile, {widget, 0x0fb0d794, 0x8cc042ef}), Ref{0, button_style.handle});
+    c.set(c.path(tile, {widget, 0xa04998ca}), false);
+    const auto colors = record_ref(c, "InteractivityColorStylesList/InteractiveColors.Core.AllWhite");
+    c.set(c.field(button_style, 0xcd4a53c0), colors);
+    const auto logo = make(c, texture_schema);
+    if (stock) c.copy(c.field(logo, 0x6e469d2a), c.address(c.field(cat, 0x189084da)));
+    c.set(c.field(logo, 0xf524c836), 320.f);
+    c.set(c.field(logo, 0x6fbd254e), 320.f);
+    for (const auto flag : {0x81c94d8aU, 0x190e039cU, 0xd1997d0cU}) c.set(c.field(logo, flag), false);
+    c.set(c.field(logo, 0xcd4a53c0), colors);
+    const auto caption = make(c, label_schema);
+    c.copy(caption, c.address(state().source_label));
+    plain_label(c, caption, name);
+    label_styles(c, caption, "TextStylesList/H52-XBold_White_DropShadow75", "TextStylesList/H52-XBold_White_DropShadow75");
+    // Picked: the same white name with skate.'s aqua outline round its letters.
+    const auto outlined = record_model(c, "TextStylesList/H52-XBold_White_DropShadow75");
+    c.set(c.field(outlined, 0x51332fc1), asset(c, "UI/Foundations/Fonts/Styles/Dingo_2pxOutline_Aqua_FontEffect"));
+    for (const auto key : {0xa1e84eb1U, 0x25189231U}) c.set(c.field(caption, key), Ref{0, outlined.handle});
+    c.set(c.field(caption, 0x87ad624c), 2); // centred vertically
+    c.set(c.field(caption, 0x3d8639d0), 1); // right aligned
+    c.set(c.field(caption, 0xc13ba637), false);
+    c.set(c.field(caption, 0xfc53d427), false);
+    c.set(c.field(caption, 0xcd71a279), true);
+    c.set(c.field(caption, 0x3fa0b887), false);
+    const auto contents = make(c, {0x9ade4bc7, 208}); // ContentPresenterCombination: logo and name
+    c.set(c.field(contents, 0xa98391bd), Widget{asset(c, "UI/ReSkate/Throwdowns/LogoTexture_Widget"), {0, logo.handle}});
+    c.set(c.field(contents, 0x759c54dd), Widget{asset(c, "UI/ReSkate/Throwdowns/LogoName_Widget"), {0, caption.handle}});
+    // Fixed regions (logo 52,16 320x320; name 52,341 360x56): neither moves when the other loads.
+    c.set(c.path(tile, {widget, widget}), Widget{asset(c, "UI/ReSkate/Throwdowns/LogoCaptionTile_Widget"), {0, contents.handle}});
+    c.set(c.field(tile, 0x868043e1), std::array<float, 2>{424.f, 424.f});
+    return logo;
+}
+// Where ours go: after the stock three, 1-Up, then Spot Jam to Hide & Seek.
+constexpr modes::Mode logo_order[]{modes::Mode::one_up,   modes::Mode::jam, modes::Mode::meat,      modes::Mode::race, modes::Mode::domination,
+                                   modes::Mode::graffiti, modes::Mode::tag, modes::Mode::infection, modes::Mode::hide};
+void build_logo_grid(const Context &c) {
+    auto &s = state();
+    require(s.originals.size() == 3, "the stock cards differ");
+    // Everything the grid needs is looked up before any card is touched.
+    auto grid = record_model(c, "Throwdown_ModeSelect_ContentResources/LogoGrid");
+    require(read<std::uint32_t>(read<Address>(grid.type)) == 1948428891U, "the native grid schema differs");
+    for (const auto name : {"UI/ReSkate/Throwdowns/LogoPickerListItem_Widget", "UI/ReSkate/Throwdowns/LogoCaptionTile_Widget",
+                            "UI/ReSkate/Throwdowns/LogoTexture_Widget", "UI/ReSkate/Throwdowns/LogoName_Widget",
+                            "UI/ReSkate/Throwdowns/LogoHoverRing_FillStyle", "UI/Foundations/Components/Lists/GridList/Widget/GridList_Widget",
+                            "UI/Foundations/Templates/Layouts/Anchored/AnchoredContentPresenter_Widget"})
+        asset(c, name);
+    c.set(c.field(grid, 0x55ca89f4), asset(c, "UI/ReSkate/Throwdowns/LogoPickerListItem_Widget"));
+    c.set(c.field(grid, 1913319895U), 424.f); // ColumnSize
+    c.set(c.field(grid, 2171233779U), 424.f); // RowSize
+    c.set(c.field(grid, 2454275348U), 32.f);  // ColumnSpacing
+    c.set(c.field(grid, 2923226299U), 32.f);  // RowSpacing
+    c.set(c.field(grid, 3625715088U), 4);     // StaticSegmentItemCount: four across
+    c.set(c.field(grid, 3831727006U), 0);     // segment count mode: static
+    c.set(c.field(grid, 1287003308U), 1);     // rows run down
+    c.set(c.field(grid, 369153166U), 0);      // DefaultIndex
+    c.set(c.field(grid, 3523782405U), 0);     // Inset
+    for (const auto flag : {1972029470U, 133293336U, 3885835458U, 3339695017U, 235921311U}) c.set(c.field(grid, flag), false);
+    c.set(c.field(grid, 1163163164U), true); // clip to its reserved area
+    c.set(c.field(grid, 3275567233U), true); // remember the pick on Back
+    auto anchor = record_model(c, "Throwdown_ModeSelect_ContentResources/Throwdown_ModeSelect_LinearList_AnchoredContent", anchor_schema);
+    c.set(c.field(anchor, widget), Widget{asset(c, "UI/Foundations/Components/Lists/GridList/Widget/GridList_Widget"), {0, grid.handle}});
+    c.set(c.field(anchor, 0x1cff7243), std::array<float, 2>{1792.f, 1336.f});
+    c.set(c.field(anchor, 0x6efc1a61), false);
+    c.set(c.field(anchor, 0xbe5683d9), false);
+    const auto horizontal = c.field(anchor, 0xde7d30c7); // centred across the page
+    c.set(c.field(horizontal, 0x99bbed5a), .5f);
+    c.set(c.field(horizontal, 0x49943bed), .5f);
+    c.set(c.field(horizontal, 0x40bfbff4), 0.f);
+    c.set(c.field(horizontal, 0x1d233266), 0.f);
+    c.set(c.field(horizontal, 0xfec5e0b1), .5f);
+    c.set(c.field(horizontal, 0xd01f4a21), 1.f);
+    // A grid cell takes the tile's inline ContentPresenterTile model, not the tile itself: both
+    // start at byte zero, but the tile adds an entry to the engine's flattened field table, and
+    // passing it shifts every bound field by one (the menu then reads a delegate as text and
+    // crashes). The tile itself stays alive with its button and action.
+    std::vector<Handle> cells;
+    const auto add = [&](Value tile) {
+        const auto inner = c.field(tile, widget);
+        require(read<std::uint32_t>(read<Address>(inner.type)) == content_tile_schema.hash && size(inner.type) == content_tile_schema.size,
+                "the grid tile model differs");
+        cells.push_back(inner.handle);
+    };
+    const std::array<const char *, 3> stock_names{"S.K.A.T.E.", "Spot Battle", "Skate Jam"};
+    for (unsigned i = 0; i < 3; ++i) {
+        s.logo_stock[i] = make(c, tile_schema);
+        c.copy(s.logo_stock[i], c.address(s.originals[i].tile));
+        picker_logo(c, s.logo_stock[i], s.originals[i].category, true, stock_names[i]);
+        add(s.logo_stock[i]);
+    }
+    for (const auto mode : logo_order) {
+        const auto card = std::find_if(s.mode_cards.begin(), s.mode_cards.end(), [&](const ModeCard &m) { return m.mode == mode; });
+        if (card == s.mode_cards.end()) continue;
+        const auto logo = picker_logo(c, card->tile, card->category, false, std::string(modes::mode_name(mode)));
+        mode_art(c, std::array{c.field(logo, 0x6e469d2a)}, mode_logo(mode), logo_key(mode));
+        add(card->tile);
+    }
+    c.array(c.field(grid, handles_field), cells);
+    s.grid = grid;
+    s.logo_anchor = anchor;
+    logging::log(logging::Level::info, logging::Channel::ui, "Game modes card: {} Throwdowns in the logo grid.", cells.size());
+}
 // The grid where the stock row is shown, unless the mode panel is up.
 void mount_grid(const Context &c) {
     auto &s = state();
-    if (s.details || native_one_up_setup_open() || !s.grid.handle || c.type_of(s.holder.handle) != s.holder.type) return;
+    if (s.details || native_one_up_setup_open() || !s.grid.handle) return;
+    if (s.logo_anchor.handle) {
+        const auto slot = mounted_body(c, s.page);
+        if (slot && read<Widget>(c.address(*slot)).data.handle != s.logo_anchor.handle)
+            c.set(*slot, Widget{asset(c, "UI/Foundations/Templates/Layouts/Anchored/AnchoredContentPresenter_Widget"), {0, s.logo_anchor.handle}});
+        return;
+    }
+    if (c.type_of(s.holder.handle) != s.holder.type) return;
     if (read<Widget>(c.address(s.holder)).data.handle != s.grid.handle)
         c.set(s.holder, Widget{asset(c, "UI/Foundations/Components/Lists/LinearList/Widget/LinearList_Widget"), {0, s.grid.handle}});
 }
@@ -880,7 +1074,13 @@ void initialize(const Context &c, Value p, Value list, Value holder) {
     s.row_only = reopening;
     if (modes::throwdown_grid() && !reopening) {
         try {
-            build_grid(c);
+            build_logo_grid(c);
+        } catch (const std::exception &e) {
+            logging::log(logging::Level::warning, logging::Channel::ui, "Game modes card: no logo grid ({}); cards instead.", e.what());
+            s.grid = s.logo_anchor = {};
+        }
+        try {
+            if (!s.grid.handle) build_grid(c);
         } catch (const std::exception &e) {
             // A grid that cannot be built leaves the stock row, with our cards added to it.
             logging::log(logging::Level::warning, logging::Channel::ui, "Game modes card: no grid ({}); cards in a row.", e.what());
@@ -1210,8 +1410,12 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                 for (const auto &a : pending)
                     if (a.command == "mode") run.push_back(a);
             } else {
-                // Keep the cards' callbacks reserved while a panel shows.
-                for (const auto &card : s.mode_cards) callback(c, "card", card.key);
+                // Keep the cards' callbacks reserved (and on their buttons) while a panel shows.
+                for (const auto &card : s.mode_cards) {
+                    const auto action = callback(c, "card", card.key);
+                    const auto field = c.field(primary(c, card.tile), callback_field);
+                    if (read<Address>(c.address(field)) != action) c.set(field, action);
+                }
                 // 1-Up's card wears its own blue 1UP badge (built into ReSkate.dll with its HUD art).
                 if constexpr (mode_logos)
                     for (const auto &card : s.mode_cards)
@@ -1229,9 +1433,16 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                         // 1-Up is the native one (one_up_menu.cpp): skate.'s own setup and flag.
                         if (!open_native_one_up_setup()) s.status = "1-Up can't start right now (a game or flag is up).";
                     } else if (a.command == "card") {
-                        // The mode's own setup page: its play area, time and route, then the start flag.
-                        if (!modes::menu_view().in_game) run.push_back({a.generation, "mode", "new " + a.argument, a.pass});
-                        switch_page(c, true);
+                        // Like 1-Up: skate.'s own setup for the mode, then its flag. Its GAME SETTINGS
+                        // button leads to the game's settings page (play area, time, route).
+                        const auto m = modes::menu_view();
+                        const auto mode = modes::parse_mode(a.argument);
+                        const bool ours_in_setup = m.in_game && m.leading && m.phase <= 1 && mode && modes::parse_mode(m.mode) == mode;
+                        if (!m.in_game) {
+                            run.push_back({a.generation, "mode", "new " + a.argument, a.pass});
+                            s.flag_after = GetTickCount64() + 3000;
+                        } else if (!ours_in_setup || !one_up::begin_mode_flag_placement())
+                            switch_page(c, true); // another game is on (or no flag now): its page says so
                     }
                     else if (a.command == "back") switch_page(c, false);
                     else if (a.command == "mode") run.push_back(a);
@@ -1257,6 +1468,14 @@ void tick_native_modes_card(std::uintptr_t base, bool loading) noexcept {
                 } else if (s.flag_after && GetTickCount64() > s.flag_after) {
                     s.flag_after = 0;
                     switch_page(c, true); // the game was not set up (the panel says why)
+                }
+                // The mode's stock setup closed without its flag: the game's settings page.
+                const bool placing = one_up::flag_for_mode() && one_up::flag_placement_active();
+                if (placing) s.flag_setup_seen = true;
+                else if (s.flag_setup_seen) {
+                    const auto m = modes::menu_view();
+                    if (!(m.in_game && m.leading && m.phase <= 1) || one_up::flag_for_mode() || s.details || switch_page(c, true))
+                        s.flag_setup_seen = false; // (else again next tick, once the page has its body)
                 }
                 if (s.grid.handle) mount_grid(c); // straight back after Back restored the page
                 if (s.details) render(c);

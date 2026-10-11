@@ -75,6 +75,7 @@ struct State {
     std::vector<std::uint64_t> hud_player_ids;
     bool hud_initialized{}, hud_countdown_visible{}, hud_intro_visible{}, hud_clock_shown{}, hud_results_visible{};
     int hud_kind=-1; // the feed the widgets were built for: 1 1-Up, 0 a game mode
+    std::uint64_t mode_setup_seen_at{}; // a game mode's stock setup panel was last on screen
     std::atomic<bool> hud_ready{};
     std::uint64_t hud_ended_at{}, hud_go_until{};
     std::uint64_t hud_countdown_token{}; // the countdown on screen (Feed::token)
@@ -310,20 +311,23 @@ Value clone_widget_model(const Context& c,Value target) {
 struct PrivateUiGraph {
     const Context& c;
     UiCloneCache<std::pair<Handle,Address>,Value> copies;
+    std::set<Handle> private_roots, walked;
     unsigned budget=2400;
     Value clone(Ref source,unsigned depth=0) {
         const auto type=source.handle?c.type_of(source.handle):(source.record?read<Address>(source.record+0x18):0);
         require(type && (kind(type)==2 || kind(type)==4),"Private Throwdown UI model is unavailable.");
+        if(source.handle && (private_roots.contains(source.handle) || walked.contains(source.handle)))return {source.handle,type};
         const auto key=std::pair{source.handle,source.handle?type:source.record};
         return copies.clone(key,[&] {
-            require(depth<32 && budget,"Private Throwdown UI graph exceeds its limit.");--budget;
+            require(depth<96 && budget,"Private Throwdown UI graph exceeds its limit.");--budget;
             const auto data=source.handle?c.address({source.handle,type}):read<Address>(source.record+0x20);
             const auto result=make(c,{read<std::uint32_t>(read<Address>(type)),static_cast<std::uint16_t>(size(type))},type);
-            c.copy(result,data);return result;
+            c.copy(result,data);private_roots.insert(result.handle);return result;
         },[&](Value result){walk(result,depth+1);});
     }
     void walk(Value value,unsigned depth) {
-        require(depth<32,"Private Throwdown UI graph depth differs.");
+        if(!walked.insert(value.handle).second)return;
+        require(depth<96,"Private Throwdown UI graph depth differs.");
         const auto hash=read<std::uint32_t>(read<Address>(value.type));
         if(hash==presenter.hash) {
             auto w=read<Widget>(c.address(value));
@@ -341,11 +345,18 @@ struct PrivateUiGraph {
             return;
         }
         if(kind(value.type)==4) {
-            unsigned count{},stride{};c.array(value,128,count,stride);
+            unsigned count{},stride{};auto bytes=c.array(value,128,count,stride);
             for(unsigned i=0;i<count;++i) {
                 const auto child=c.element(value,i);
-                if(kind(child.type)==2 || kind(child.type)==4)walk(child,depth+1);
+                if(kind(child.type)==2 || kind(child.type)==4) {
+                    // Publishing an inline array element can retire its
+                    // siblings' storage. Adapt detached roots, then replace
+                    // the counted array once after every element is ready.
+                    const auto copy=clone({0,child.handle},depth+1);
+                    require(memory::peek_bytes(c.address(copy),bytes.data()+i*stride,stride),"Private UI array copy is unavailable.");
+                }
             }
+            c.array(value,bytes,count);
         } else if(kind(value.type)==2) {
             const auto meta=read<Address>(value.type),fields=read<Address>(meta+0x60);
             const auto count=read<std::uint16_t>(meta+0x2a);
@@ -374,7 +385,7 @@ Value clone_widget_tree(const Context& c,Value slot) {
 std::vector<Value> ui_models(const Context& c,Value root,std::uint32_t wanted) {
     std::vector<Value> result;std::set<Handle> seen;unsigned budget=2400;
     std::function<void(Value,unsigned)> visit=[&](Value value,unsigned depth) {
-        if(!value.handle || !value.type || !budget || depth>24 || !seen.insert(value.handle).second)return;
+        if(!value.handle || !value.type || !budget || depth>96 || !seen.insert(value.handle).second)return;
         --budget;const auto hash=read<std::uint32_t>(read<Address>(value.type));
         if(hash==wanted) {result.push_back(value);return;}
         if(hash==0x62088281) {
@@ -1031,6 +1042,14 @@ void official_setup(const Context& c) {
     }
     if(s.reset_setup.exchange(false))s.seconds=20;
     s.setup_open.store(true);
+    // A game mode's setup gone for a moment without its flag placement starting: it was backed out of.
+    if(game_mode) {
+        const auto now=GetTickCount64();
+        if(!s.mode_setup_seen_at)s.mode_setup_seen_at=now;
+        else if(now>s.mode_setup_seen_at+1500 && one_up::back_out_of_mode_setup()) {
+            s.mode_setup_seen_at=0;restore_official(c);s.setup_open.store(false);return;
+        }
+    } else s.mode_setup_seen_at=0;
     for(const auto& root:c.roots({panel_schema.hash})) {
         if(root.model.handle==s.panel.handle)continue;
         const auto header_slot=c.field(root.model,0xc0f1b449);
@@ -1086,11 +1105,37 @@ void official_setup(const Context& c) {
             auto current=read<Widget>(c.address(slot));
             if(current.data.handle!=copy.handle) {current.data={0,copy.handle};c.set(slot,current);}
         }
+        if(game_mode)s.mode_setup_seen_at=GetTickCount64();
         plain_label(c,title,game_mode?mode_title:std::string("1-UP"));
         if(game_mode) {
             // A game mode keeps the panel's own mark, the native Confirm and its flag placement.
             for(const auto notice:ui_models(c,c.field(root.model,0x43967ece),notice_schema.hash))
                 plain_label(c,c.field(notice,0x94703efc),mode_line);
+            // Its advanced-settings button is GAME SETTINGS: the page's own Back, to the Throwdowns
+            // menu, which then shows the game's settings (modes_card.cpp: play area, time, route).
+            // (Looked up once per panel; a page that cannot be walked leaves the stock button.)
+            static std::map<Handle,std::string> back_navigations;
+            if(fresh || !back_navigations.contains(root.model.handle)) {
+                if(back_navigations.size()>64)back_navigations.clear();
+                auto& found=back_navigations[root.model.handle];
+                for(const auto& page_root:c.roots({page.hash})) try {
+                    const auto panels=ui_models(c,c.field(page_root.model,content),panel_schema.hash);
+                    if(std::none_of(panels.begin(),panels.end(),[&](Value p){return p.handle==root.model.handle;}))continue;
+                    found=c.text(c.field(back(c,page_root.model),0xb1e14cd6));
+                    break;
+                } catch(const std::exception&) {}
+            }
+            const auto& back_navigation=back_navigations[root.model.handle];
+            if(fresh)for(const auto b:ui_models(c,c.field(root.model,0xbfc64535),button.hash))
+                logging::log(logging::Level::info,logging::Channel::ui,"Game mode setup: button {} (Back is {}).",
+                    c.text(c.field(c.path(b,{0x0fb0d794,0xa704272a,0xc52416ef,0xa704272a,0xa2b71c93}),0xb1e14cd6)),back_navigation);
+            for(const auto b:ui_models(c,c.field(root.model,0xbfc64535),button.hash)) {
+                const auto action=c.path(b,{0x0fb0d794,0xa704272a,0xc52416ef,0xa704272a,0xa2b71c93});
+                const auto nav=c.text(c.field(action,0xb1e14cd6));
+                if(back_navigation.empty() || nav!="AdvancedParameters")continue;
+                c.text(c.field(action,0xb1e14cd6),back_navigation);
+                plain_label(c,c.field(b,0x58c9d354),"GAME SETTINGS");
+            }
             continue;
         }
         // The blue art is a RimeTexture, while ActivityDisplay's framed icon
