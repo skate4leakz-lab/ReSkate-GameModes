@@ -134,8 +134,11 @@ Entity create(std::uintptr_t base, std::uintptr_t parent, std::uintptr_t asset, 
         ~BusScope() { reinterpret_cast<void (*)(std::uintptr_t)>(base + e::release_reference)(bus); }
     } bus_scope{base, bus};
     alignas(16) std::array<unsigned char, 0x190> descriptor{};
+    // Created at identity, placed at its real transform right after: the pattern ai_skaters.cpp
+    // uses (confirmed rendering).
+    alignas(16) constexpr Matrix identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     reinterpret_cast<void *(*)(void *, std::uintptr_t, std::uintptr_t, const void *)>(base + e::descriptor_init)(descriptor.data(), 0, bus,
-                                                                                                                   matrix.data());
+                                                                                                                   identity.data());
     struct Scope {
         std::uintptr_t base;
         void *data;
@@ -157,6 +160,10 @@ Entity create(std::uintptr_t base, std::uintptr_t parent, std::uintptr_t asset, 
     }
     reinterpret_cast<void (*)(std::uintptr_t, const void *, std::uintptr_t, std::uint8_t)>(base + e::initialize_placement)(entity.entity,
                                                                                                                              matrix.data(), 0, 1);
+    // Belt and braces: the same call later moves of a resident gate use, so the owned transform
+    // collection and render state definitely reflect the real matrix, not just the creation step.
+    reinterpret_cast<void (*)(std::uintptr_t, const void *, std::uint8_t, std::uint8_t)>(base + e::move_spatial_entity)(entity.entity,
+                                                                                                                          matrix.data(), 1, 1);
     return entity;
 }
 // Exact child transforms from the game's own checkpoint prefab. One size control scales the whole
