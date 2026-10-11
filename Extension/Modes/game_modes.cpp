@@ -68,6 +68,7 @@ struct Game {
     std::size_t tags_sent{};              // leading: shapes already sent
     std::uint64_t tags_resent{};          // leading: when all were last sent again, for late arrivals
     std::vector<std::uint64_t> joiners; // leading, before the start: who answered the setup
+    std::size_t capacity = max_players; // leading: most players in the game, the leader included
     std::optional<Referee> referee;     // leading, from the start
     std::optional<Message> state;       // the latest state (the leader's own when leading)
     std::uint64_t heard{}, setup_sent{}, state_sent{}, join_sent{};
@@ -868,6 +869,7 @@ std::string join_offer(State &s, const Offer &offer, std::uint64_t now) {
 // tap never joins: it must be held.
 bool game_window_focused();
 constexpr std::uint64_t invite_ms = 15000, join_hold_ms = 800;
+constexpr std::uint32_t pad_lb = 0x0100, pad_rb = 0x0200; // XINPUT shoulders: L1 / R1 on a PlayStation pad
 constexpr std::uint32_t pad_a = 0x1000; // XINPUT_GAMEPAD_A: A on an Xbox pad, X (cross) on a PlayStation one
 void run_invites(State &s, std::uint64_t now) {
     // A game seen reach its results is not offered again by the setup messages its leader keeps
@@ -1207,11 +1209,12 @@ void run_placing(State &s, std::uint64_t now) {
         // The gate faces the way the skater is going; holding D-pad Up (or PgUp/PgDn) turns it.
         const bool left = held(VK_PRIOR), right = (buttons & pad_up) || held(VK_NEXT);
         if (left != right) s.yaw_offset += (left ? -120.0f : 120.0f) * seconds;
-        // The wheel turns the gate; with Ctrl held (or [ and ]) it widens or narrows it instead.
+        // The wheel turns the gate; with Ctrl held it widens or narrows it instead, as LB / RB (or
+        // [ and ]) held do.
         const bool ctrl = held(VK_CONTROL);
         if (ctrl) s.draft_width *= std::pow(1.15f, notches);
         else s.yaw_offset += notches * 15.0f; // each wheel notch: 15 degrees
-        const bool narrow = held(VK_OEM_4), widen = held(VK_OEM_6);
+        const bool narrow = held(VK_OEM_4) || (buttons & pad_lb), widen = held(VK_OEM_6) || (buttons & pad_rb);
         if (narrow != widen) s.draft_width *= std::pow(widen ? 1.8f : 1.0f / 1.8f, seconds);
         s.draft_width = std::clamp(s.draft_width, min_gate_half_width, max_gate_half_width);
     }
@@ -1747,12 +1750,12 @@ void build_hud(State &s, std::uint64_t now) {
                     h.hint = s.free_place ? (g.settings.points.empty() ? "Fly the camera and aim at the start line" : "Aim at the next gate along the course")
                                          : (g.settings.points.empty() ? "Skate to the start line" : "Skate the course");
                     h.prompts = g.settings.points.empty()
-                        ? std::vector<overlay::ModesHud::Prompt>{{'R', m ? "Click / Enter" : "Enter", "Start gate"}, {'U', m ? "Mouse wheel" : "PgUp", "Turn"}, {'L', "Backspace", "Cancel"}}
-                        : std::vector<overlay::ModesHud::Prompt>{{'R', m ? "Click / Enter" : "Enter", "Checkpoint"}, {'U', m ? "Mouse wheel" : "PgUp", "Turn"}, {'D', m ? "F / End" : "End", "Finish"}, {'L', "Backspace", "Undo"}};
+                        ? std::vector<overlay::ModesHud::Prompt>{{'R', m ? "Click / Enter" : "Enter", "Start gate"}, {'U', m ? "Mouse wheel" : "PgUp", "Turn"}, {'W', m ? "Ctrl + wheel / [ ]" : "[ ]", "Width"}, {'L', "Backspace", "Cancel"}}
+                        : std::vector<overlay::ModesHud::Prompt>{{'R', m ? "Click / Enter" : "Enter", "Checkpoint"}, {'U', m ? "Mouse wheel" : "PgUp", "Turn"}, {'W', m ? "Ctrl + wheel / [ ]" : "[ ]", "Width"}, {'D', m ? "F / End" : "End", "Finish"}, {'L', "Backspace", "Undo"}};
                     h.line = (g.settings.points.empty() ? std::string("Route: nothing yet")
                                                         : std::format("Route: start + {} checkpoint{}", g.settings.points.size() - 1,
                                                                       g.settings.points.size() == 2 ? "" : "s")) +
-                             std::format("  -  gate {:.0f} m wide ({})", s.draft_width * 2, m ? "Ctrl + wheel or [ ]" : "[ ]");
+                             std::format("  -  gate {:.0f} m wide", s.draft_width * 2);
                     break;
                 }
                 h.hint = std::format("{} each {}", s.free_place ? "Aim at" : "Skate to", point_name(g));
@@ -1854,6 +1857,7 @@ void build_hud(State &s, std::uint64_t now) {
         m.points = g.settings.points.size();
         m.players = g.state ? g.state->standings.size() : 1;
         m.duration = g.settings.duration_s;
+        m.capacity = static_cast<unsigned>(g.capacity);
         m.turn = g.settings.turn_s;
         m.strikes = g.settings.strikes;
         m.trick_kinds = g.settings.trick_kinds;
@@ -2130,7 +2134,7 @@ bool receive(std::uint64_t sender, std::span<const std::uint8_t> bytes) {
             if (s.game->referee) {
                 s.game->referee->add_player(sender); // until the countdown ends
             } else if (std::find(s.game->joiners.begin(), s.game->joiners.end(), sender) == s.game->joiners.end() &&
-                       s.game->joiners.size() + 1 < max_players) {
+                       s.game->joiners.size() + 1 < s.game->capacity) {
                 s.game->joiners.push_back(sender);
             }
         }
@@ -2440,6 +2444,7 @@ std::string command(std::string_view verb, const std::vector<std::string> &argum
         apply(*value);
         return changed(std::format("{} set to {}.", label, *value));
     };
+    if (v == "players") return set_number(2, static_cast<float>(max_players), [&](float x) { g.capacity = static_cast<std::size_t>(x); }, "Players");
     if (v == "time") return set_number(30, 3600, [&](float x) { g.settings.duration_s = static_cast<std::uint32_t>(x); }, "Time (s)");
     if (v == "turn") return set_number(10, 120, [&](float x) { g.settings.turn_s = static_cast<std::uint32_t>(x); }, "Turn time (s)");
     if (v == "strikes") return set_number(1, 5, [&](float x) { g.settings.strikes = static_cast<std::uint8_t>(x); }, "Strikes");

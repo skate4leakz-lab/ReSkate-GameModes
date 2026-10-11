@@ -16,8 +16,11 @@ bool arm_native_setup(unsigned seconds, unsigned players);
 // the native Start on its waiting card starts it, Leave ends it.
 bool begin_mode_flag_placement(bool open_menu = false); // open_menu: from the world (opens Throwdowns first)
 bool flag_for_mode() noexcept;
-// A game mode's stock setup was left without Confirm (Back, or its GAME SETTINGS): the flag
-// placement ends quietly, with no exit navigation. False when no mode setup was up.
+// Counts flag placements begun (1-Up's and the game modes'): a new one is a new native setup.
+std::uint64_t flag_placement_serial() noexcept;
+// A game mode's stock setup was left without Confirm (Back, another pick, or placing something in
+// the world from GAME SETTINGS): its flag placement ends quietly, with no navigation of its own.
+// False when no mode setup was up.
 bool back_out_of_mode_setup() noexcept;
 void request_mode_start() noexcept;
 void request_mode_stop() noexcept;

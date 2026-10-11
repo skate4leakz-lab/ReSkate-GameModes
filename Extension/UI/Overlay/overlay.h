@@ -459,6 +459,9 @@ struct NativeModesHud {
     bool score{}, countdown{}, results{};
 };
 void set_native_modes_hud(NativeModesHud) noexcept;
+// One of skate.'s Throwdown menus (the cards, a setup, its customize screen) is on screen: the game
+// modes panel stays out from under it. Said every native menu tick (stale after half a second).
+void set_native_throwdown_menu(bool open) noexcept;
 void set_modes_hud_feed(ModesHudFeed) noexcept;
 // The Bone Cam (Extension/Modes/bone_cam.h): during a big bail the screen goes X-ray and every
 // bone of the local skater is drawn between its real joints, the ones that took a hard hit in red,
@@ -530,6 +533,7 @@ struct ModesMenu {
     std::string mode;             // "graffiti"
     std::size_t corners{}, points{}, players{};
     std::uint32_t duration{}, turn{};
+    unsigned capacity{}; // leading: most players the game takes
     int strikes{};
     float radius{};
     std::string missing;          // what `mode start` still needs

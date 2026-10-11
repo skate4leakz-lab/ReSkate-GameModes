@@ -54,6 +54,10 @@ struct Row { Value model, anchor, tile, selector; std::vector<Handle> choices; s
 struct Original { Value tile, category, description; std::array<float,2> tile_size{}, description_size{}; float icon_width{}, icon_height{}; };
 struct HudPlayer { Value row, background, name, stamps, strike_anchor, strike_item; std::array<Value,3> letters; bool out{}, stamps_row{}; };
 struct ResultPlayer { Value row, rank, outcome; bool winner{}; };
+// Our rows on skate.'s customize screen (mode_customize): per selector its choices, the command
+// each sends and the one last sent.
+struct CustomizeRow { std::string id; Value selector; std::vector<Handle> choices; std::vector<std::string> commands; int applied=-1; };
+struct Customize { Handle list{}; std::vector<CustomizeRow> rows; };
 struct State {
     // Borrowed native marker fields, restored when this match releases them.
     std::map<Handle,std::pair<Value,bool>> marker_originals;
@@ -75,7 +79,8 @@ struct State {
     std::vector<std::uint64_t> hud_player_ids;
     bool hud_initialized{}, hud_countdown_visible{}, hud_intro_visible{}, hud_clock_shown{}, hud_results_visible{};
     int hud_kind=-1; // the feed the widgets were built for: 1 1-Up, 0 a game mode
-    std::uint64_t mode_setup_seen_at{}; // a game mode's stock setup panel was last on screen
+    std::map<Handle,Customize> customizes; // by list: skate. keeps more than one
+    std::uint64_t official_serial{}; // the flag placement the native setup was dressed for
     std::atomic<bool> hud_ready{};
     std::uint64_t hud_ended_at{}, hud_go_until{};
     std::uint64_t hud_countdown_token{}; // the countdown on screen (Feed::token)
@@ -975,13 +980,13 @@ void penalty_row(const Context& c,std::vector<std::string>& shown) {
 void remove_one_up_rounds(const Context& c,Value root,bool game_mode=false) {
     std::set<Handle> seen;
     std::function<bool(Value,unsigned)> visit=[&](Value value,unsigned depth) -> bool {
-        require(depth<32,"1-Up settings graph depth differs.");
+        require(depth<96,"1-Up settings graph depth differs.");
         if(!value.handle)return false;
         const auto hash=read<std::uint32_t>(read<Address>(value.type));
         if(hash==setting_schema.hash) {
-            // 1-Up drops Spot Battle's rounds; a game mode its rounds, turn timer and player count
-            // too (the mode's own panel holds its settings).
             const auto id=c.text(c.path(value,{0x58c9d354,text_field}));
+            // 1-Up drops Spot Battle's rounds; a game mode its rounds, turn timer and player count
+            // too (the mode's own settings hold them).
             return id=="ID_LABEL_ROUNDS" ||
                 (game_mode && (id=="ID_LABEL_TURNTIMER" || id=="ID_LABEL_DURATION" || id=="ID_SETTINGS_PLAYERS"));
         }
@@ -994,9 +999,17 @@ void remove_one_up_rounds(const Context& c,Value root,bool game_mode=false) {
         if(kind(value.type)==4) {
             unsigned n{},stride{};const auto old=c.array(value,128,n,stride);
             std::vector<std::byte> kept;
-            for(unsigned i=0;i<n;++i)if(!visit(c.element(value,i),depth+1))
-                kept.insert(kept.end(),old.begin()+i*stride,old.begin()+(i+1)*stride);
-            if(kept.size()!=old.size())c.array(value,kept,static_cast<unsigned>(kept.size()/stride));
+            for(unsigned i=0;i<n;++i) {
+                const auto child=c.element(value,i);
+                if(kind(child.type)==2 || kind(child.type)==4) {
+                    const auto copy=make(c,{read<std::uint32_t>(read<Address>(child.type)),static_cast<std::uint16_t>(size(child.type))},child.type);
+                    c.copy(copy,c.address(child));
+                    if(visit(copy,depth+1))continue;
+                    const auto offset=kept.size();kept.resize(offset+stride);
+                    require(memory::peek_bytes(c.address(copy),kept.data()+offset,stride),"Private settings row is unavailable.");
+                } else kept.insert(kept.end(),old.begin()+i*stride,old.begin()+(i+1)*stride);
+            }
+            if(kept!=old)c.array(value,kept,static_cast<unsigned>(kept.size()/stride));
             return false; // Removed an individual row, not its enclosing list.
         }
         bool remove=false;
@@ -1038,19 +1051,12 @@ void official_setup(const Context& c) {
     }
     if(!one_up::native_setup_active() && !game_mode) {
         restore_official(c);
-        s.mode_setup_seen_at=0;
         s.setup_open.store(false); return;
     }
     if(s.reset_setup.exchange(false))s.seconds=20;
+    // A new placement brings a new native setup: dressed afresh, not with the last one's copies.
+    if(const auto serial=one_up::flag_placement_serial();serial!=s.official_serial) {restore_official(c);s.official_serial=serial;}
     s.setup_open.store(true);
-    // A game mode's setup gone for a moment without its flag placement starting: it was backed out of.
-    if(game_mode) {
-        const auto now=GetTickCount64();
-        if(!s.mode_setup_seen_at)s.mode_setup_seen_at=now;
-        else if(now>s.mode_setup_seen_at+1500 && one_up::back_out_of_mode_setup()) {
-            s.mode_setup_seen_at=0;restore_official(c);s.setup_open.store(false);return;
-        }
-    } else s.mode_setup_seen_at=0;
     for(const auto& root:c.roots({panel_schema.hash})) {
         if(root.model.handle==s.panel.handle)continue;
         const auto header_slot=c.field(root.model,0xc0f1b449);
@@ -1106,28 +1112,16 @@ void official_setup(const Context& c) {
             auto current=read<Widget>(c.address(slot));
             if(current.data.handle!=copy.handle) {current.data={0,copy.handle};c.set(slot,current);}
         }
-        if(game_mode)s.mode_setup_seen_at=GetTickCount64();
         plain_label(c,title,game_mode?mode_title:std::string("1-UP"));
         if(game_mode) {
             // A game mode keeps the panel's own mark, the native Confirm and its flag placement.
             for(const auto notice:ui_models(c,c.field(root.model,0x43967ece),notice_schema.hash))
                 plain_label(c,c.field(notice,0x94703efc),mode_line);
-            // Its advanced-settings button is GAME SETTINGS: the page's own Back (skate. ignores a
-            // navigation to Throwdowns from here), after which the Throwdowns menu shows the game's
-            // settings (modes_card.cpp: play area, time, route) instead of the stock customizing.
+            // Its advanced-settings button is GAME SETTINGS: skate.'s own customize screen, which
+            // shows the game's settings (customize_page) instead of Spot Battle's.
             for(const auto b:ui_models(c,c.field(root.model,0xbfc64535),button.hash)) {
                 const auto action=c.path(b,{0x0fb0d794,0xa704272a,0xc52416ef,0xa704272a,0xa2b71c93});
-                if(c.text(c.field(action,0xb1e14cd6))!="AdvancedParameters")continue;
-                std::optional<Value> page_back;
-                const auto pages=c.roots({page.hash});
-                for(const auto& page_root:pages) try {
-                    const auto panels=ui_models(c,c.field(page_root.model,content),panel_schema.hash);
-                    if(std::any_of(panels.begin(),panels.end(),[&](Value p){return p.handle==root.model.handle;})) {page_back=back(c,page_root.model);break;}
-                } catch(const std::exception&) {}
-                if(!page_back && pages.size()==1)page_back=back(c,pages.front().model); // the one page up
-                if(!page_back || page_back->type!=action.type)continue; // left as the stock button
-                c.copy(action,c.address(*page_back));
-                plain_label(c,c.field(b,0x58c9d354),"GAME SETTINGS");
+                if(c.text(c.field(action,0xb1e14cd6))=="AdvancedParameters")plain_label(c,c.field(b,0x58c9d354),"GAME SETTINGS");
             }
             continue;
         }
@@ -1205,6 +1199,186 @@ void official_setup(const Context& c) {
             c.text(c.field(action,0xb1e14cd6),"ThrowdownerExit");
             const auto label=c.field(b,0x58c9d354);plain_label(c,label,"BACK");
         }
+    }
+}
+// skate.'s customize screen (AdvancedParameters), opened by GAME SETTINGS in a game mode's setup:
+// its list shows the game's settings instead of Spot Battle's. Each row is a private copy of one of
+// the screen's own rows (its header, or a setting with a left/right selector), so they look and
+// move like the stock ones: a header with the mode's name, then the players, play area and time
+// selectors and the placing rows (route, spots, a custom area). A selector's change is sent as the
+// game's own command; a placing row's "Place now" closes the menus and starts placing.
+constexpr Schema customize_list_schema{0x48455d84,464}, customize_header_schema{0x615cf871,144};
+constexpr std::uint32_t customize_items=0x345b75b1;
+Value customize_setting(const Context& c,Value tile) {
+    const auto ref=read<Ref>(c.address(c.path(tile,{0x0fb0d794,0xa704272a,0xc52416ef,0x0abf7c31})));
+    const auto model=reference(c,ref);
+    return model.type && read<std::uint32_t>(read<Address>(model.type))==setting_schema.hash?model:Value{};
+}
+// One row: a header (`choices` empty), or a selector with its choices and the command each sends
+// ("place:<what>" closes the menus and starts placing that).
+struct CustomizeSpec { std::string id, title; std::vector<std::string> choices, commands; unsigned selected{}; };
+std::vector<CustomizeSpec> customize_specs(const overlay::ModesMenu& m,modes::Mode mode) {
+    std::vector<CustomizeSpec> out;
+    out.push_back({"header",upper_text(std::string(modes::mode_name(mode)))});
+    const bool race=mode==modes::Mode::race, spots=mode==modes::Mode::domination;
+    if(!race) {
+        // A circle round the start (its radius; shown across), or the whole map.
+        static constexpr float small_sizes[]{15,25,40,75}, wide_sizes[]{50,100,200,400};
+        CustomizeSpec area{"area","Play Area"};
+        unsigned at=4;
+        const auto add=[&](float radius) {
+            if(std::abs(radius-m.area_radius)<.5f)at=static_cast<unsigned>(area.choices.size());
+            area.choices.push_back(std::format("{:.0f} m",radius*2));area.commands.push_back(std::format("circle {:.0f}",radius));
+        };
+        if(modes::tag_like(mode))for(const auto r:wide_sizes)add(r);else for(const auto r:small_sizes)add(r);
+        if(m.area_radius>0 && at==4) { // a size placed by hand
+            at=static_cast<unsigned>(area.choices.size());
+            area.choices.push_back(std::format("{:.0f} m",m.area_radius*2));area.commands.push_back(std::format("circle {:.0f}",m.area_radius));
+        }
+        if(m.area_radius<=0)at=static_cast<unsigned>(area.choices.size());
+        area.choices.push_back(m.corners>=3 && m.area_radius<=0?std::format("{} corners",m.corners):std::string("Whole map"));
+        area.commands.push_back(m.corners>=3 && m.area_radius<=0?std::string():std::string("corner clear"));
+        area.selected=at;out.push_back(std::move(area));
+    }
+    {
+        // Most players (2 to the most a game holds; a ReSkate lobby holds 32).
+        CustomizeSpec players{"players","Players"};
+        for(unsigned n=2;n<=modes::max_players;++n) {
+            if(n==m.capacity)players.selected=static_cast<unsigned>(players.choices.size());
+            players.choices.push_back(std::to_string(n));players.commands.push_back(std::format("players {}",n));
+        }
+        out.push_back(std::move(players));
+    }
+    if(modes::timed(mode)) {
+        static constexpr std::uint32_t times[]{60,120,180,300,600};
+        CustomizeSpec time{"time","Time"};
+        for(const auto t:times) {
+            if(t==m.duration)time.selected=static_cast<unsigned>(time.choices.size());
+            time.choices.push_back(std::format("{}:{:02}",t/60,t%60));time.commands.push_back(std::format("time {}",t));
+        }
+        out.push_back(std::move(time));
+    }
+    // Placing rows: moving to "Place now" closes the menus and starts placing.
+    const auto placing=[&](std::string id,std::string title,std::string now,std::string what) {
+        out.push_back({std::move(id),std::move(title),{std::move(now),"Place now"},{"","place:"+what},0});
+    };
+    if(race)placing("route","Checkpoints & Finish",m.points<2?std::string("Not placed"):std::format("{} placed",m.points),"points");
+    if(spots)placing("spots","Spots",m.points?std::format("{} placed",m.points):std::string("Not placed"),"points");
+    if(!race)placing("circle","Custom Play Area",m.area_radius>0?std::format("{:.0f} m",m.area_radius*2):std::string("Not set"),"circle");
+    return out;
+}
+void mode_customize(const Context& c,std::vector<std::string>& commands) {
+    auto& s=state();
+    const auto m=modes::menu_view();
+    const auto mode=modes::parse_mode(m.mode);
+    if(!one_up::flag_for_mode() || !one_up::flag_placement_active() || !m.in_game || !m.leading || m.phase>1 || !mode) {s.customizes.clear();return;}
+    std::erase_if(s.customizes,[&](const auto& entry){return c.type_of(entry.first)!=c.type(customize_list_schema);}); // screens closed
+    for(const auto& root:c.roots({customize_list_schema.hash})) try {
+        {
+            const auto list=root.model;
+            const auto entries=c.field(list,customize_items);
+            unsigned shown_count{},shown_stride{};c.array(entries,256,shown_count,shown_stride);
+            if(const auto known=s.customizes.find(list.handle);known!=s.customizes.end() && shown_count==known->second.rows.size()) {
+                auto& k=known->second;
+                // Our rows: a selector moved sends its command once.
+                for(auto& r:k.rows) {
+                    if(!r.selector.handle || c.type_of(r.selector.handle)!=r.selector.type)continue;
+                    // The choice made is the selected choice's handle (the list's index stays where we
+                    // put it, and its label follows the index: kept in step here).
+                    const auto list_model=c.field(r.selector,0x760fc12b);
+                    const auto chosen=std::find(r.choices.begin(),r.choices.end(),read<Handle>(c.address(c.field(list_model,0x783c4b49))));
+                    if(chosen==r.choices.end())continue;
+                    const int index=static_cast<int>(chosen-r.choices.begin());
+                    if(read<int>(c.address(c.field(list_model,0x55511280)))!=index)c.set(c.field(list_model,0x55511280),index);
+                    if(index<0 || static_cast<std::size_t>(index)>=r.commands.size() || index==r.applied)continue;
+                    logging::log(logging::Level::info,logging::Channel::ui,"Game mode customize: {} -> {}.",r.id,r.commands[index]);
+                    r.applied=index;
+                    const auto& command=r.commands[index];
+                    if(command.starts_with("place:")) {
+                        // The setup's flag placement ends, the menus close (as Throwdowns' own exit) and
+                        // placing starts in the world.
+                        one_up::back_out_of_mode_setup();
+                        commands.push_back("place "+command.substr(6));
+                        commands.push_back("nav ThrowdownerExit");
+                    } else if(!command.empty())commands.push_back(command);
+                }
+                continue;
+            }
+            // A stock customize list: find its header and selector rows to copy.
+            unsigned count{},stride{};c.array(entries,256,count,stride);
+            if(count>32)continue; // another list of this kind (the customize list holds a few rows)
+            std::optional<Value> header_template,row_template;
+            for(unsigned i=0;i<count;++i) {
+                const auto item=c.element(entries,i);
+                const auto shown=reference(c,read<Widget>(c.address(c.field(item,widget))).data);
+                if(shown.type && read<std::uint32_t>(read<Address>(shown.type))==customize_header_schema.hash) {if(!header_template)header_template=item;}
+                else if(const auto setting=customize_setting(c,item);setting.handle && !row_template) {
+                    const auto selector=reference(c,read<Widget>(c.address(c.field(setting,content))).data);
+                    if(selector.type && read<std::uint32_t>(read<Address>(selector.type))==selector_schema.hash)row_template=item;
+                }
+            }
+            if(!header_template || !row_template) {
+                static std::uint64_t next_report{};
+                if(GetTickCount64()>=next_report) {next_report=GetTickCount64()+10000;
+                    logging::log(logging::Level::info,logging::Channel::ui,"Game mode customize: a list of {} without header/selector rows.",count);}
+                continue;
+            }
+            const auto template_setting=customize_setting(c,*row_template);
+            Customize built;built.list=list.handle;
+            std::vector<std::byte> bytes;
+            for(auto& spec:customize_specs(m,*mode)) {
+                const bool header=spec.choices.empty();
+                const auto& from=header?*header_template:*row_template;
+                const auto tile=make(c,content_tile_schema,from.type);c.copy(tile,c.address(from));
+                CustomizeRow row{spec.id};
+                if(header) {
+                    const auto source=reference(c,read<Widget>(c.address(c.field(from,widget))).data);
+                    const auto model=make(c,customize_header_schema,source.type);c.copy(model,c.address(source));
+                    plain_label(c,c.field(model,0x1c1d36ea),spec.title);
+                    auto shown=read<Widget>(c.address(c.field(tile,widget)));shown.data={0,model.handle};c.set(c.field(tile,widget),shown);
+                } else {
+                    const auto setting=make(c,setting_schema,template_setting.type);c.copy(setting,c.address(template_setting));
+                    plain_label(c,c.field(setting,0x58c9d354),spec.title);
+                    // The selector is ours (skate.'s Throwdown timer selector, as 1-Up's settings): the
+                    // stock one's choices are values bound to Spot Battle's rules. Each choice is a
+                    // label styled as the row's own.
+                    const auto selector=record_model(c,"TD_HostParameters_ContentResource/TD_Timer_BasicSelector",selector_schema);
+                    for(const auto field:{0x4256fd65U,0x85b8c3e6U,0xe88c0f54U})clear_value(c,c.field(selector,field));
+                    c.set(c.field(selector,0xeb92bf1c),Ref{});
+                    for(const auto field:{0x41b10c27U,0xd637e1f4U})c.set(c.field(selector,field),Address{});
+                    const auto choices=c.field(selector,0x760fc12b);c.set(c.field(choices,0x340cfb95),Address{});
+                    const auto row_label=c.field(template_setting,0x58c9d354);
+                    std::vector<Handle> handles;
+                    for(const auto& text:spec.choices) {
+                        const auto choice=make(c,selector_item_schema),label=make(c,label_schema);
+                        c.copy(label,c.address(row_label));
+                        plain_label(c,label,text);
+                        c.text(c.field(choice,0x58c9d354),text);c.set(c.field(choice,0x34c8bcc2),Ref{0,label.handle});
+                        handles.push_back(choice.handle);
+                    }
+                    const auto selected=std::min<unsigned>(spec.selected,static_cast<unsigned>(handles.size()-1));
+                    c.array(c.field(choices,rows_field),std::vector<Ref>{});c.array(c.field(choices,0xf2c90867),handles);
+                    c.set(c.field(choices,0x55511280),static_cast<int>(selected));c.set(c.field(choices,0x783c4b49),handles[selected]);
+                    c.set(c.field(selector,0x369babfe),true);
+                    auto control=read<Widget>(c.address(c.field(setting,content)));control.data={0,selector.handle};c.set(c.field(setting,content),control);
+                    c.set(c.path(tile,{0x0fb0d794,0xa704272a,0xc52416ef,0x0abf7c31}),Ref{0,setting.handle});
+                    auto shown=read<Widget>(c.address(c.field(tile,widget)));shown.data={0,setting.handle};c.set(c.field(tile,widget),shown);
+                    const auto action=c.path(tile,{0x0fb0d794,0xa704272a,0xc52416ef,0xa704272a,0xa2b71c93});
+                    c.text(c.field(action,0xb1e14cd6),"");
+                    row.selector=selector;row.choices=handles;row.commands=spec.commands;row.applied=static_cast<int>(selected);
+                }
+                const auto at=bytes.size();bytes.resize(at+stride);
+                require(memory::peek_bytes(c.address(tile),bytes.data()+at,stride),"Customize row copy is unavailable.");
+                built.rows.push_back(std::move(row));
+            }
+            c.array(entries,bytes,static_cast<unsigned>(bytes.size()/stride));
+            logging::log(logging::Level::info,logging::Channel::ui,"Game mode customize: {} rows for {}.",built.rows.size(),m.mode);
+            s.customizes[list.handle]=std::move(built);
+        }
+    } catch(const std::exception& e) {
+        // One list that is not the customize screen's must not stop the search.
+        static std::uint64_t next_report{};
+        if(GetTickCount64()>=next_report) {next_report=GetTickCount64()+10000;logging::log(logging::Level::info,logging::Channel::ui,"Game mode customize: skipped a list ({}).",e.what());}
     }
 }
 void stock_solo_controls(const Context& c) {
@@ -2055,6 +2229,7 @@ bool open_native_one_up_setup() noexcept {
         return true;
     } catch(...) { return false; }
 }
+bool native_mode_customize_open() noexcept { return !state().customizes.empty(); }
 bool native_one_up_setup_open() noexcept { return state().setup_open.load(std::memory_order_acquire); }
 std::uint64_t native_one_up_card() noexcept { return state().card.handle; }
 bool native_one_up_hud_ready() noexcept { return state().hud_ready.load(std::memory_order_acquire); }
@@ -2119,6 +2294,8 @@ void tick_native_one_up_menu(std::uintptr_t base,bool loading) noexcept {
             // Native navigation retires the card page before setup mounts.
             // Continue adapting the independent native panel in that interval.
             official_setup(c);
+            try { mode_customize(c,mode_commands); }
+            catch(const std::exception& e) { s.customizes.clear(); logging::log(logging::Level::warning,logging::Channel::ui,"Game mode customize: {}",e.what()); }
             stock_solo_controls(c);
             std::vector<Action> pending;
             {std::lock_guard pending_lock(s.mutex);pending=std::exchange(s.pending,{});}

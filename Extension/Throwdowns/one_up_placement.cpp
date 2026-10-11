@@ -7,6 +7,7 @@
 #include "Engine/Core/Log/logging.h"
 #include <Windows.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <mutex>
 #include <optional>
@@ -44,9 +45,11 @@ void reset(Placement& p) {
     p.show_setup=p.native_entry=false;
     p.for_mode=false; p.mode_game=0; p.open_menu=false; p.menu_opened_at=0;
 }
+std::atomic<std::uint64_t> placement_serial{}; // flag placements begun (flag_placement_serial)
 void open_native_setup(Placement& p,const SetupRequest& request,std::uint64_t now) {
     reset(p); p.pending_setup.reset();
     p.step=Step::open; p.show_setup=p.native_entry=true;
+    ++placement_serial;
     p.world=request.world; p.local=request.local;
     p.seconds=request.seconds; p.players=request.players;
     p.changed=now; p.until=now+10000;
@@ -81,6 +84,7 @@ bool begin_flag_placement(unsigned seconds,unsigned players,bool show_native_set
     prepare_throwdown_injection(); // Prewarm cleanup before the player places the flag.
     return true;
 }
+std::uint64_t flag_placement_serial() noexcept { return placement_serial.load(); }
 bool begin_mode_flag_placement(bool open_menu) {
     const auto v=view();
     const auto game=modes::flag_game();
@@ -89,6 +93,7 @@ bool begin_mode_flag_placement(bool open_menu) {
     if(p.step!=Step::idle) return false;
     reset(p); p.step=Step::open; p.world=v.world; p.local=v.local;
     p.for_mode=true; p.mode_game=game; p.open_menu=open_menu;
+    ++placement_serial;
     // The stock two steps, as 1-Up's card: the setup (dressed as the mode) and its Confirm, then the flag.
     p.show_setup=true;
     p.reopen_until=p.reopen_at=0;
@@ -100,7 +105,8 @@ bool begin_mode_flag_placement(bool open_menu) {
 bool back_out_of_mode_setup() noexcept {
     auto& p=placement(); std::lock_guard lock(p.mutex);
     if(!p.for_mode || p.step!=Step::setup || !p.setup_seen) return false;
-    // Already navigated away: cleanup only removes what the setup registered, sending no exit.
+    // The menus moved on already (or close by the caller's navigation): cleanup only removes what
+    // the setup registered, sending no exit.
     p.exited=true; p.cancelling=true; p.step=Step::cleanup; p.changed=GetTickCount64(); p.until=p.changed+15000;
     logging::write(logging::Level::info,logging::Channel::ui,"Game mode flag: setup left without Confirm; placement ended.");
     return true;
@@ -170,6 +176,8 @@ void observe_flag_graph(std::uint32_t graph) noexcept {
     if(graph==0x0f131312 && p.step==Step::setup) { // Spot Battle setup OnBegin
         p.setup_seen=true; p.until=GetTickCount64()+300000;
     }
+    if(graph==0x0f131312 || graph==1867583346U)
+        logging::log(logging::Level::info,logging::Channel::ui,"Flag setup graph {} (step {}, mode {}).",graph==0x0f131312?"OnBegin":"OnEnd",static_cast<int>(p.step),p.for_mode);
     if(graph==1867583346U && p.step==Step::setup && p.setup_seen) { // Same setup OnEnd
         // Back and Confirm both leave this native state. Stop adapting its UI
         // immediately; a successful Confirm enters the flag update below.

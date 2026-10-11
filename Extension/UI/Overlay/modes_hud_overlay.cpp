@@ -22,6 +22,11 @@ std::atomic<unsigned> native_parts{};
 std::atomic<std::uint64_t> native_said{};
 }
 void set_modes_hud_feed(ModesHudFeed feed) noexcept { modes_hud_feed.store(feed); }
+namespace {
+std::atomic<std::uint64_t> throwdown_menu_said{};
+bool throwdown_menu_open() noexcept { return GetTickCount64() - throwdown_menu_said.load() < 500; }
+}
+void set_native_throwdown_menu(bool open) noexcept { throwdown_menu_said.store(open ? GetTickCount64() : 0); }
 void set_native_modes_hud(NativeModesHud parts) noexcept {
     native_parts.store((parts.score ? 1u : 0u) | (parts.countdown ? 2u : 0u) | (parts.results ? 4u : 0u));
     native_said.store(GetTickCount64());
@@ -422,8 +427,19 @@ void spaced_text(ImDrawList *draw, ImFont *font, float size, float x, float y, I
     }
 }
 
-// A D-pad as the game draws its prompts, the direction to press lit.
+// A D-pad as the game draws its prompts, the direction to press lit; 'W' the shoulder buttons
+// (LB and RB) instead, as two small pills.
 void dpad_glyph(ImDrawList *draw, ImVec2 c, float size, char lit) {
+    if (lit == 'W') {
+        auto *font = ImGui::GetFont();
+        const float w = size * 0.62f, h = size * 0.42f, text = size * 0.34f;
+        for (const auto &[x, name] : {std::pair{c.x - w * 0.55f, "LB"}, std::pair{c.x + w * 0.55f, "RB"}}) {
+            draw->AddRectFilled(ImVec2(x - w * 0.5f, c.y - h * 0.5f), ImVec2(x + w * 0.5f, c.y + h * 0.5f), IM_COL32(255, 255, 255, 235), h * 0.5f);
+            const auto extent = font->CalcTextSizeA(text, FLT_MAX, 0.0f, name);
+            draw->AddText(font, text, ImVec2(x - extent.x * 0.5f, c.y - extent.y * 0.5f), IM_COL32(20, 20, 24, 255), name);
+        }
+        return;
+    }
     const float arm = size * 0.5f, thick = size * 0.34f;
     const ImU32 base = IM_COL32(255, 255, 255, 90), on = IM_COL32(255, 255, 255, 255);
     draw->AddRectFilled(ImVec2(c.x - thick * 0.5f, c.y - arm), ImVec2(c.x + thick * 0.5f, c.y + arm), base, thick * 0.25f);
@@ -1680,8 +1696,11 @@ void draw_modes_hud() {
     const float scale = std::clamp(display.y / 1080.0f, 0.8f, 2.0f);
     auto *draw = ImGui::GetBackgroundDrawList();
     // Other players' games show whether or not the player is in one.
-    draw_offers(draw, h.hud, scale);
-    draw_invite(draw, h.hud, scale);
+    const bool menu = throwdown_menu_open(); // a Throwdown menu has the screen's corners
+    if (!menu) {
+        draw_offers(draw, h.hud, scale);
+        draw_invite(draw, h.hud, scale);
+    }
     if (!h.hud.active) return;
     const auto native = native_modes_hud();
     world_dim = native.countdown ? 0.3f : 1.0f;
@@ -1697,7 +1716,7 @@ void draw_modes_hud() {
         if (!native.results) draw_results(draw, h.hud, scale);
         return;
     }
-    draw_panel(draw, h, scale, native.score);
+    if (!menu) draw_panel(draw, h, scale, native.score);
     draw_centre(draw, h, scale, native.countdown || native.score);
     draw_trick_diagram(draw, h.hud, scale);
     if (h.hud.placing && h.hud.aiming) {
