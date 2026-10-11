@@ -1339,14 +1339,13 @@ void mode_customize(const Context& c,std::vector<std::string>& commands) {
                 // Our rows: a selector moved sends its command once.
                 for(auto& r:k.rows) {
                     if(!r.selector.handle || c.type_of(r.selector.handle)!=r.selector.type)continue;
-                    // The choice made is the selected choice's handle (the list's index stays where we
-                    // put it, and its label follows the index: kept in step here).
+                    // The choice made: the list's own current index, as the native widget moves it
+                    // on every scroll. (Reading its "selected choice" handle instead and syncing the
+                    // index to match it fought the player's own scroll: the handle lags a tick behind
+                    // the index, so every poll reset the index right back before it could commit.)
                     const auto list_model=c.field(r.selector,0x760fc12b);
-                    const auto chosen=std::find(r.choices.begin(),r.choices.end(),read<Handle>(c.address(c.field(list_model,0x783c4b49))));
-                    if(chosen==r.choices.end())continue;
-                    const int index=static_cast<int>(chosen-r.choices.begin());
-                    if(read<int>(c.address(c.field(list_model,0x55511280)))!=index)c.set(c.field(list_model,0x55511280),index);
-                    if(index<0 || static_cast<std::size_t>(index)>=r.commands.size() || index==r.applied)continue;
+                    const int index=read<int>(c.address(c.field(list_model,0x55511280)));
+                    if(index<0 || static_cast<std::size_t>(index)>=r.choices.size() || static_cast<std::size_t>(index)>=r.commands.size() || index==r.applied)continue;
                     logging::log(logging::Level::info,logging::Channel::ui,"Game mode customize: {} -> {}.",r.id,r.commands[index]);
                     r.applied=index;
                     const auto& command=r.commands[index];
